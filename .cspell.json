@@ -69,7 +69,8 @@
     "pipefail",
     "slsa",
     "sigstore",
-    "nindent"
+    "nindent",
+    "LFID"
   ],
   "overrides": [
     {

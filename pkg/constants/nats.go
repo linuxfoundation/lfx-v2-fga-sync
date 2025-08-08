@@ -22,6 +22,22 @@ const (
 	// ProjectDeleteAllAccessSubject is the subject for the project access control deletion.
 	// The subject is of the form: lfx.delete_all_access.project
 	ProjectDeleteAllAccessSubject = "lfx.delete_all_access.project"
+
+	// MeetingUpdateAccessSubject is the subject for the meeting access control updates.
+	// The subject is of the form: lfx.update_access.meeting
+	MeetingUpdateAccessSubject = "lfx.update_access.meeting"
+
+	// MeetingDeleteAllAccessSubject is the subject for the meeting access control deletion.
+	// The subject is of the form: lfx.delete_all_access.meeting
+	MeetingDeleteAllAccessSubject = "lfx.delete_all_access.meeting"
+
+	// MeetingRegistrantPutSubject is the subject for adding meeting registrants.
+	// The subject is of the form: lfx.put_registrant.meeting
+	MeetingRegistrantPutSubject = "lfx.put_registrant.meeting"
+
+	// MeetingRegistrantRemoveSubject is the subject for removing meeting registrants.
+	// The subject is of the form: lfx.remove_registrant.meeting
+	MeetingRegistrantRemoveSubject = "lfx.remove_registrant.meeting"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.

@@ -95,6 +95,15 @@ func (s FgaService) TupleKey(user, relation, object string) ClientTupleKey {
 	}
 }
 
+// TupleKeyWithoutCondition abstracts the creation of a ClientTupleKeyWithoutCondition for our handler functions.
+func (s FgaService) TupleKeyWithoutCondition(user, relation, object string) ClientTupleKeyWithoutCondition {
+	return ClientTupleKeyWithoutCondition{
+		User:     user,
+		Relation: relation,
+		Object:   object,
+	}
+}
+
 // ReadObjectTuples is a pagination helper to fetch all direct relationships (_no_
 // transitive evaluations) defined against a given object.
 func (s FgaService) ReadObjectTuples(ctx context.Context, object string) ([]openfga.Tuple, error) {
@@ -185,11 +194,7 @@ func (s FgaService) SyncObjectTuples(
 				"relation", tuple.Key.Relation,
 				"object", object,
 			).DebugContext(ctx, "will delete relation in batch write")
-			deletes = append(deletes, ClientTupleKeyWithoutCondition{
-				User:     tuple.Key.User,
-				Relation: tuple.Key.Relation,
-				Object:   object,
-			})
+			deletes = append(deletes, s.TupleKeyWithoutCondition(tuple.Key.User, tuple.Key.Relation, object))
 		}
 	}
 
@@ -234,24 +239,106 @@ func (s FgaService) SyncObjectTuples(
 		return writes, deletes, nil
 	}
 
+	// Use the shared write and delete function
+	err = s.WriteAndDeleteTuples(ctx, writes, deletes)
+	if err != nil {
+		return writes, deletes, err
+	}
+
+	return writes, deletes, nil
+}
+
+// invalidateCache invalidates the cache by writing a timestamp marker.
+// Any value will work, since it is the native timestamp of the record that is checked, not its value.
+func (s FgaService) invalidateCache(ctx context.Context) error {
+	_, err := s.cacheBucket.Put(ctx, "inv", []byte("1"))
+	if err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+		return err
+	}
+	return nil
+}
+
+// WriteAndDeleteTuples writes and/or deletes the given tuples to/from OpenFGA.
+// This is a general-purpose method for modifying tuples without reading existing state.
+func (s FgaService) WriteAndDeleteTuples(
+	ctx context.Context,
+	writes []ClientTupleKey,
+	deletes []ClientTupleKeyWithoutCondition,
+) error {
+	// Return early if there's nothing to do
+	if len(writes) == 0 && len(deletes) == 0 {
+		return nil
+	}
+
 	req := ClientWriteRequest{
 		Writes:  writes,
 		Deletes: deletes,
 	}
 
-	_, err = s.client.Write(ctx, req)
+	_, err := s.client.Write(ctx, req)
 	if err != nil {
-		return writes, deletes, err
+		return err
 	}
 
-	// Invalidate caches. Any value will work, since it is the native timestamp
-	// of the record that is checked, not its value.
-	_, err = s.cacheBucket.Put(ctx, "inv", []byte("1"))
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+	// Invalidate cache after write
+	if err := s.invalidateCache(ctx); err != nil {
+		// Log but don't fail the operation since the write succeeded
+		logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
 	}
 
-	return writes, deletes, nil
+	logger.With(
+		"writes_count", len(writes),
+		"deletes_count", len(deletes),
+		"writes", writes,
+		"deletes", deletes,
+	).InfoContext(ctx, "wrote and deleted tuples")
+
+	return nil
+}
+
+// WriteTuples writes the given tuples to OpenFGA without reading or comparing existing tuples.
+// This is useful for adding specific relations without affecting other relations on the object.
+func (s FgaService) WriteTuples(ctx context.Context, tuples []ClientTupleKey) error {
+	return s.WriteAndDeleteTuples(ctx, tuples, nil)
+}
+
+// DeleteTuples deletes the given tuples from OpenFGA without reading or comparing existing tuples.
+// This is useful for removing specific relations without affecting other relations on the object.
+func (s FgaService) DeleteTuples(ctx context.Context, tuples []ClientTupleKeyWithoutCondition) error {
+	return s.WriteAndDeleteTuples(ctx, nil, tuples)
+}
+
+// WriteTuple writes a single tuple to OpenFGA using simple string parameters.
+// This provides a cleaner API for handlers that don't need to know about OpenFGA types.
+func (s FgaService) WriteTuple(ctx context.Context, user, relation, object string) error {
+	tuple := s.TupleKey(user, relation, object)
+	return s.WriteTuples(ctx, []ClientTupleKey{tuple})
+}
+
+// DeleteTuple deletes a single tuple from OpenFGA using simple string parameters.
+// This provides a cleaner API for handlers that don't need to know about OpenFGA types.
+func (s FgaService) DeleteTuple(ctx context.Context, user, relation, object string) error {
+	tuple := s.TupleKeyWithoutCondition(user, relation, object)
+	return s.DeleteTuples(ctx, []ClientTupleKeyWithoutCondition{tuple})
+}
+
+// GetTuplesByRelation returns tuples for a specific object filtered by relation.
+// This provides a generic way to retrieve tuples with a specific relation from an object.
+func (s FgaService) GetTuplesByRelation(ctx context.Context, object, relation string) ([]openfga.Tuple, error) {
+	allTuples, err := s.ReadObjectTuples(ctx, object)
+	if err != nil {
+		return nil, err
+	}
+
+	var filteredTuples []openfga.Tuple
+	for _, tuple := range allTuples {
+		if tuple.Key.Relation == relation {
+			filteredTuples = append(filteredTuples, tuple)
+		}
+	}
+
+	return filteredTuples, nil
 }
 
 func (s FgaService) getLastCacheInvalidation(ctx context.Context) (time.Time, error) {

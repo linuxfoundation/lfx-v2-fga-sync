@@ -264,51 +264,87 @@ func createHTTPHandlers() {
 	})
 }
 
+// HandlerFunc defines a message handler function type.
+type HandlerFunc func(INatsMsg) error
+
+// subscriptionConfig defines a NATS subscription configuration.
+type subscriptionConfig struct {
+	subject     string
+	handler     HandlerFunc
+	description string
+}
+
+// subscribeToSubject subscribes to a single NATS subject with error handling and logging.
+func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
+	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
+		if errHandler := handler(&NatsMsg{msg}); errHandler != nil {
+			logger.Error("error handling "+description+" request",
+				errKey, errHandler,
+				"subject", subject,
+				"queue", queue,
+			)
+		}
+	}); err != nil {
+		logger.With(
+			errKey, err,
+			"subject", subject,
+			"queue", queue,
+		).Error("error subscribing to NATS subject")
+		return err
+	}
+	logger.With("subject", subject).Info("subscribed to NATS subject")
+	return nil
+}
+
 // createQueueSubscriptions creates queue subscriptions for the NATS subjects.
-func createQueueSubscriptions(handlerService HandlerService) (err error) {
+func createQueueSubscriptions(handlerService HandlerService) error {
 	queue := constants.FgaSyncQueue
 
-	if _, err = natsConn.QueueSubscribe(constants.AccessCheckSubject, queue, func(msg *nats.Msg) {
-		errHandler := handlerService.accessCheckHandler(&NatsMsg{msg})
-		if errHandler != nil {
-			logger.With(errKey, errHandler).Error("error handling access check request")
-		}
-	}); err != nil {
-		logger.With(
-			errKey, err,
-			"subject", constants.AccessCheckSubject,
-		).Error("error subscribing to NATS subject")
-		return err
+	// Define all subscriptions in a slice for easy maintenance
+	subscriptions := []subscriptionConfig{
+		{
+			subject:     constants.AccessCheckSubject,
+			handler:     handlerService.accessCheckHandler,
+			description: "access check",
+		},
+		{
+			subject:     constants.ProjectUpdateAccessSubject,
+			handler:     handlerService.projectUpdateAccessHandler,
+			description: "project update access",
+		},
+		{
+			subject:     constants.ProjectDeleteAllAccessSubject,
+			handler:     handlerService.projectDeleteAllAccessHandler,
+			description: "project delete all access",
+		},
+		{
+			subject:     constants.MeetingUpdateAccessSubject,
+			handler:     handlerService.meetingUpdateAccessHandler,
+			description: "meeting update access",
+		},
+		{
+			subject:     constants.MeetingDeleteAllAccessSubject,
+			handler:     handlerService.meetingDeleteAllAccessHandler,
+			description: "meeting delete all access",
+		},
+		{
+			subject:     constants.MeetingRegistrantPutSubject,
+			handler:     handlerService.meetingRegistrantPutHandler,
+			description: "meeting registrant put",
+		},
+		{
+			subject:     constants.MeetingRegistrantRemoveSubject,
+			handler:     handlerService.meetingRegistrantRemoveHandler,
+			description: "meeting registrant remove",
+		},
 	}
-	logger.With("subject", constants.AccessCheckSubject).Info("subscribed to NATS subject")
 
-	if _, err = natsConn.QueueSubscribe(constants.ProjectUpdateAccessSubject, queue, func(msg *nats.Msg) {
-		errHandler := handlerService.projectUpdateAccessHandler(&NatsMsg{msg})
-		if errHandler != nil {
-			logger.With(errKey, errHandler).Error("error handling project update access request")
+	// Subscribe to each subject using the helper function
+	for _, config := range subscriptions {
+		if err := subscribeToSubject(config.subject, config.description, queue, config.handler); err != nil {
+			return err
 		}
-	}); err != nil {
-		logger.With(
-			errKey, err,
-			"subject", constants.ProjectUpdateAccessSubject,
-		).Error("error subscribing to NATS subject")
-		return err
 	}
-	logger.With("subject", constants.ProjectUpdateAccessSubject).Info("subscribed to NATS subject")
-
-	if _, err = natsConn.QueueSubscribe(constants.ProjectDeleteAllAccessSubject, queue, func(msg *nats.Msg) {
-		errHandler := handlerService.projectDeleteAllAccessHandler(&NatsMsg{msg})
-		if errHandler != nil {
-			logger.With(errKey, errHandler).Error("error handling project delete all access request")
-		}
-	}); err != nil {
-		logger.With(
-			errKey, err,
-			"subject", constants.ProjectDeleteAllAccessSubject,
-		).Error("error subscribing to NATS subject")
-		return err
-	}
-	logger.With("subject", constants.ProjectDeleteAllAccessSubject).Info("subscribed to NATS subject")
 
 	return nil
 }

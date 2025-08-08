@@ -8,16 +8,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 )
 
 // TODO: update this payload schema to come from the project service
 // Ticket https://linuxfoundation.atlassian.net/browse/LFXV2-147
 type projectStub struct {
-	UID       string   `json:"uid"`
-	Public    bool     `json:"public"`
-	ParentUID string   `json:"parent_uid"`
-	Writers   []string `json:"writers"`
-	Auditors  []string `json:"auditors"`
+	UID                 string   `json:"uid"`
+	Public              bool     `json:"public"`
+	ParentUID           string   `json:"parent_uid"`
+	Writers             []string `json:"writers"`
+	Auditors            []string `json:"auditors"`
+	MeetingCoordinators []string `json:"meeting_coordinators"`
 }
 
 // projectUpdateAccessHandler handles project access control updates.
@@ -41,28 +44,37 @@ func (h *HandlerService) projectUpdateAccessHandler(message INatsMsg) error {
 		return errors.New("project ID not found")
 	}
 
-	object := "project:" + project.UID
+	object := constants.ObjectTypeProject + project.UID
 
 	// Build a list of tuples to sync.
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
 	// Convert the "public" attribute to a "user:*" relation.
 	if project.Public {
-		tuples = append(tuples, h.fgaService.TupleKey("user:*", "viewer", object))
+		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 	}
 
 	// Handle the parent relation.
 	if project.ParentUID != "" {
-		tuples = append(tuples, h.fgaService.TupleKey("project:"+project.ParentUID, "parent", object))
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(constants.ObjectTypeProject+project.ParentUID, constants.RelationParent, object),
+		)
 	}
 
 	// Add each principal from the object as the corresponding relationship tuple
 	// (as defined in the OpenFGA schema).
 	for _, principal := range project.Writers {
-		tuples = append(tuples, h.fgaService.TupleKey("user:"+principal, "writer", object))
+		tuples = append(tuples, h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationWriter, object))
 	}
 	for _, principal := range project.Auditors {
-		tuples = append(tuples, h.fgaService.TupleKey("user:"+principal, "auditor", object))
+		tuples = append(tuples, h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationAuditor, object))
+	}
+	for _, principal := range project.MeetingCoordinators {
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationMeetingCoordinator, object),
+		)
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
@@ -93,42 +105,5 @@ func (h *HandlerService) projectUpdateAccessHandler(message INatsMsg) error {
 
 // projectDeleteAllAccessHandler handles project access control deletions.
 func (h *HandlerService) projectDeleteAllAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
-
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling project access control delete all")
-
-	projectUID := string(message.Data())
-	if projectUID == "" {
-		logger.ErrorContext(ctx, "empty deletion payload")
-		return errors.New("empty deletion payload")
-	}
-	if projectUID[0] == '{' || projectUID[0] == '[' || projectUID[0] == '"' {
-		// This event payload is not supposed to be serialized.
-		logger.ErrorContext(ctx, "unsupported deletion payload")
-		return errors.New("unsupported deletion payload")
-	}
-
-	object := "project:" + projectUID
-
-	// Since this is a delete, we can call fgaSyncObjectRelationships directly
-	// with a zero-value (nil) slice.
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, nil)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	logger.With("object", object, "writes", tuplesWrites, "deletes", tuplesDeletes).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		logger.With("object", object).InfoContext(ctx, "sent project access control delete all response")
-	}
-
-	return nil
+	return h.processDeleteAllAccessMessage(message, constants.ObjectTypeProject, "project")
 }

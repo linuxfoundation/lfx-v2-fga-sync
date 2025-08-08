@@ -99,6 +99,46 @@ project-123
 
 Simple project UID string.
 
+### Meeting Update Message (`lfx.update_access.meeting`)
+
+```json
+{
+  "uid": "meeting-123",
+  "public": true,
+  "project_uid": "project-456",
+  "organizers": ["user1", "user2"],
+  "committees": ["committee1", "committee2"]
+}
+```
+
+### Meeting Delete Message (`lfx.delete_all_access.meeting`)
+
+```text
+meeting-123
+```
+
+Simple meeting UID string.
+
+### Meeting Registrant Put Message (`lfx.put_registrant.meeting`)
+
+```json
+{
+  "uid": "user-123",
+  "meeting_uid": "meeting-456",
+  "host": false
+}
+```
+
+### Meeting Registrant Remove Message (`lfx.remove_registrant.meeting`)
+
+```json
+{
+  "uid": "user-123",
+  "meeting_uid": "meeting-456",
+  "host": false
+}
+```
+
 ## Testing
 
 ### Running Tests
@@ -132,6 +172,19 @@ Each message type has a dedicated handler function:
 - `accessCheckHandler()` - Processes authorization queries with caching
 - `projectUpdateHandler()` - Manages project permission synchronization  
 - `projectDeleteHandler()` - Handles cleanup of project permissions
+- `meetingUpdateAccessHandler()` - Manages meeting permission synchronization
+- `meetingDeleteAllAccessHandler()` - Handles cleanup of meeting permissions
+- `meetingRegistrantAddHandler()` - Adds meeting registrants (participant/host)
+- `meetingRegistrantRemoveHandler()` - Removes meeting registrants
+
+### Service Abstraction
+
+**FgaService should remain generic and object-agnostic:**
+
+- FgaService should not contain business logic specific to projects, meetings, or other domain objects
+- It should only provide generic tuple management operations (read, write, delete, sync)
+- All business-specific logic should remain in the handlers
+- This maintains clean separation of concerns and reusability
 
 ### Cache Strategy
 

@@ -27,11 +27,12 @@ func TestProjectUpdateAccessHandler(t *testing.T) {
 		{
 			name: "valid project with all fields",
 			messageData: mustJSON(projectStub{
-				UID:       "test-project-123",
-				Public:    true,
-				ParentUID: "parent-project-456",
-				Writers:   []string{"user1", "user2"},
-				Auditors:  []string{"auditor1"},
+				UID:                 "test-project-123",
+				Public:              true,
+				ParentUID:           "parent-project-456",
+				Writers:             []string{"user1", "user2"},
+				Auditors:            []string{"auditor1"},
+				MeetingCoordinators: []string{"coordinator1", "coordinator2"},
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -47,8 +48,9 @@ func TestProjectUpdateAccessHandler(t *testing.T) {
 
 				// Mock the Write operation
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
-					// Verify the write request contains expected tuples
-					return len(req.Writes) == 5 && len(req.Deletes) == 0
+					// Verify the write request contains expected tuples:
+					// 1 public viewer + 1 parent + 2 writers + 1 auditor + 2 meeting coordinators = 7
+					return len(req.Writes) == 7 && len(req.Deletes) == 0
 				})).Return(&ClientWriteResponse{}, nil).Once()
 
 				// Mock cache operations
@@ -61,10 +63,11 @@ func TestProjectUpdateAccessHandler(t *testing.T) {
 		{
 			name: "private project without parent",
 			messageData: mustJSON(projectStub{
-				UID:      "private-project",
-				Public:   false,
-				Writers:  []string{"writer1"},
-				Auditors: []string{},
+				UID:                 "private-project",
+				Public:              false,
+				Writers:             []string{"writer1"},
+				Auditors:            []string{},
+				MeetingCoordinators: []string{},
 			}),
 			replySubject: "",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -89,6 +92,37 @@ func TestProjectUpdateAccessHandler(t *testing.T) {
 			},
 			expectedError:  false,
 			expectedCalled: false,
+		},
+		{
+			name: "project with meeting coordinators only",
+			messageData: mustJSON(projectStub{
+				UID:                 "coordinators-only",
+				Public:              false,
+				MeetingCoordinators: []string{"coord1", "coord2", "coord3"},
+			}),
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+
+				// Mock the Read operation
+				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "project:coordinators-only"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples:            []openfga.Tuple{},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// Mock the Write operation for 3 meeting coordinators
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 3 && len(req.Deletes) == 0
+				})).Return(&ClientWriteResponse{}, nil).Once()
+
+				// Mock cache operations
+				service.fgaService.cacheBucket.(*MockKeyValue).On("Put", mock.Anything, "inv", mock.Anything).Return(uint64(1), nil).Once()
+				service.fgaService.cacheBucket.(*MockKeyValue).On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+			},
+			expectedError:  false,
+			expectedCalled: true,
 		},
 		{
 			name: "public project with no users",

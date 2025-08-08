@@ -68,6 +68,12 @@ k8s-secrets.yml
 charts/*.tgz
 .helm/
 
+# Helm local values overrides
+values.local.yaml
+values.override.yaml
+charts/*/values.local.yaml
+charts/*/values.override.yaml
+
 # Log files
 *.log
 logs/

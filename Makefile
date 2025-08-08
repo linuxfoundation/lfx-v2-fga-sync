@@ -3,7 +3,7 @@
 
 # Application variables
 APP_NAME := lfx-v2-fga-sync
-APP_VERSION := 0.1.0
+APP_VERSION := latest
 
 # Docker variables
 DOCKER_REGISTRY := linuxfoundation
@@ -13,6 +13,7 @@ DOCKER_TAG := $(APP_VERSION)
 
 # Helm variables
 HELM_CHART_PATH=./charts/lfx-v2-fga-sync
+HELM_CHART_LOCAL_VALUES_PATH=./charts/lfx-v2-fga-sync/values.local.yaml
 HELM_RELEASE_NAME=lfx-v2-fga-sync
 HELM_NAMESPACE=lfx
 
@@ -124,6 +125,12 @@ helm-install:
 	helm upgrade --force --install $(HELM_RELEASE_NAME) $(HELM_CHART_PATH) --namespace $(HELM_NAMESPACE)
 	@echo "==> Helm chart installed: $(HELM_RELEASE_NAME)"
 
+# Install Helm chart
+helm-install-local:
+	@echo "==> Installing Helm chart..."
+	helm upgrade --force --install $(HELM_RELEASE_NAME) $(HELM_CHART_PATH) --namespace $(HELM_NAMESPACE) --values $(HELM_CHART_LOCAL_VALUES_PATH)
+	@echo "==> Helm chart installed: $(HELM_RELEASE_NAME)"
+
 # Print templates for Helm chart
 helm-templates:
 	@echo "==> Printing templates for Helm chart..."
@@ -173,6 +180,7 @@ help:
 	@echo "  docker-build   - Build Docker image"
 	@echo "  docker-push    - Push Docker image"
 	@echo "  helm-install   - Install Helm chart"
+	@echo "  helm-install-local - Install Helm chart with local values"
 	@echo "  helm-templates - Print Helm chart templates"
 	@echo "  helm-uninstall - Uninstall Helm chart"
 	@echo "  fmt            - Format code"
