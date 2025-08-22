@@ -27,11 +27,12 @@ const (
 	RelationMember = "member"
 
 	// Object type prefixes
-	ObjectTypeUser      = "user:"
-	ObjectTypeProject   = "project:"
-	ObjectTypeCommittee = "committee:"
-	ObjectTypeTeam      = "team:"
-	ObjectTypeMeeting   = "meeting:"
+	ObjectTypeUser            = "user:"
+	ObjectTypeProject         = "project:"
+	ObjectTypeCommittee       = "committee:"
+	ObjectTypeTeam            = "team:"
+	ObjectTypeMeeting         = "meeting:"
+	ObjectTypeGroupsIOService = "groupsio_service:"
 
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)

@@ -70,7 +70,8 @@
     "slsa",
     "sigstore",
     "nindent",
-    "LFID"
+    "LFID",
+    "groupsio"
   ],
   "overrides": [
     {
