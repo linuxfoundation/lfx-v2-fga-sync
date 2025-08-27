@@ -22,6 +22,9 @@ const (
 	RelationOrganizer   = "organizer"
 	RelationHost        = "host"
 	RelationParticipant = "participant"
+	RelationAttendee    = "attendee"
+	RelationInvitee     = "invitee"
+	RelationMeeting     = "meeting"
 
 	// Team relations
 	RelationMember = "member"
@@ -32,6 +35,7 @@ const (
 	ObjectTypeCommittee       = "committee:"
 	ObjectTypeTeam            = "team:"
 	ObjectTypeMeeting         = "meeting:"
+	ObjectTypePastMeeting     = "past_meeting:"
 	ObjectTypeGroupsIOService = "groupsio_service:"
 
 	// Special user identifiers

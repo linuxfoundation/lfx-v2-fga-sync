@@ -39,6 +39,22 @@ const (
 	// The subject is of the form: lfx.remove_registrant.meeting
 	MeetingRegistrantRemoveSubject = "lfx.remove_registrant.meeting"
 
+	// PastMeetingUpdateAccessSubject is the subject for the past meeting access control updates.
+	// The subject is of the form: lfx.update_access.past_meeting
+	PastMeetingUpdateAccessSubject = "lfx.update_access.past_meeting"
+
+	// PastMeetingDeleteAllAccessSubject is the subject for the past meeting access control deletion.
+	// The subject is of the form: lfx.delete_all_access.past_meeting
+	PastMeetingDeleteAllAccessSubject = "lfx.delete_all_access.past_meeting"
+
+	// PastMeetingParticipantPutSubject is the subject for adding past meeting participants.
+	// The subject is of the form: lfx.put_participant.past_meeting
+	PastMeetingParticipantPutSubject = "lfx.put_participant.past_meeting"
+
+	// PastMeetingParticipantRemoveSubject is the subject for removing past meeting participants.
+	// The subject is of the form: lfx.remove_participant.past_meeting
+	PastMeetingParticipantRemoveSubject = "lfx.remove_participant.past_meeting"
+
 	// CommitteeUpdateAccessSubject is the subject for the committee access control updates.
 	// The subject is of the form: lfx.update_access.committee
 	CommitteeUpdateAccessSubject = "lfx.update_access.committee"
