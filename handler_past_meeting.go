@@ -19,20 +19,6 @@ type pastMeetingStub struct {
 	Public     bool     `json:"public"`
 	ProjectUID string   `json:"project_uid"`
 	Committees []string `json:"committees"`
-	// The invitees and attendees are needed for the cases where when the past meeting is created the participants
-	// are also created and therefore we need to add the invitees and attendees to the past meeting FGA object.
-	// This case happens when handling the zoom meeting.started webhook event for example, because at that moment
-	// the participants (invitees) get created in the system.
-	//
-	// The service sending the message to this service is responsible for determining the invitees and attendees.
-	// Here we just add the FGA tuples for them.
-	//
-	// Note: no removal of the invitees and attendees is supported. This is just meant for when initially creating the
-	// past meeting object.
-	//
-	// Both of these are arrays of usernames.
-	Invitees  []string `json:"invitees"`
-	Attendees []string `json:"attendees"`
 }
 
 // buildPastMeetingTuples builds all of the tuples for a past meeting object.
@@ -55,7 +41,7 @@ func (h *HandlerService) buildPastMeetingTuples(
 		)
 	}
 
-	// Add the project relation to associate this meeting with its project
+	// Add the project relation to associate this past meeting with its project
 	if meeting.ProjectUID != "" {
 		tuples = append(
 			tuples,
@@ -71,22 +57,6 @@ func (h *HandlerService) buildPastMeetingTuples(
 		)
 	}
 
-	// Each invitee should have an invitee relation with the past meeting.
-	for _, invitee := range meeting.Invitees {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeUser+invitee, constants.RelationInvitee, object),
-		)
-	}
-
-	// Each attendee should have an attendee relation with the past meeting.
-	for _, attendee := range meeting.Attendees {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeUser+attendee, constants.RelationAttendee, object),
-		)
-	}
-
 	return tuples, nil
 }
 
@@ -94,7 +64,7 @@ func (h *HandlerService) buildPastMeetingTuples(
 func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling meeting access control update")
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling past meeting access control update")
 
 	// Parse the event data.
 	pastMeeting := new(pastMeetingStub)
@@ -115,12 +85,12 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 
 	// Build a list of tuples to sync.
 	//
-	// It is important that all tuples that should exist with respect to the meeting object
+	// It is important that all tuples that should exist with respect to the past meeting object
 	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
 	// all tuples that are not in the tuples list parameter.
 	tuples, err := h.buildPastMeetingTuples(object, pastMeeting)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build meeting tuples")
+		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
 		return err
 	}
 
@@ -144,15 +114,15 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent meeting access control update response")
+		logger.With("object", object).InfoContext(ctx, "sent past meeting access control update response")
 	}
 
 	return nil
 }
 
-// meetingDeleteAllAccessHandler handles deleting all tuples for a meeting object.
+// pastMeetingDeleteAllAccessHandler handles deleting all tuples for a past meeting object.
 //
-// This should only happen when a meeting is deleted.
+// This should only happen when a past meeting is deleted.
 func (h *HandlerService) pastMeetingDeleteAllAccessHandler(message INatsMsg) error {
 	return h.processDeleteAllAccessMessage(message, constants.ObjectTypePastMeeting, "past_meeting")
 }
@@ -174,8 +144,12 @@ const (
 	pastMeetingParticipantRemove
 )
 
-// processPastMeetingParticipantMessage handles the complete message processing flow for past meeting participant operations
-func (h *HandlerService) processPastMeetingParticipantMessage(message INatsMsg, operation pastMeetingParticipantOperation) error {
+// processPastMeetingParticipantMessage handles the complete message processing flow for past meeting
+// participant operations
+func (h *HandlerService) processPastMeetingParticipantMessage(
+	message INatsMsg,
+	operation pastMeetingParticipantOperation,
+) error {
 	ctx := context.Background()
 
 	// Log the operation type
@@ -248,7 +222,12 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 }
 
 // putPastMeetingParticipant implements idempotent put operation for past meeting participant relations
-func (h *HandlerService) putPastMeetingParticipant(ctx context.Context, userPrincipal, meetingObject string, participant *pastMeetingParticipantStub) error {
+func (h *HandlerService) putPastMeetingParticipant(
+	ctx context.Context,
+	userPrincipal,
+	meetingObject string,
+	participant *pastMeetingParticipantStub,
+) error {
 	// Determine the desired relations by looking at the attributes of the participant.
 	// There is a separate relation to represent a host, attendee, and invitee. None are mutually exclusive.
 	desiredRelationsMap := make(map[string]bool)
@@ -276,14 +255,16 @@ func (h *HandlerService) putPastMeetingParticipant(ctx context.Context, userPrin
 	// Find which relations need to be removed based on the desired relations compared to the existing relations.
 	// For example, if a participant was marked as attended but the participant in the payload is not
 	// marked as attended, we need to remove the attendee relation.
-	var tuplesToDelete []client.ClientTupleKeyWithoutCondition
+	tuplesToDelete := make([]client.ClientTupleKeyWithoutCondition, 0)
 	alreadyHasDesiredRelationsMap := make(map[string]bool)
 	for _, tuple := range existingTuples {
 		if tuple.Key.User != userPrincipal {
 			continue
 		}
 
-		matchesRelation := tuple.Key.Relation == constants.RelationHost || tuple.Key.Relation == constants.RelationAttendee || tuple.Key.Relation == constants.RelationInvitee
+		matchesRelation := tuple.Key.Relation == constants.RelationHost ||
+			tuple.Key.Relation == constants.RelationAttendee ||
+			tuple.Key.Relation == constants.RelationInvitee
 		if !matchesRelation {
 			continue
 		}
@@ -340,7 +321,12 @@ func (h *HandlerService) putPastMeetingParticipant(ctx context.Context, userPrin
 }
 
 // removePastMeetingParticipant removes all past meeting participant relations for a user from a past meeting
-func (h *HandlerService) removePastMeetingParticipant(ctx context.Context, userPrincipal, meetingObject string, participant *pastMeetingParticipantStub) error {
+func (h *HandlerService) removePastMeetingParticipant(
+	ctx context.Context,
+	userPrincipal,
+	meetingObject string,
+	participant *pastMeetingParticipantStub,
+) error {
 	// Determine the relations to remove based on the current participant attributes.
 	tuplesToDelete := []client.ClientTupleKeyWithoutCondition{}
 	if participant.Host {
@@ -381,7 +367,8 @@ func (h *HandlerService) removePastMeetingParticipant(ctx context.Context, userP
 	return nil
 }
 
-// pastMeetingParticipantPutHandler handles putting a past meeting participant to a past meeting (idempotent create/update).
+// pastMeetingParticipantPutHandler handles putting a past meeting participant to a past meeting
+// (idempotent create/update).
 func (h *HandlerService) pastMeetingParticipantPutHandler(message INatsMsg) error {
 	return h.processPastMeetingParticipantMessage(message, pastMeetingParticipantPut)
 }
