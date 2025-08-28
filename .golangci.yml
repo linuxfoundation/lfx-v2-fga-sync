@@ -14,6 +14,7 @@ output:
 linters:
   enable:
     - copyloopvar
+    # TODO: add back dupl linter once https://linuxfoundation.atlassian.net/browse/LFXV2-388 is resolved.
     - goconst
     - gocritic
     - gocyclo
@@ -64,6 +65,7 @@ linters:
       - std-error-handling
     rules:
       - linters:
+          - dupl
           - goconst
           - gosec
         path: _test\.go

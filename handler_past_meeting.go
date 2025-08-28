@@ -208,14 +208,14 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 	pastMeetingParticipant *pastMeetingParticipantStub,
 	operation pastMeetingParticipantOperation,
 ) error {
-	meetingObject := constants.ObjectTypePastMeeting + pastMeetingParticipant.PastMeetingUID
+	pastMeetingObject := constants.ObjectTypePastMeeting + pastMeetingParticipant.PastMeetingUID
 	userPrincipal := constants.ObjectTypeUser + pastMeetingParticipant.Username
 
 	switch operation {
 	case pastMeetingParticipantPut:
-		return h.putPastMeetingParticipant(ctx, userPrincipal, meetingObject, pastMeetingParticipant)
+		return h.putPastMeetingParticipant(ctx, userPrincipal, pastMeetingObject, pastMeetingParticipant)
 	case pastMeetingParticipantRemove:
-		return h.removePastMeetingParticipant(ctx, userPrincipal, meetingObject, pastMeetingParticipant)
+		return h.removePastMeetingParticipant(ctx, userPrincipal, pastMeetingObject)
 	default:
 		return errors.New("unknown past meeting participant operation")
 	}
@@ -225,7 +225,7 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 func (h *HandlerService) putPastMeetingParticipant(
 	ctx context.Context,
 	userPrincipal,
-	meetingObject string,
+	pastMeetingObject string,
 	participant *pastMeetingParticipantStub,
 ) error {
 	// Determine the desired relations by looking at the attributes of the participant.
@@ -242,12 +242,12 @@ func (h *HandlerService) putPastMeetingParticipant(
 	}
 
 	// Read existing relations for this user on this past meeting
-	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, meetingObject)
+	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, pastMeetingObject)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to read existing past meeting tuples",
 			errKey, err,
 			"user", userPrincipal,
-			"meeting", meetingObject,
+			"past_meeting", pastMeetingObject,
 		)
 		return err
 	}
@@ -286,7 +286,7 @@ func (h *HandlerService) putPastMeetingParticipant(
 	var tuplesToWrite []client.ClientTupleKey
 	for relation := range desiredRelationsMap {
 		if !alreadyHasDesiredRelationsMap[relation] {
-			tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, relation, meetingObject))
+			tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, relation, pastMeetingObject))
 		}
 	}
 
@@ -299,7 +299,7 @@ func (h *HandlerService) putPastMeetingParticipant(
 				"user", userPrincipal,
 				"tuples_to_write", tuplesToWrite,
 				"tuples_to_delete", tuplesToDelete,
-				"object", meetingObject,
+				"object", pastMeetingObject,
 			)
 			return err
 		}
@@ -307,61 +307,38 @@ func (h *HandlerService) putPastMeetingParticipant(
 		logger.With(
 			"user", userPrincipal,
 			"relations", desiredRelationsMap,
-			"object", meetingObject,
+			"object", pastMeetingObject,
 		).InfoContext(ctx, "put past meeting participant tuples for past meeting")
 	} else {
 		logger.With(
 			"user", userPrincipal,
 			"relations", desiredRelationsMap,
-			"object", meetingObject,
+			"object", pastMeetingObject,
 		).InfoContext(ctx, "past meeting participant already has correct relations - no changes needed")
 	}
 
 	return nil
 }
 
-// removePastMeetingParticipant removes all past meeting participant relations for a user from a past meeting
+// removePastMeetingParticipant removes all existing past meeting participant relations for a user from a past meeting
 func (h *HandlerService) removePastMeetingParticipant(
 	ctx context.Context,
 	userPrincipal,
-	meetingObject string,
-	participant *pastMeetingParticipantStub,
+	pastMeetingObject string,
 ) error {
-	// Determine the relations to remove based on the current participant attributes.
-	tuplesToDelete := []client.ClientTupleKeyWithoutCondition{}
-	if participant.Host {
-		tuplesToDelete = append(
-			tuplesToDelete,
-			h.fgaService.TupleKeyWithoutCondition(userPrincipal, constants.RelationHost, meetingObject),
-		)
-	}
-	if participant.IsAttended {
-		tuplesToDelete = append(
-			tuplesToDelete,
-			h.fgaService.TupleKeyWithoutCondition(userPrincipal, constants.RelationAttendee, meetingObject),
-		)
-	}
-	if participant.IsInvited {
-		tuplesToDelete = append(
-			tuplesToDelete,
-			h.fgaService.TupleKeyWithoutCondition(userPrincipal, constants.RelationInvitee, meetingObject),
-		)
-	}
-
-	err := h.fgaService.DeleteTuples(ctx, tuplesToDelete)
+	err := h.fgaService.DeleteTuplesByUserAndObject(ctx, userPrincipal, pastMeetingObject)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to remove past meeting participant tuples for past meeting",
 			errKey, err,
 			"user", userPrincipal,
-			"tuples_to_delete", tuplesToDelete,
-			"object", meetingObject,
+			"object", pastMeetingObject,
 		)
 		return err
 	}
 
 	logger.With(
 		"user", userPrincipal,
-		"object", meetingObject,
+		"object", pastMeetingObject,
 	).InfoContext(ctx, "removed past meeting participant tuples for past meeting")
 
 	return nil
