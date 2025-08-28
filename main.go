@@ -360,6 +360,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			handler:     handlerService.groupsIOServiceDeleteAllAccessHandler,
 			description: "groups.io service delete all access",
 		},
+		{
+			subject:     constants.GroupsIOMailingListUpdateAccessSubject,
+			handler:     handlerService.groupsIOMailingListUpdateAccessHandler,
+			description: "groups.io MailingList update access",
+		},
+		{
+			subject:     constants.GroupsIOMailingListDeleteAllAccessSubject,
+			handler:     handlerService.groupsIOMailingListDeleteAllAccessHandler,
+			description: "groups.io MailingList delete all access",
+		},
 	}
 
 	// Subscribe to each subject using the helper function
