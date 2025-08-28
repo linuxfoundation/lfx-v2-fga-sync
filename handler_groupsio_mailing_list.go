@@ -14,7 +14,7 @@ import (
 // groupsIOMailingListUpdateAccessHandler handles groups.io MailingList access control updates.
 func (h *HandlerService) groupsIOMailingListUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
-	logger.With("subject", string(message.Subject())).InfoContext(ctx, "handling groups.io MailingList access control update")
+	logger.With("subject", message.Subject()).InfoContext(ctx, "handling groups.io MailingList access control update")
 
 	// Parse the event data.
 	groupsIOMailingList := new(standardAccessStub)
@@ -30,7 +30,7 @@ func (h *HandlerService) groupsIOMailingListUpdateAccessHandler(message INatsMsg
 // groupsIOMailingListDeleteAllAccessHandler handles groups.io MailingList access control deletions.
 func (h *HandlerService) groupsIOMailingListDeleteAllAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
-	logger.With("subject", string(message.Subject())).InfoContext(ctx, "handling groups.io MailingList access control deletion")
+	logger.With("subject", message.Subject()).InfoContext(ctx, "handling groups.io MailingList access control deletion")
 
 	return h.processDeleteAllAccessMessage(message, constants.ObjectTypeGroupsIOMailingList, "groupsio_MailingList")
 }
