@@ -11,10 +11,34 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	. "github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/mock"
 )
+
+// MockNatsKeyValue is a mock implementation of INatsKeyValue for testing
+type MockNatsKeyValue struct {
+	mock.Mock
+}
+
+func (m *MockNatsKeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	args := m.Called(ctx, key)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(jetstream.KeyValueEntry), args.Error(1)
+}
+
+func (m *MockNatsKeyValue) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	args := m.Called(ctx, key, value)
+	return args.Get(0).(uint64), args.Error(1)
+}
+
+func (m *MockNatsKeyValue) PutString(ctx context.Context, key string, value string) (uint64, error) {
+	args := m.Called(ctx, key, value)
+	return args.Get(0).(uint64), args.Error(1)
+}
 
 // TestCacheKeyEncoding tests the cache key encoding functionality
 func TestCacheKeyEncoding(t *testing.T) {
@@ -875,6 +899,353 @@ func TestGetTuplesByRelation(t *testing.T) {
 					if tuple.Key.Relation != tt.relation {
 						t.Errorf("%s: tuple %d has wrong relation: got %s, want %s",
 							tt.description, i, tuple.Key.Relation, tt.relation)
+					}
+				}
+			}
+
+			// Verify all expectations were met
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+// TestDeleteTuplesByUserAndObject tests the DeleteTuplesByUserAndObject functionality
+func TestDeleteTuplesByUserAndObject(t *testing.T) {
+	tests := []struct {
+		name        string
+		user        string
+		object      string
+		mockSetup   func(*MockFgaClient)
+		expectError bool
+		description string
+	}{
+		{
+			name:   "delete single tuple for user and object",
+			user:   "user:123",
+			object: "meeting:456",
+			mockSetup: func(m *MockFgaClient) {
+				// Mock ReadObjectTuples to return tuples for the object
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:456"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:123", Relation: "participant", Object: "meeting:456"}},
+						{Key: openfga.TupleKey{User: "user:789", Relation: "organizer", Object: "meeting:456"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// Mock DeleteTuples to delete only the user:123 tuple
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Deletes) == 1 &&
+						req.Deletes[0].User == "user:123" &&
+						req.Deletes[0].Relation == "participant" &&
+						req.Deletes[0].Object == "meeting:456"
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "should delete single tuple for user on object",
+		},
+		{
+			name:   "delete multiple tuples for user and object",
+			user:   "user:456",
+			object: "past_meeting:789",
+			mockSetup: func(m *MockFgaClient) {
+				// Mock ReadObjectTuples to return multiple tuples for the user
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "past_meeting:789"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:456", Relation: "host", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:456", Relation: "invitee", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:456", Relation: "attendee", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:999", Relation: "invitee", Object: "past_meeting:789"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// Mock DeleteTuples to delete all user:456 tuples
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					if len(req.Deletes) != 3 {
+						return false
+					}
+					// Check that all deletes are for user:456
+					for _, del := range req.Deletes {
+						if del.User != "user:456" || del.Object != "past_meeting:789" {
+							return false
+						}
+					}
+					// Check that we have the expected relations
+					relations := map[string]bool{
+						"host":     false,
+						"invitee":  false,
+						"attendee": false,
+					}
+					for _, del := range req.Deletes {
+						relations[del.Relation] = true
+					}
+					return relations["host"] && relations["invitee"] && relations["attendee"]
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "should delete all tuples for user on object",
+		},
+		{
+			name:   "no tuples to delete",
+			user:   "user:nonexistent",
+			object: "meeting:123",
+			mockSetup: func(m *MockFgaClient) {
+				// Mock ReadObjectTuples to return tuples but none for this user
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:123"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:other1", Relation: "participant", Object: "meeting:123"}},
+						{Key: openfga.TupleKey{User: "user:other2", Relation: "organizer", Object: "meeting:123"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// No Write call expected when there's nothing to delete
+			},
+			expectError: false,
+			description: "should handle case with no tuples to delete",
+		},
+		{
+			name:   "error reading object tuples",
+			user:   "user:123",
+			object: "meeting:error",
+			mockSetup: func(m *MockFgaClient) {
+				// Mock ReadObjectTuples to return an error
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:error"
+				}), mock.Anything).Return((*ClientReadResponse)(nil), errors.New("read error")).Once()
+			},
+			expectError: true,
+			description: "should return error when reading tuples fails",
+		},
+		{
+			name:   "error deleting tuples",
+			user:   "user:123",
+			object: "meeting:456",
+			mockSetup: func(m *MockFgaClient) {
+				// Mock ReadObjectTuples to return tuples
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:456"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:123", Relation: "participant", Object: "meeting:456"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// Mock DeleteTuples to return an error
+				m.On("Write", mock.Anything, mock.Anything).
+					Return((*ClientWriteResponse)(nil), errors.New("delete error")).Once()
+			},
+			expectError: true,
+			description: "should return error when deleting tuples fails",
+		},
+		{
+			name:   "handle paginated results",
+			user:   "user:paginated",
+			object: "project:large",
+			mockSetup: func(m *MockFgaClient) {
+				// First page
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "project:large"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:paginated", Relation: "writer", Object: "project:large"}},
+						{Key: openfga.TupleKey{User: "user:other", Relation: "viewer", Object: "project:large"}},
+					},
+					ContinuationToken: "token1",
+				}, nil).Once()
+
+				// Second page - Note: we can't check ContinuationToken in request, it's handled internally
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "project:large"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:paginated", Relation: "viewer", Object: "project:large"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+
+				// Mock DeleteTuples to delete both tuples for user:paginated
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Deletes) == 2 &&
+						req.Deletes[0].User == "user:paginated" &&
+						req.Deletes[1].User == "user:paginated"
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "should handle paginated results when reading tuples",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mock client
+			mockClient := new(MockFgaClient)
+			tt.mockSetup(mockClient)
+
+			// Create mock cache
+			mockCache := new(MockNatsKeyValue)
+			// Mock cache invalidation - called when tuples are deleted
+			mockCache.On("Put", mock.Anything, "inv", []byte("1")).Return(uint64(1), nil).Maybe()
+
+			// Create service with mock client and cache
+			service := FgaService{
+				client:      mockClient,
+				cacheBucket: mockCache,
+			}
+
+			// Execute the function
+			err := service.DeleteTuplesByUserAndObject(context.Background(), tt.user, tt.object)
+
+			// Verify error expectations
+			if tt.expectError && err == nil {
+				t.Errorf("%s: expected error but got none", tt.description)
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+
+			// Verify all expectations were met
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+// TestGetTuplesByUserAndObject tests the GetTuplesByUserAndObject functionality
+func TestGetTuplesByUserAndObject(t *testing.T) {
+	tests := []struct {
+		name           string
+		user           string
+		object         string
+		mockSetup      func(*MockFgaClient)
+		expectedTuples []ClientTupleKey
+		expectError    bool
+		description    string
+	}{
+		{
+			name:   "get single tuple for user and object",
+			user:   "user:123",
+			object: "meeting:456",
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:456"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:123", Relation: "participant", Object: "meeting:456"}},
+						{Key: openfga.TupleKey{User: "user:789", Relation: "organizer", Object: "meeting:456"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+			},
+			expectedTuples: []ClientTupleKey{
+				{User: "user:123", Relation: "participant", Object: "meeting:456"},
+			},
+			expectError: false,
+			description: "should return single tuple for user on object",
+		},
+		{
+			name:   "get multiple tuples for user and object",
+			user:   "user:456",
+			object: "past_meeting:789",
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "past_meeting:789"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:456", Relation: "host", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:999", Relation: "invitee", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:456", Relation: "invitee", Object: "past_meeting:789"}},
+						{Key: openfga.TupleKey{User: "user:456", Relation: "attendee", Object: "past_meeting:789"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+			},
+			expectedTuples: []ClientTupleKey{
+				{User: "user:456", Relation: "host", Object: "past_meeting:789"},
+				{User: "user:456", Relation: "invitee", Object: "past_meeting:789"},
+				{User: "user:456", Relation: "attendee", Object: "past_meeting:789"},
+			},
+			expectError: false,
+			description: "should return all tuples for user on object",
+		},
+		{
+			name:   "no tuples for user",
+			user:   "user:nonexistent",
+			object: "meeting:123",
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:123"
+				}), mock.Anything).Return(&ClientReadResponse{
+					Tuples: []openfga.Tuple{
+						{Key: openfga.TupleKey{User: "user:other1", Relation: "participant", Object: "meeting:123"}},
+						{Key: openfga.TupleKey{User: "user:other2", Relation: "organizer", Object: "meeting:123"}},
+					},
+					ContinuationToken: "",
+				}, nil).Once()
+			},
+			expectedTuples: nil,
+			expectError:    false,
+			description:    "should return empty list when user has no tuples",
+		},
+		{
+			name:   "error reading object tuples",
+			user:   "user:123",
+			object: "meeting:error",
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+					return req.Object != nil && *req.Object == "meeting:error"
+				}), mock.Anything).Return((*ClientReadResponse)(nil), errors.New("read error")).Once()
+			},
+			expectedTuples: nil,
+			expectError:    true,
+			description:    "should return error when reading tuples fails",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mock client
+			mockClient := new(MockFgaClient)
+			tt.mockSetup(mockClient)
+
+			// Create service with mock client
+			service := FgaService{
+				client: mockClient,
+			}
+
+			// Execute the function
+			tuples, err := service.GetTuplesByUserAndObject(context.Background(), tt.user, tt.object)
+
+			// Verify error expectations
+			if tt.expectError && err == nil {
+				t.Errorf("%s: expected error but got none", tt.description)
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+
+			// Verify tuple results
+			if !tt.expectError {
+				if len(tuples) != len(tt.expectedTuples) {
+					t.Errorf("%s: expected %d tuples, got %d", tt.description, len(tt.expectedTuples), len(tuples))
+				}
+				for i, tuple := range tuples {
+					if i >= len(tt.expectedTuples) {
+						break
+					}
+					expected := tt.expectedTuples[i]
+					if tuple.User != expected.User ||
+						tuple.Relation != expected.Relation ||
+						tuple.Object != expected.Object {
+						t.Errorf("%s: tuple %d mismatch: got %+v, want %+v",
+							tt.description, i, tuple, expected)
 					}
 				}
 			}

@@ -323,6 +323,40 @@ func (s FgaService) DeleteTuple(ctx context.Context, user, relation, object stri
 	return s.DeleteTuples(ctx, []ClientTupleKeyWithoutCondition{tuple})
 }
 
+// DeleteTuplesByUserAndObject deletes all tuples for a specific user and object.
+// e.g. delete all tuples associated with user X on meeting Y.
+func (s FgaService) DeleteTuplesByUserAndObject(ctx context.Context, user, object string) error {
+	tuples, err := s.GetTuplesByUserAndObject(ctx, user, object)
+	if err != nil {
+		return err
+	}
+	tuplesWithoutConditions := make([]ClientTupleKeyWithoutCondition, 0, len(tuples))
+	for _, tuple := range tuples {
+		tuplesWithoutConditions = append(
+			tuplesWithoutConditions,
+			s.TupleKeyWithoutCondition(tuple.User, tuple.Relation, tuple.Object),
+		)
+	}
+	return s.DeleteTuples(ctx, tuplesWithoutConditions)
+}
+
+// GetTuplesByUser returns all tuples for a specific user.
+func (s FgaService) GetTuplesByUserAndObject(ctx context.Context, user, object string) ([]ClientTupleKey, error) {
+	tuples, err := s.ReadObjectTuples(ctx, object)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter the object tuples to only include the ones for the user.
+	var filteredTuples []ClientTupleKey
+	for _, tuple := range tuples {
+		if tuple.Key.User == user {
+			filteredTuples = append(filteredTuples, s.TupleKey(tuple.Key.User, tuple.Key.Relation, object))
+		}
+	}
+	return filteredTuples, nil
+}
+
 // GetTuplesByRelation returns tuples for a specific object filtered by relation.
 // This provides a generic way to retrieve tuples with a specific relation from an object.
 func (s FgaService) GetTuplesByRelation(ctx context.Context, object, relation string) ([]openfga.Tuple, error) {
