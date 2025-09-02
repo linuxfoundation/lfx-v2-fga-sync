@@ -14,7 +14,7 @@ output:
 linters:
   enable:
     - copyloopvar
-    - dupl
+    # TODO: add back dupl linter once https://linuxfoundation.atlassian.net/browse/LFXV2-388 is resolved.
     - goconst
     - gocritic
     - gocyclo
