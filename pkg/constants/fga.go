@@ -38,6 +38,7 @@ const (
 	ObjectTypePastMeeting         = "past_meeting:"
 	ObjectTypeGroupsIOService     = "groupsio_service:"
 	ObjectTypeGroupsIOMailingList = "groupsio_mailing_list:"
+	ObjectTypeGroupsIOMember      = "groupsio_member:"
 
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)

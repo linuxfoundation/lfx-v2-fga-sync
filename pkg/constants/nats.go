@@ -78,6 +78,14 @@ const (
 	// GroupsIOMailingListDeleteAllAccessSubject is the subject for the groups.io mailing list access control deletion.
 	// The subject is of the form: lfx.delete_all_access.groupsio_mailing_list
 	GroupsIOMailingListDeleteAllAccessSubject = "lfx.delete_all_access.groupsio_mailing_list"
+
+	// GroupsIOMemberUpdateAccessSubject is the subject for the groups.io member access control updates.
+	// The subject is of the form: lfx.update_access.groupsio_member
+	GroupsIOMemberUpdateAccessSubject = "lfx.update_access.groupsio_member"
+
+	// GroupsIOMemberDeleteAllAccessSubject is the subject for the groups.io member access control deletion.
+	// The subject is of the form: lfx.delete_all_access.groupsio_member
+	GroupsIOMemberDeleteAllAccessSubject = "lfx.delete_all_access.groupsio_member"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.
