@@ -214,6 +214,47 @@ The `artifact_visibility` field determines who can access the summary:
 - `"meeting_hosts"`: Only participants with `host: true` get viewer access
 - `"meeting_participants"`: All participants get viewer access
 
+### Past Meeting Participant Put Message (`lfx.put_participant.past_meeting`)
+
+```json
+{
+  "uid": "participant-123",
+  "past_meeting_uid": "past-meeting-456",
+  "artifact_visibility": "meeting_participants",
+  "username": "user1",
+  "host": true,
+  "is_invited": true,
+  "is_attended": true
+}
+```
+
+When a participant is added or updated:
+1. Updates their relations on the past meeting (host, invitee, attendee)
+2. Syncs their viewer access to all artifacts based on `artifact_visibility`:
+   - `"public"`: No action needed (user:* already grants access)
+   - `"meeting_hosts"`: Adds viewer access only if `host: true`
+   - `"meeting_participants"`: Adds viewer access for all participants
+
+**Important**: If a participant's host status changes (e.g., from participant to host), their artifact access is automatically updated based on the visibility settings.
+
+### Past Meeting Participant Remove Message (`lfx.remove_participant.past_meeting`)
+
+```json
+{
+  "uid": "participant-123",
+  "past_meeting_uid": "past-meeting-456",
+  "artifact_visibility": "meeting_participants",
+  "username": "user1",
+  "host": false,
+  "is_invited": false,
+  "is_attended": false
+}
+```
+
+When a participant is removed:
+1. Removes all their relations from the past meeting
+2. Removes their viewer access from all artifacts (regardless of artifact_visibility)
+
 ## Testing
 
 ### Running Tests
