@@ -224,12 +224,14 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 
 // syncArtifactViewerAccessForParticipant updates viewer access on all artifacts based on
 // artifact visibility and the participant's host status.
+// If isRemoving is true, this will always remove viewer access regardless of visibility settings.
 func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 	ctx context.Context,
 	pastMeetingUID string,
 	userPrincipal string,
 	artifactVisibility string,
 	isHost bool,
+	isRemoving bool,
 ) error {
 	// If public visibility, artifacts use user:* so no individual user management needed
 	if artifactVisibility == "public" {
@@ -238,13 +240,18 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 
 	// Determine if this user should have viewer access based on visibility setting
 	shouldHaveViewerAccess := false
-	switch artifactVisibility {
-	case "meeting_hosts":
-		// Only hosts should have viewer access
-		shouldHaveViewerAccess = isHost
-	case "meeting_participants":
-		// All participants (hosts and non-hosts) should have viewer access
-		shouldHaveViewerAccess = true
+	if isRemoving {
+		// When removing a participant, always remove viewer access
+		shouldHaveViewerAccess = false
+	} else {
+		switch artifactVisibility {
+		case "meeting_hosts":
+			// Only hosts should have viewer access
+			shouldHaveViewerAccess = isHost
+		case "meeting_participants":
+			// All participants (hosts and non-hosts) should have viewer access
+			shouldHaveViewerAccess = true
+		}
 	}
 
 	// Find all artifacts that have a past_meeting relation to this past meeting
@@ -422,6 +429,7 @@ func (h *HandlerService) putPastMeetingParticipant(
 		userPrincipal,
 		participant.ArtifactVisibility,
 		participant.Host,
+		false,
 	)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to sync artifact viewer access",
@@ -457,15 +465,14 @@ func (h *HandlerService) removePastMeetingParticipant(
 		"object", pastMeetingObject,
 	).InfoContext(ctx, "removed past meeting participant tuples for past meeting")
 
-	// When removing a participant, also remove their artifact viewer access
-	// We pass isHost as false since we're removing all access regardless of previous host status
 	pastMeetingUID := participant.PastMeetingUID
 	err = h.syncArtifactViewerAccessForParticipant(
 		ctx,
 		pastMeetingUID,
 		userPrincipal,
 		participant.ArtifactVisibility,
-		false, // isHost = false to ensure access is removed
+		false,
+		true,
 	)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to sync artifact viewer access on removal",
