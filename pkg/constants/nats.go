@@ -78,6 +78,18 @@ const (
 	// GroupsIOMailingListDeleteAllAccessSubject is the subject for the groups.io mailing list access control deletion.
 	// The subject is of the form: lfx.delete_all_access.groupsio_mailing_list
 	GroupsIOMailingListDeleteAllAccessSubject = "lfx.delete_all_access.groupsio_mailing_list"
+
+	// PastMeetingRecordingUpdateAccessSubject is the subject for the past meeting recording access control updates.
+	// The subject is of the form: lfx.update_access.past_meeting_recording
+	PastMeetingRecordingUpdateAccessSubject = "lfx.update_access.past_meeting_recording"
+
+	// PastMeetingTranscriptUpdateAccessSubject is the subject for the past meeting transcript access control updates.
+	// The subject is of the form: lfx.update_access.past_meeting_transcript
+	PastMeetingTranscriptUpdateAccessSubject = "lfx.update_access.past_meeting_transcript"
+
+	// PastMeetingSummaryUpdateAccessSubject is the subject for the past meeting summary access control updates.
+	// The subject is of the form: lfx.update_access.past_meeting_summary
+	PastMeetingSummaryUpdateAccessSubject = "lfx.update_access.past_meeting_summary"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.

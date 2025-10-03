@@ -25,19 +25,23 @@ const (
 	RelationAttendee    = "attendee"
 	RelationInvitee     = "invitee"
 	RelationMeeting     = "meeting"
+	RelationPastMeeting = "past_meeting"
 
 	// Team relations
 	RelationMember = "member"
 
 	// Object type prefixes
-	ObjectTypeUser                = "user:"
-	ObjectTypeProject             = "project:"
-	ObjectTypeCommittee           = "committee:"
-	ObjectTypeTeam                = "team:"
-	ObjectTypeMeeting             = "meeting:"
-	ObjectTypePastMeeting         = "past_meeting:"
-	ObjectTypeGroupsIOService     = "groupsio_service:"
-	ObjectTypeGroupsIOMailingList = "groupsio_mailing_list:"
+	ObjectTypeUser                  = "user:"
+	ObjectTypeProject               = "project:"
+	ObjectTypeCommittee             = "committee:"
+	ObjectTypeTeam                  = "team:"
+	ObjectTypeMeeting               = "meeting:"
+	ObjectTypePastMeeting           = "past_meeting:"
+	ObjectTypePastMeetingRecording  = "past_meeting_recording:"
+	ObjectTypePastMeetingTranscript = "past_meeting_transcript:"
+	ObjectTypePastMeetingSummary    = "past_meeting_summary:"
+	ObjectTypeGroupsIOService       = "groupsio_service:"
+	ObjectTypeGroupsIOMailingList   = "groupsio_mailing_list:"
 
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)

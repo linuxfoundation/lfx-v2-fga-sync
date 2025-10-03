@@ -139,6 +139,81 @@ Simple meeting UID string.
 }
 ```
 
+### Past Meeting Recording Update Message (`lfx.update_access.past_meeting_recording`)
+
+```json
+{
+  "uid": "recording-123",
+  "past_meeting_uid": "past-meeting-456",
+  "artifact_visibility": "public",
+  "participants": [
+    {
+      "username": "user1",
+      "host": true
+    },
+    {
+      "username": "user2",
+      "host": false
+    }
+  ]
+}
+```
+
+The `artifact_visibility` field determines who can access the recording:
+- `"public"`: All users get viewer access
+- `"meeting_hosts"`: Only participants with `host: true` get viewer access
+- `"meeting_participants"`: All participants get viewer access
+
+### Past Meeting Transcript Update Message (`lfx.update_access.past_meeting_transcript`)
+
+```json
+{
+  "uid": "transcript-123",
+  "past_meeting_uid": "past-meeting-456",
+  "artifact_visibility": "meeting_participants",
+  "participants": [
+    {
+      "username": "user1",
+      "host": true
+    },
+    {
+      "username": "user2",
+      "host": false
+    }
+  ]
+}
+```
+
+The `artifact_visibility` field determines who can access the transcript:
+- `"public"`: All users get viewer access
+- `"meeting_hosts"`: Only participants with `host: true` get viewer access
+- `"meeting_participants"`: All participants get viewer access
+
+### Past Meeting Summary Update Message (`lfx.update_access.past_meeting_summary`)
+
+```json
+{
+  "uid": "summary-123",
+  "past_meeting_uid": "past-meeting-456",
+  "artifact_visibility": "meeting_hosts",
+  "participants": [
+    {
+      "username": "user1",
+      "host": true
+    },
+    {
+      "username": "user2",
+      "host": false
+    }
+  ]
+}
+```
+
+The `artifact_visibility` field determines who can access the summary:
+- `"public"`: All users get viewer access
+- `"meeting_hosts"`: Only participants with `host: true` get viewer access
+- `"meeting_participants"`: All participants get viewer access
+
 ## Testing
 
 ### Running Tests
