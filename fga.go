@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 
@@ -127,6 +128,28 @@ func (s FgaService) ReadObjectTuples(ctx context.Context, object string) ([]open
 	return tuples, nil
 }
 
+// ListObjectsByUserAndRelation uses the List Objects API to find all objects of a specific type
+// that have a given relation to a user. This is useful for finding all artifacts that relate to a past meeting.
+func (s FgaService) ListObjectsByUserAndRelation(
+	ctx context.Context,
+	objectType, relation, user string,
+) ([]string, error) {
+	body := ClientListObjectsRequest{
+		User:     user,
+		Relation: relation,
+		Type:     objectType,
+	}
+
+	options := ClientListObjectsOptions{}
+
+	resp, err := s.client.ListObjects(ctx, body, options)
+	if err != nil {
+		return nil, err
+	}
+
+	return resp.Objects, nil
+}
+
 func (s FgaService) getRelationsMap(object string, relations []ClientTupleKey) (map[string]ClientTupleKey, error) {
 	// Convert the passed relationships into a map.
 	relationsMap := make(map[string]ClientTupleKey)
@@ -183,7 +206,7 @@ func (s FgaService) SyncObjectTuples(
 			// Desired state matches current state. Remove the match from "desired
 			// state" since we won't need to write/insert it.
 			delete(relationsMap, key)
-			if isUser := strings.HasPrefix(tuple.Key.User, "user:") && tuple.Key.User != "user:*"; isUser {
+			if isUser := strings.HasPrefix(tuple.Key.User, "user:") && tuple.Key.User != constants.UserWildcard; isUser {
 				// Save this for a later user-access notification.
 				msg := fmt.Sprintf("%s#%s@%s\ttrue\n", tuple.Key.Object, tuple.Key.Relation, tuple.Key.User)
 				logger.With("message", msg).DebugContext(ctx, "will send user access notification")

@@ -51,6 +51,17 @@ func (m *MockFgaClient) BatchCheck(
 	return args.Get(0).(*openfga.BatchCheckResponse), args.Error(1)
 }
 
+// ListObjects implements the IFgaClient interface
+func (m *MockFgaClient) ListObjects(
+	ctx context.Context,
+	body ClientListObjectsRequest,
+	options ClientListObjectsOptions,
+) (*ClientListObjectsResponse, error) {
+	args := m.Called(ctx, body, options)
+	//nolint:errcheck // the error is passed through to the caller
+	return args.Get(0).(*ClientListObjectsResponse), args.Error(1)
+}
+
 // MockNatsMsg is a mock implementation of the INatsMsg interface
 type MockNatsMsg struct {
 	mock.Mock
