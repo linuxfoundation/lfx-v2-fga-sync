@@ -258,14 +258,14 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 	pastMeetingObject := constants.ObjectTypePastMeeting + pastMeetingUID
 
 	// Define artifact types we care about (type names for List Objects API)
-	artifactTypes := map[string]string{
-		"past_meeting_recording":  constants.ObjectTypePastMeetingRecording,
-		"past_meeting_transcript": constants.ObjectTypePastMeetingTranscript,
-		"past_meeting_summary":    constants.ObjectTypePastMeetingSummary,
+	artifactTypes := []string{
+		"past_meeting_recording",
+		"past_meeting_transcript",
+		"past_meeting_summary",
 	}
 
 	// Query for all objects of each artifact type using List Objects API
-	for typeName, typePrefix := range artifactTypes {
+	for _, typeName := range artifactTypes {
 		artifactObjects, err := h.fgaService.ListObjectsByUserAndRelation(
 			ctx,
 			typeName,
@@ -283,8 +283,8 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 
 		// Process each artifact object
 		for _, artifactObject := range artifactObjects {
-			// Ensure the object has the correct prefix (ListObjects returns IDs, we need full object strings)
-			fullArtifactObject := typePrefix + artifactObject
+			// ListObjects API returns full object strings with type prefix already included
+			fullArtifactObject := artifactObject
 
 			if shouldHaveViewerAccess {
 				// Add viewer access (idempotent - WriteTuple handles duplicates)
@@ -418,7 +418,7 @@ func (h *HandlerService) putPastMeetingParticipant(
 			"user", userPrincipal,
 			"relations", desiredRelationsMap,
 			"object", pastMeetingObject,
-		).InfoContext(ctx, "past meeting participant already has correct relations - no changes needed")
+		).InfoContext(ctx, "past meeting participant already has correct past_meeting relations")
 	}
 
 	// Sync artifact viewer access based on artifact visibility and participant's host status
