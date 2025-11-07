@@ -39,6 +39,14 @@ const (
 	// The subject is of the form: lfx.remove_registrant.meeting
 	MeetingRegistrantRemoveSubject = "lfx.remove_registrant.meeting"
 
+	// MeetingAttachmentUpdateAccessSubject is the subject for the meeting attachment access control updates.
+	// The subject is of the form: lfx.update_access.meeting_attachment
+	MeetingAttachmentUpdateAccessSubject = "lfx.update_access.meeting_attachment"
+
+	// MeetingAttachmentDeleteAccessSubject is the subject for the meeting attachment access control deletion.
+	// The subject is of the form: lfx.delete_access.meeting_attachment
+	MeetingAttachmentDeleteAccessSubject = "lfx.delete_access.meeting_attachment"
+
 	// PastMeetingUpdateAccessSubject is the subject for the past meeting access control updates.
 	// The subject is of the form: lfx.update_access.past_meeting
 	PastMeetingUpdateAccessSubject = "lfx.update_access.past_meeting"
