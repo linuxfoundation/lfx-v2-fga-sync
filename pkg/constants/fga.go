@@ -38,6 +38,7 @@ const (
 	ObjectTypeMeeting               = "meeting:"
 	ObjectTypeMeetingAttachment     = "meeting_attachment:"
 	ObjectTypePastMeeting           = "past_meeting:"
+	ObjectTypePastMeetingAttachment = "past_meeting_attachment:"
 	ObjectTypePastMeetingRecording  = "past_meeting_recording:"
 	ObjectTypePastMeetingTranscript = "past_meeting_transcript:"
 	ObjectTypePastMeetingSummary    = "past_meeting_summary:"

@@ -415,6 +415,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			handler:     handlerService.pastMeetingSummaryUpdateAccessHandler,
 			description: "past meeting summary update access",
 		},
+		{
+			subject:     constants.PastMeetingAttachmentUpdateAccessSubject,
+			handler:     handlerService.pastMeetingAttachmentUpdateAccessHandler,
+			description: "past meeting attachment update access",
+		},
+		{
+			subject:     constants.PastMeetingAttachmentDeleteAccessSubject,
+			handler:     handlerService.pastMeetingAttachmentDeleteAccessHandler,
+			description: "past meeting attachment delete access",
+		},
 	}
 
 	// Subscribe to each subject using the helper function

@@ -272,6 +272,23 @@ When a participant is removed:
 1. Removes all their relations from the past meeting
 2. Removes their viewer access from all artifacts (regardless of artifact_visibility)
 
+### Past Meeting Attachment Update Message (`lfx.update_access.past_meeting_attachment`)
+
+```json
+{
+  "uid": "attachment-123",
+  "past_meeting_uid": "past-meeting-456"
+}
+```
+
+### Past Meeting Attachment Delete Message (`lfx.delete_access.past_meeting_attachment`)
+
+```text
+attachment-123
+```
+
+Simple attachment UID string.
+
 ## Testing
 
 ### Running Tests

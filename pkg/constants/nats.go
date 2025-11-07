@@ -98,6 +98,14 @@ const (
 	// PastMeetingSummaryUpdateAccessSubject is the subject for the past meeting summary access control updates.
 	// The subject is of the form: lfx.update_access.past_meeting_summary
 	PastMeetingSummaryUpdateAccessSubject = "lfx.update_access.past_meeting_summary"
+
+	// PastMeetingAttachmentUpdateAccessSubject is the subject for the past meeting attachment access control updates.
+	// The subject is of the form: lfx.update_access.past_meeting_attachment
+	PastMeetingAttachmentUpdateAccessSubject = "lfx.update_access.past_meeting_attachment"
+
+	// PastMeetingAttachmentDeleteAccessSubject is the subject for the past meeting attachment access control deletion.
+	// The subject is of the form: lfx.delete_access.past_meeting_attachment
+	PastMeetingAttachmentDeleteAccessSubject = "lfx.delete_access.past_meeting_attachment"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.
