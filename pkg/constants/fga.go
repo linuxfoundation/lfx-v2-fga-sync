@@ -43,6 +43,13 @@ const (
 	ObjectTypeGroupsIOService       = "groupsio_service:"
 	ObjectTypeGroupsIOMailingList   = "groupsio_mailing_list:"
 
+	// V1 object type prefixes (for read-only LFX v1 data sync)
+	ObjectTypeV1Meeting               = "v1_meeting:"
+	ObjectTypeV1PastMeeting           = "v1_past_meeting:"
+	ObjectTypeV1PastMeetingRecording  = "v1_past_meeting_recording:"
+	ObjectTypeV1PastMeetingTranscript = "v1_past_meeting_transcript:"
+	ObjectTypeV1PastMeetingSummary    = "v1_past_meeting_summary:"
+
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)
 )

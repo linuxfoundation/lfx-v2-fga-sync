@@ -405,6 +405,51 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			handler:     handlerService.pastMeetingSummaryUpdateAccessHandler,
 			description: "past meeting summary update access",
 		},
+		{
+			subject:     constants.V1MeetingUpdateAccessSubject,
+			handler:     handlerService.v1MeetingUpdateAccessHandler,
+			description: "v1 meeting update access",
+		},
+		{
+			subject:     constants.V1MeetingDeleteAllAccessSubject,
+			handler:     handlerService.v1MeetingDeleteAllAccessHandler,
+			description: "v1 meeting delete all access",
+		},
+		{
+			subject:     constants.V1PastMeetingUpdateAccessSubject,
+			handler:     handlerService.v1PastMeetingUpdateAccessHandler,
+			description: "v1 past meeting update access",
+		},
+		{
+			subject:     constants.V1PastMeetingDeleteAllAccessSubject,
+			handler:     handlerService.v1PastMeetingDeleteAllAccessHandler,
+			description: "v1 past meeting delete all access",
+		},
+		{
+			subject:     constants.V1PastMeetingRecordingUpdateAccessSubject,
+			handler:     handlerService.v1PastMeetingRecordingUpdateAccessHandler,
+			description: "v1 past meeting recording update access",
+		},
+		{
+			subject:     constants.V1PastMeetingTranscriptUpdateAccessSubject,
+			handler:     handlerService.v1PastMeetingTranscriptUpdateAccessHandler,
+			description: "v1 past meeting transcript update access",
+		},
+		{
+			subject:     constants.V1PastMeetingSummaryUpdateAccessSubject,
+			handler:     handlerService.v1PastMeetingSummaryUpdateAccessHandler,
+			description: "v1 past meeting summary update access",
+		},
+		{
+			subject:     constants.V1MeetingRegistrantPutSubject,
+			handler:     handlerService.v1MeetingRegistrantPutHandler,
+			description: "v1 meeting registrant put",
+		},
+		{
+			subject:     constants.V1MeetingRegistrantRemoveSubject,
+			handler:     handlerService.v1MeetingRegistrantRemoveHandler,
+			description: "v1 meeting registrant remove",
+		},
 	}
 
 	// Subscribe to each subject using the helper function

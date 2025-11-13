@@ -90,6 +90,43 @@ const (
 	// PastMeetingSummaryUpdateAccessSubject is the subject for the past meeting summary access control updates.
 	// The subject is of the form: lfx.update_access.past_meeting_summary
 	PastMeetingSummaryUpdateAccessSubject = "lfx.update_access.past_meeting_summary"
+
+	// V1 meeting subjects for LFX v1 data sync (read-only)
+	// V1MeetingUpdateAccessSubject is the subject for the v1 meeting access control updates.
+	// The subject is of the form: lfx.update_access.v1_meeting
+	V1MeetingUpdateAccessSubject = "lfx.update_access.v1_meeting"
+
+	// V1MeetingDeleteAllAccessSubject is the subject for the v1 meeting access control deletion.
+	// The subject is of the form: lfx.delete_all_access.v1_meeting
+	V1MeetingDeleteAllAccessSubject = "lfx.delete_all_access.v1_meeting"
+
+	// V1PastMeetingUpdateAccessSubject is the subject for the v1 past meeting access control updates.
+	// The subject is of the form: lfx.update_access.v1_past_meeting
+	V1PastMeetingUpdateAccessSubject = "lfx.update_access.v1_past_meeting"
+
+	// V1PastMeetingDeleteAllAccessSubject is the subject for the v1 past meeting access control deletion.
+	// The subject is of the form: lfx.delete_all_access.v1_past_meeting
+	V1PastMeetingDeleteAllAccessSubject = "lfx.delete_all_access.v1_past_meeting"
+
+	// V1PastMeetingRecordingUpdateAccessSubject is the subject for the v1 past meeting recording access control updates.
+	// The subject is of the form: lfx.update_access.v1_past_meeting_recording
+	V1PastMeetingRecordingUpdateAccessSubject = "lfx.update_access.v1_past_meeting_recording"
+
+	// V1PastMeetingTranscriptUpdateAccessSubject is the subject for the v1 past meeting transcript access control updates.
+	// The subject is of the form: lfx.update_access.v1_past_meeting_transcript
+	V1PastMeetingTranscriptUpdateAccessSubject = "lfx.update_access.v1_past_meeting_transcript"
+
+	// V1PastMeetingSummaryUpdateAccessSubject is the subject for the v1 past meeting summary access control updates.
+	// The subject is of the form: lfx.update_access.v1_past_meeting_summary
+	V1PastMeetingSummaryUpdateAccessSubject = "lfx.update_access.v1_past_meeting_summary"
+
+	// V1MeetingRegistrantPutSubject is the subject for adding v1 meeting registrants.
+	// The subject is of the form: lfx.put_registrant.v1_meeting
+	V1MeetingRegistrantPutSubject = "lfx.put_registrant.v1_meeting"
+
+	// V1MeetingRegistrantRemoveSubject is the subject for removing v1 meeting registrants.
+	// The subject is of the form: lfx.remove_registrant.v1_meeting
+	V1MeetingRegistrantRemoveSubject = "lfx.remove_registrant.v1_meeting"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.
