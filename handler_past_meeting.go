@@ -83,18 +83,28 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 
 	object := constants.ObjectTypePastMeeting + pastMeeting.UID
 
-	// Build a list of tuples to sync.
+	// Build a list of tuples to sync. It should include all the tuples that need to be synced
+	// with respect to the past meeting object or else they will be deleted.
 	//
-	// It is important that all tuples that should exist with respect to the past meeting object
-	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
-	// all tuples that are not in the tuples list parameter.
+	// Note: host, invitee, and attendee relations, however, are excluded from the sync operation
+	// because they are managed separately via put_participant and remove_participant messages.
 	tuples, err := h.buildPastMeetingTuples(object, pastMeeting)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
 		return err
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	// Sync the tuples.
+	// Exclude host, invitee, and attendee relations from deletion - these are managed by other messages.
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
+		ctx,
+		object,
+		tuples,
+		constants.RelationOrganizer,
+		constants.RelationHost,
+		constants.RelationInvitee,
+		constants.RelationAttendee,
+	)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
