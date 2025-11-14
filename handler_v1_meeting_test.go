@@ -32,31 +32,30 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 		{
 			name: "minimal v1 meeting",
 			meeting: &v1MeetingStub{
-				UID:        "test-uid",
+				MeetingID:  "test-meeting-id",
 				ProjectUID: "proj-123",
 			},
 			expected: 1, // project relation only
 		},
 		{
-			name: "public v1 meeting with committees and hosts",
+			name: "public v1 meeting with committee",
 			meeting: &v1MeetingStub{
-				UID:        "test-uid",
-				Public:     true,
+				MeetingID:  "test-meeting-id",
+				Visibility: "public",
 				ProjectUID: "proj-123",
-				Committees: []string{"committee-1", "committee-2"},
-				Hosts:      []string{"user1", "user2"},
+				Committee:  "committee-1",
 			},
-			expected: 6, // public + project + 2 committees + 2 hosts
+			expected: 3, // public + project + committee
 		},
 		{
-			name: "private v1 meeting with single host",
+			name: "private v1 meeting",
 			meeting: &v1MeetingStub{
-				UID:        "test-uid",
-				Public:     false,
+				MeetingID:  "test-meeting-id",
+				Visibility: "private",
 				ProjectUID: "proj-123",
-				Hosts:      []string{"host-user"},
+				Committee:  "committee-1",
 			},
-			expected: 2, // project + 1 host
+			expected: 2, // project + committee (no public access)
 		},
 	}
 
@@ -69,19 +68,18 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 				},
 			}
 
-			object := constants.ObjectTypeV1Meeting + tt.meeting.UID
+			object := constants.ObjectTypeV1Meeting + tt.meeting.MeetingID
 			tuples, err := handlerService.buildV1MeetingTuples(object, tt.meeting)
 
 			assert.NoError(t, err)
 			assert.Len(t, tuples, tt.expected)
 
 			// Validate specific tuple types for the comprehensive test case
-			if tt.name == "public v1 meeting with committees and hosts" {
+			if tt.name == "public v1 meeting with committee" {
 				// Check that we have the expected relations
 				foundPublic := false
 				foundProject := false
-				foundCommittees := 0
-				foundHosts := 0
+				foundCommittee := false
 
 				for _, tuple := range tuples {
 					if tuple.User == constants.UserWildcard && tuple.Relation == constants.RelationViewer {
@@ -91,17 +89,13 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 						foundProject = true
 					}
 					if tuple.Relation == constants.RelationCommittee {
-						foundCommittees++
-					}
-					if tuple.Relation == constants.RelationHost {
-						foundHosts++
+						foundCommittee = true
 					}
 				}
 
 				assert.True(t, foundPublic, "should have public viewer relation")
 				assert.True(t, foundProject, "should have project relation")
-				assert.Equal(t, 2, foundCommittees, "should have 2 committee relations")
-				assert.Equal(t, 2, foundHosts, "should have 2 host relations")
+				assert.True(t, foundCommittee, "should have committee relation")
 			}
 		})
 	}
@@ -116,22 +110,22 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 		{
 			name: "minimal v1 past meeting",
 			pastMeeting: &v1PastMeetingStub{
-				UID:          "past-uid",
-				V1MeetingUID: "meeting-123",
-				ProjectUID:   "proj-123",
+				MeetingAndOccurenceID: "past-meeting-occurrence-id",
+				MeetingID:             "meeting-123",
+				ProjectUID:            "proj-123",
 			},
 			expected: 2, // meeting relation + project relation
 		},
 		{
-			name: "public v1 past meeting with committees",
+			name: "public v1 past meeting with committee",
 			pastMeeting: &v1PastMeetingStub{
-				UID:          "past-uid",
-				V1MeetingUID: "meeting-123",
-				Public:       true,
-				ProjectUID:   "proj-123",
-				Committees:   []string{"committee-1", "committee-2"},
+				MeetingAndOccurenceID: "past-meeting-occurrence-id",
+				MeetingID:             "meeting-123",
+				Visibility:            "public",
+				ProjectUID:            "proj-123",
+				Committee:             "committee-1",
 			},
-			expected: 5, // public + meeting + project + 2 committees
+			expected: 4, // public + meeting + project + committee
 		},
 	}
 
@@ -144,19 +138,19 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 				},
 			}
 
-			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.UID
+			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.MeetingAndOccurenceID
 			tuples, err := handlerService.buildV1PastMeetingTuples(object, tt.pastMeeting)
 
 			assert.NoError(t, err)
 			assert.Len(t, tuples, tt.expected)
 
 			// Validate specific tuple types for the comprehensive test case
-			if tt.name == "public v1 past meeting with committees" {
+			if tt.name == "public v1 past meeting with committee" {
 				// Check that we have the expected relations
 				foundPublic := false
 				foundMeeting := false
 				foundProject := false
-				foundCommittees := 0
+				foundCommittee := false
 
 				for _, tuple := range tuples {
 					if tuple.User == constants.UserWildcard && tuple.Relation == constants.RelationViewer {
@@ -169,14 +163,14 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 						foundProject = true
 					}
 					if tuple.Relation == constants.RelationCommittee {
-						foundCommittees++
+						foundCommittee = true
 					}
 				}
 
 				assert.True(t, foundPublic, "should have public viewer relation")
 				assert.True(t, foundMeeting, "should have meeting relation")
 				assert.True(t, foundProject, "should have project relation")
-				assert.Equal(t, 2, foundCommittees, "should have 2 committee relations")
+				assert.True(t, foundCommittee, "should have committee relation")
 			}
 		})
 	}
@@ -264,11 +258,10 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "valid v1 meeting with all fields",
 			messageData: mustJSONV1(v1MeetingStub{
-				UID:        "meeting-123",
-				Public:     true,
+				MeetingID:  "meeting-123",
+				Visibility: "public",
 				ProjectUID: "project-456",
-				Committees: []string{"committee1", "committee2"},
-				Hosts:      []string{"host1", "host2"},
+				Committee:  "committee1",
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -282,10 +275,10 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 					ContinuationToken: "",
 				}, nil).Once()
 
-				// Mock the Write operation - expect 6 tuples:
-				// 1 public viewer, 1 project relation, 2 committees, 2 hosts
+				// Mock the Write operation - expect 3 tuples:
+				// 1 public viewer, 1 project relation, 1 committee
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
-					return len(req.Writes) == 6 && len(req.Deletes) == 0
+					return len(req.Writes) == 3 && len(req.Deletes) == 0
 				})).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectedError:  false,
@@ -304,8 +297,8 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "missing project UID",
 			messageData: mustJSONV1(v1MeetingStub{
-				UID:    "meeting-123",
-				Public: true,
+				MeetingID:  "meeting-123",
+				Visibility: "public",
 			}),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error
@@ -360,13 +353,13 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 		expectedCalled bool
 	}{
 		{
-			name: "valid v1 past meeting with all fields",
+			name: "valid v1 past meeting",
 			messageData: mustJSONV1(v1PastMeetingStub{
-				UID:          "past-meeting-123",
-				V1MeetingUID: "meeting-456",
-				Public:       false,
-				ProjectUID:   "project-789",
-				Committees:   []string{"committee1", "committee2"},
+				MeetingAndOccurenceID: "past-meeting-123",
+				MeetingID:             "meeting-456",
+				Visibility:            "private",
+				ProjectUID:            "project-789",
+				Committee:             "committee1",
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -380,10 +373,10 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 					ContinuationToken: "",
 				}, nil).Once()
 
-				// Mock the Write operation - expect 4 tuples:
-				// 1 meeting relation, 1 project relation, 2 committees (no public viewer for private meeting)
+				// Mock the Write operation - expect 3 tuples:
+				// 1 meeting relation, 1 project relation, 1 committee (no public viewer for private meeting)
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
-					return len(req.Writes) == 4 && len(req.Deletes) == 0
+					return len(req.Writes) == 3 && len(req.Deletes) == 0
 				})).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectedError:  false,
@@ -402,9 +395,9 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "missing project UID",
 			messageData: mustJSONV1(v1PastMeetingStub{
-				UID:          "past-meeting-123",
-				V1MeetingUID: "meeting-456",
-				Public:       true,
+				MeetingAndOccurenceID: "past-meeting-123",
+				MeetingID:             "meeting-456",
+				Visibility:            "public",
 			}),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error
