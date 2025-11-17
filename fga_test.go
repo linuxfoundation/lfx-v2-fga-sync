@@ -1255,3 +1255,164 @@ func TestGetTuplesByUserAndObject(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncObjectTuples_ExcludeRelations tests the excludeRelations parameter functionality
+func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
+	tests := []struct {
+		name             string
+		object           string
+		desiredRelations []ClientTupleKey
+		existingTuples   []openfga.Tuple
+		excludeRelations []string
+		expectedWrites   int
+		expectedDeletes  int
+		description      string
+	}{
+		{
+			name:   "exclude participant relations from deletion",
+			object: "meeting:123",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "meeting:123"},
+				{User: "user:organizer1", Relation: "organizer", Object: "meeting:123"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "meeting:123"}},
+				{Key: openfga.TupleKey{User: "user:organizer1", Relation: "organizer", Object: "meeting:123"}},
+				{Key: openfga.TupleKey{User: "user:participant1", Relation: "participant", Object: "meeting:123"}},
+				{Key: openfga.TupleKey{User: "user:host1", Relation: "host", Object: "meeting:123"}},
+			},
+			excludeRelations: []string{"participant", "host"},
+			expectedWrites:   0, // viewer and organizer already exist
+			expectedDeletes:  0, // participant and host are excluded from deletion
+			description:      "should not delete participant or host relations when excluded",
+		},
+		{
+			name:   "exclude only host relation",
+			object: "meeting:456",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "meeting:456"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:participant1", Relation: "participant", Object: "meeting:456"}},
+				{Key: openfga.TupleKey{User: "user:host1", Relation: "host", Object: "meeting:456"}},
+			},
+			excludeRelations: []string{"host"},
+			expectedWrites:   1, // viewer needs to be added
+			expectedDeletes:  1, // participant should be deleted, host excluded
+			description:      "should delete participant but not host when only host is excluded",
+		},
+		{
+			name:   "no exclusions - delete all unmatched",
+			object: "meeting:789",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "meeting:789"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:participant1", Relation: "participant", Object: "meeting:789"}},
+				{Key: openfga.TupleKey{User: "user:host1", Relation: "host", Object: "meeting:789"}},
+			},
+			excludeRelations: []string{}, // no exclusions
+			expectedWrites:   1,          // viewer needs to be added
+			expectedDeletes:  2,          // both participant and host should be deleted
+			description:      "should delete all unmatched relations when no exclusions specified",
+		},
+		{
+			name:   "exclude past meeting participant relations",
+			object: "past_meeting:abc",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "past_meeting:abc"},
+				{User: "project:123", Relation: "project", Object: "past_meeting:abc"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "past_meeting:abc"}},
+				{Key: openfga.TupleKey{User: "project:123", Relation: "project", Object: "past_meeting:abc"}},
+				{Key: openfga.TupleKey{User: "user:user1", Relation: "host", Object: "past_meeting:abc"}},
+				{Key: openfga.TupleKey{User: "user:user2", Relation: "invitee", Object: "past_meeting:abc"}},
+				{Key: openfga.TupleKey{User: "user:user3", Relation: "attendee", Object: "past_meeting:abc"}},
+			},
+			excludeRelations: []string{"host", "invitee", "attendee"},
+			expectedWrites:   0, // all desired relations already exist
+			expectedDeletes:  0, // all participant relations are excluded
+			description:      "should not delete host, invitee, or attendee relations when excluded",
+		},
+		{
+			name:   "mixed scenario with some exclusions",
+			object: "meeting:mixed",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "meeting:mixed"},
+				{User: "user:new-organizer", Relation: "organizer", Object: "meeting:mixed"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:old-organizer", Relation: "organizer", Object: "meeting:mixed"}},
+				{Key: openfga.TupleKey{User: "user:participant1", Relation: "participant", Object: "meeting:mixed"}},
+				{Key: openfga.TupleKey{User: "user:host1", Relation: "host", Object: "meeting:mixed"}},
+			},
+			excludeRelations: []string{"participant", "host"},
+			expectedWrites:   2, // viewer and new-organizer need to be added
+			expectedDeletes:  1, // old-organizer should be deleted, participant/host excluded
+			description:      "should handle mixed writes, deletes, and exclusions correctly",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create mock client
+			mockClient := new(MockFgaClient)
+
+			// Mock the Read call to return existing tuples
+			mockClient.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+				return req.Object != nil && *req.Object == tt.object
+			}), mock.Anything).Return(&ClientReadResponse{
+				Tuples: tt.existingTuples,
+			}, nil).Once()
+
+			// Mock the Write call if there are expected writes or deletes
+			if tt.expectedWrites > 0 || tt.expectedDeletes > 0 {
+				mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					writesCount := len(req.Writes)
+					deletesCount := len(req.Deletes)
+					return writesCount == tt.expectedWrites && deletesCount == tt.expectedDeletes
+				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
+			}
+
+			// Create mock cache bucket
+			mockCache := new(MockNatsKeyValue)
+			mockCache.On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+
+			// Create service with mock client and cache
+			service := FgaService{
+				client:      mockClient,
+				cacheBucket: mockCache,
+			}
+			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations, tt.excludeRelations...)
+
+			// Verify no error
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+
+			// Verify write count
+			if len(writes) != tt.expectedWrites {
+				t.Errorf("%s: expected %d writes, got %d", tt.description, tt.expectedWrites, len(writes))
+			}
+
+			// Verify delete count
+			if len(deletes) != tt.expectedDeletes {
+				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
+			}
+
+			// Verify that excluded relations are not in the deletes list
+			for _, del := range deletes {
+				for _, excludedRel := range tt.excludeRelations {
+					if del.Relation == excludedRel {
+						t.Errorf("%s: excluded relation '%s' found in deletes list", tt.description, excludedRel)
+					}
+				}
+			}
+
+			// Verify all expectations were met
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
