@@ -341,6 +341,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			description: "meeting registrant remove",
 		},
 		{
+			subject:     constants.MeetingAttachmentUpdateAccessSubject,
+			handler:     handlerService.meetingAttachmentUpdateAccessHandler,
+			description: "meeting attachment update access",
+		},
+		{
+			subject:     constants.MeetingAttachmentDeleteAccessSubject,
+			handler:     handlerService.meetingAttachmentDeleteAccessHandler,
+			description: "meeting attachment delete access",
+		},
+		{
 			subject:     constants.PastMeetingUpdateAccessSubject,
 			handler:     handlerService.pastMeetingUpdateAccessHandler,
 			description: "past meeting update access",
@@ -404,6 +414,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			subject:     constants.PastMeetingSummaryUpdateAccessSubject,
 			handler:     handlerService.pastMeetingSummaryUpdateAccessHandler,
 			description: "past meeting summary update access",
+		},
+		{
+			subject:     constants.PastMeetingAttachmentUpdateAccessSubject,
+			handler:     handlerService.pastMeetingAttachmentUpdateAccessHandler,
+			description: "past meeting attachment update access",
+		},
+		{
+			subject:     constants.PastMeetingAttachmentDeleteAccessSubject,
+			handler:     handlerService.pastMeetingAttachmentDeleteAccessHandler,
+			description: "past meeting attachment delete access",
 		},
 		{
 			subject:     constants.V1MeetingUpdateAccessSubject,

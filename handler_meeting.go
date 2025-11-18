@@ -83,18 +83,26 @@ func (h *HandlerService) meetingUpdateAccessHandler(message INatsMsg) error {
 
 	object := constants.ObjectTypeMeeting + meeting.UID
 
-	// Build a list of tuples to sync.
+	// Build a list of tuples to sync. It should include all the tuples that need to be synced
+	// with respect to the meeting object or else they will be deleted.
 	//
-	// It is important that all tuples that should exist with respect to the meeting object
-	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
-	// all tuples that are not in the tuples list parameter.
+	// Note: participant and host relations, however, are excluded from the sync operation
+	// because they are managed separately via put_registrant and remove_registrant messages.
 	tuples, err := h.buildMeetingTuples(object, meeting)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build meeting tuples")
 		return err
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	// Sync the tuples.
+	// Exclude participant and host relations from deletion - these are managed by other messages.
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
+		ctx,
+		object,
+		tuples,
+		constants.RelationParticipant,
+		constants.RelationHost,
+	)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
@@ -329,4 +337,98 @@ func (h *HandlerService) meetingRegistrantPutHandler(message INatsMsg) error {
 // meetingRegistrantRemoveHandler handles removing a registrant from a meeting.
 func (h *HandlerService) meetingRegistrantRemoveHandler(message INatsMsg) error {
 	return h.processRegistrantMessage(message, registrantRemove)
+}
+
+type meetingAttachmentStub struct {
+	UID        string `json:"uid"`
+	MeetingUID string `json:"meeting_uid"`
+}
+
+// buildMeetingAttachmentTuples builds all of the tuples for a meeting attachment object.
+func (h *HandlerService) buildMeetingAttachmentTuples(
+	object string,
+	attachment *meetingAttachmentStub,
+) ([]client.ClientTupleKey, error) {
+	tuples := h.fgaService.NewTupleKeySlice(1)
+
+	// Add the meeting relation to associate this attachment with its meeting
+	if attachment.MeetingUID != "" {
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(constants.ObjectTypeMeeting+attachment.MeetingUID, constants.RelationMeeting, object),
+		)
+	}
+
+	return tuples, nil
+}
+
+// meetingAttachmentUpdateAccessHandler handles meeting attachment access control updates.
+func (h *HandlerService) meetingAttachmentUpdateAccessHandler(message INatsMsg) error {
+	ctx := context.Background()
+
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling meeting attachment access control update")
+
+	// Parse the event data.
+	attachment := new(meetingAttachmentStub)
+	var err error
+	err = json.Unmarshal(message.Data(), attachment)
+	if err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+		return err
+	}
+
+	// Validate required fields.
+	if attachment.UID == "" {
+		logger.ErrorContext(ctx, "meeting attachment UID not found")
+		return errors.New("meeting attachment UID not found")
+	}
+	if attachment.MeetingUID == "" {
+		logger.ErrorContext(ctx, "meeting UID not found")
+		return errors.New("meeting UID not found")
+	}
+
+	object := constants.ObjectTypeMeetingAttachment + attachment.UID
+
+	// Build a list of tuples to sync.
+	//
+	// It is important that all tuples that should exist with respect to the meeting attachment object
+	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
+	// all tuples that are not in the tuples list parameter.
+	tuples, err := h.buildMeetingAttachmentTuples(object, attachment)
+	if err != nil {
+		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build meeting attachment tuples")
+		return err
+	}
+
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	if err != nil {
+		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		return err
+	}
+
+	logger.With(
+		"tuples", tuples,
+		"object", object,
+		"writes", tuplesWrites,
+		"deletes", tuplesDeletes,
+	).InfoContext(ctx, "synced tuples")
+
+	if message.Reply() != "" {
+		// Send a reply if an inbox was provided.
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.With("object", object).InfoContext(ctx, "sent meeting attachment access control update response")
+	}
+
+	return nil
+}
+
+// meetingAttachmentDeleteAccessHandler handles deleting all tuples for a meeting attachment object.
+//
+// This should happen when a meeting attachment is deleted.
+func (h *HandlerService) meetingAttachmentDeleteAccessHandler(message INatsMsg) error {
+	return h.processDeleteAllAccessMessage(message, constants.ObjectTypeMeetingAttachment, "meeting attachment")
 }
