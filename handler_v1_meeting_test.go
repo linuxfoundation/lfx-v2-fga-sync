@@ -467,7 +467,7 @@ func TestV1PastMeetingRecordingUpdateAccessHandler(t *testing.T) {
 
 				// Mock the Read operation for SyncObjectTuples
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
-					return req.Object != nil && *req.Object == "v1_past_meeting_recording:past-meeting-456"
+					return req.Object != nil && *req.Object == "v1_past_meeting_recording:recording-123"
 				}), mock.Anything).Return(&ClientReadResponse{
 					Tuples:            []openfga.Tuple{},
 					ContinuationToken: "",

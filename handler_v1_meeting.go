@@ -67,7 +67,11 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 		return err
 	}
 
-	// Grab the project ID.
+	if meeting.MeetingID == "" {
+		logger.ErrorContext(ctx, "v1 meeting ID not found")
+		return errors.New("v1 meeting ID not found")
+	}
+
 	if meeting.ProjectUID == "" {
 		logger.ErrorContext(ctx, "v1 meeting project ID not found")
 		return errors.New("v1 meeting project ID not found")
@@ -182,7 +186,11 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return err
 	}
 
-	// Grab the project ID.
+	if pastMeeting.MeetingAndOccurrenceID == "" {
+		logger.ErrorContext(ctx, "v1 past meeting ID not found")
+		return errors.New("v1 past meeting ID not found")
+	}
+
 	if pastMeeting.ProjectUID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting project ID not found")
 		return errors.New("v1 past meeting project ID not found")
@@ -340,13 +348,17 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 		return err
 	}
 
-	// Validate required fields.
+	if recording.ID == "" {
+		logger.ErrorContext(ctx, "v1 past meeting recording ID not found")
+		return errors.New("v1 past meeting recording ID not found")
+	}
+
 	if recording.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingRecording + recording.MeetingAndOccurrenceID
+	object := constants.ObjectTypeV1PastMeetingRecording + recording.ID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
@@ -403,13 +415,17 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 		return err
 	}
 
-	// Validate required fields.
+	if transcript.ID == "" {
+		logger.ErrorContext(ctx, "v1 past meeting transcript ID not found")
+		return errors.New("v1 past meeting transcript ID not found")
+	}
+
 	if transcript.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingTranscript + transcript.MeetingAndOccurrenceID
+	object := constants.ObjectTypeV1PastMeetingTranscript + transcript.ID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
@@ -466,13 +482,17 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 		return err
 	}
 
-	// Validate required fields.
+	if summary.ID == "" {
+		logger.ErrorContext(ctx, "v1 past meeting summary ID not found")
+		return errors.New("v1 past meeting summary ID not found")
+	}
+
 	if summary.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingSummary + summary.MeetingAndOccurrenceID
+	object := constants.ObjectTypeV1PastMeetingSummary + summary.ID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
