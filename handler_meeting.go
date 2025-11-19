@@ -159,10 +159,10 @@ func (h *HandlerService) processRegistrantMessage(message INatsMsg, operation re
 	ctx := context.Background()
 
 	// Log the operation type
-	operationType := "put"
+	operationType := constants.OperationPut
 	responseMsg := "sent registrant put response"
 	if operation == registrantRemove {
-		operationType = "remove"
+		operationType = constants.OperationRemove
 		responseMsg = "sent registrant remove response"
 	}
 

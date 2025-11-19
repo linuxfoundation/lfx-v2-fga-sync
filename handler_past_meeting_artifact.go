@@ -66,11 +66,11 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 
 	// Handle artifact visibility
 	switch artifactVisibility {
-	case "public":
+	case constants.VisibilityPublic:
 		// Public access - all users get viewer access
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 
-	case "meeting_hosts":
+	case constants.VisibilityMeetingHosts:
 		// Only hosts get viewer access
 		for _, participant := range participants {
 			if participant.Host && participant.Username != "" {
@@ -81,7 +81,7 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 			}
 		}
 
-	case "meeting_participants":
+	case constants.VisibilityMeetingParticipants:
 		// All participants get viewer access
 		for _, participant := range participants {
 			if participant.Username != "" {

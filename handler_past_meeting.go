@@ -244,7 +244,7 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 	isRemoving bool,
 ) error {
 	// If public visibility, artifacts use user:* so no individual user management needed
-	if artifactVisibility == "public" {
+	if artifactVisibility == constants.VisibilityPublic {
 		return nil
 	}
 
@@ -255,10 +255,10 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 		shouldHaveViewerAccess = false
 	} else {
 		switch artifactVisibility {
-		case "meeting_hosts":
+		case constants.VisibilityMeetingHosts:
 			// Only hosts should have viewer access
 			shouldHaveViewerAccess = isHost
-		case "meeting_participants":
+		case constants.VisibilityMeetingParticipants:
 			// All participants (hosts and non-hosts) should have viewer access
 			shouldHaveViewerAccess = true
 		}
