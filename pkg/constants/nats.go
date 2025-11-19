@@ -71,6 +71,14 @@ const (
 	// The subject is of the form: lfx.delete_all_access.committee
 	CommitteeDeleteAllAccessSubject = "lfx.delete_all_access.committee"
 
+	// CommitteeMemberPutSubject is the subject for adding committee members.
+	// The subject is of the form: lfx.put_member.committee
+	CommitteeMemberPutSubject = "lfx.put_member.committee"
+
+	// CommitteeMemberRemoveSubject is the subject for removing committee members.
+	// The subject is of the form: lfx.remove_member.committee
+	CommitteeMemberRemoveSubject = "lfx.remove_member.committee"
+
 	// GroupsIOServiceUpdateAccessSubject is the subject for the groups.io service access control updates.
 	// The subject is of the form: lfx.update_access.groupsio_service
 	GroupsIOServiceUpdateAccessSubject = "lfx.update_access.groupsio_service"
