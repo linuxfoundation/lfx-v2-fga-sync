@@ -371,6 +371,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			description: "committee delete all access",
 		},
 		{
+			subject:     constants.CommitteeMemberPutSubject,
+			handler:     handlerService.committeeMemberPutHandler,
+			description: "committee member put",
+		},
+		{
+			subject:     constants.CommitteeMemberRemoveSubject,
+			handler:     handlerService.committeeMemberRemoveHandler,
+			description: "committee member remove",
+		},
+		{
 			subject:     constants.GroupsIOServiceUpdateAccessSubject,
 			handler:     handlerService.groupsIOServiceUpdateAccessHandler,
 			description: "groups.io service update access",

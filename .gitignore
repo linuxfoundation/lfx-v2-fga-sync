@@ -9,6 +9,7 @@
 *.dll
 *.so
 *.dylib
+lfx-v2-fga-sync
 
 # Go build artifacts
 *.test

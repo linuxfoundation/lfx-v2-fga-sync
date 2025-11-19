@@ -45,4 +45,8 @@ const (
 
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)
+
+	// Operation types for logging and message processing
+	OperationPut    = "put"
+	OperationRemove = "remove"
 )

@@ -255,6 +255,29 @@ When a participant is removed:
 1. Removes all their relations from the past meeting
 2. Removes their viewer access from all artifacts (regardless of artifact_visibility)
 
+### Committee Member Put Message (`lfx.put_member.committee`)
+
+```json
+{
+  "username": "user-123",
+  "committee_uid": "committee-456"
+}
+```
+
+Adds a member to a committee. This is an idempotent operation that creates the `member` relation between the user
+and the committee.
+
+### Committee Member Remove Message (`lfx.remove_member.committee`)
+
+```json
+{
+  "username": "user-123",
+  "committee_uid": "committee-456"
+}
+```
+
+Removes a member from a committee. This deletes the `member` relation between the user and the committee.
+
 ## Testing
 
 ### Running Tests
@@ -286,12 +309,14 @@ go test -bench=. ./...
 Each message type has a dedicated handler function:
 
 - `accessCheckHandler()` - Processes authorization queries with caching
-- `projectUpdateHandler()` - Manages project permission synchronization  
+- `projectUpdateHandler()` - Manages project permission synchronization
 - `projectDeleteHandler()` - Handles cleanup of project permissions
 - `meetingUpdateAccessHandler()` - Manages meeting permission synchronization
 - `meetingDeleteAllAccessHandler()` - Handles cleanup of meeting permissions
-- `meetingRegistrantAddHandler()` - Adds meeting registrants (participant/host)
+- `meetingRegistrantPutHandler()` - Adds meeting registrants (participant/host)
 - `meetingRegistrantRemoveHandler()` - Removes meeting registrants
+- `committeeMemberPutHandler()` - Adds committee members
+- `committeeMemberRemoveHandler()` - Removes committee members
 
 ### Service Abstraction
 
