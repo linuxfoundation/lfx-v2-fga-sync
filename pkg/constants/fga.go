@@ -54,4 +54,13 @@ const (
 
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)
+
+	// Artifact visibility settings
+	VisibilityPublic              = "public"
+	VisibilityMeetingHosts        = "meeting_hosts"
+	VisibilityMeetingParticipants = "meeting_participants"
+
+	// Operation types
+	OperationPut    = "put"
+	OperationRemove = "remove"
 )

@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-// mustJSON is a helper function to marshal JSON that panics on error
-func mustJSONV1(v interface{}) []byte {
+// mustMarshalJSON is a helper function to marshal JSON that panics on error
+func mustMarshalJSON(v interface{}) []byte {
 	data, err := json.Marshal(v)
 	if err != nil {
 		panic(err)
@@ -110,20 +110,20 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 		{
 			name: "minimal v1 past meeting",
 			pastMeeting: &v1PastMeetingStub{
-				MeetingAndOccurenceID: "past-meeting-occurrence-id",
-				MeetingID:             "meeting-123",
-				ProjectUID:            "proj-123",
+				MeetingAndOccurrenceID: "past-meeting-occurrence-id",
+				MeetingID:              "meeting-123",
+				ProjectUID:             "proj-123",
 			},
 			expected: 2, // meeting relation + project relation
 		},
 		{
 			name: "public v1 past meeting with committee",
 			pastMeeting: &v1PastMeetingStub{
-				MeetingAndOccurenceID: "past-meeting-occurrence-id",
-				MeetingID:             "meeting-123",
-				Visibility:            "public",
-				ProjectUID:            "proj-123",
-				Committee:             "committee-1",
+				MeetingAndOccurrenceID: "past-meeting-occurrence-id",
+				MeetingID:              "meeting-123",
+				Visibility:             "public",
+				ProjectUID:             "proj-123",
+				Committee:              "committee-1",
 			},
 			expected: 4, // public + meeting + project + committee
 		},
@@ -138,7 +138,7 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 				},
 			}
 
-			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.MeetingAndOccurenceID
+			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.MeetingAndOccurrenceID
 			tuples, err := handlerService.buildV1PastMeetingTuples(object, tt.pastMeeting)
 
 			assert.NoError(t, err)
@@ -257,7 +257,7 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 	}{
 		{
 			name: "valid v1 meeting with all fields",
-			messageData: mustJSONV1(v1MeetingStub{
+			messageData: mustMarshalJSON(v1MeetingStub{
 				MeetingID:  "meeting-123",
 				Visibility: "public",
 				ProjectUID: "project-456",
@@ -296,7 +296,7 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 		},
 		{
 			name: "missing project UID",
-			messageData: mustJSONV1(v1MeetingStub{
+			messageData: mustMarshalJSON(v1MeetingStub{
 				MeetingID:  "meeting-123",
 				Visibility: "public",
 			}),
@@ -354,12 +354,12 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 	}{
 		{
 			name: "valid v1 past meeting",
-			messageData: mustJSONV1(v1PastMeetingStub{
-				MeetingAndOccurenceID: "past-meeting-123",
-				MeetingID:             "meeting-456",
-				Visibility:            "private",
-				ProjectUID:            "project-789",
-				Committee:             "committee1",
+			messageData: mustMarshalJSON(v1PastMeetingStub{
+				MeetingAndOccurrenceID: "past-meeting-123",
+				MeetingID:              "meeting-456",
+				Visibility:             "private",
+				ProjectUID:             "project-789",
+				Committee:              "committee1",
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -394,10 +394,10 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 		},
 		{
 			name: "missing project UID",
-			messageData: mustJSONV1(v1PastMeetingStub{
-				MeetingAndOccurenceID: "past-meeting-123",
-				MeetingID:             "meeting-456",
-				Visibility:            "public",
+			messageData: mustMarshalJSON(v1PastMeetingStub{
+				MeetingAndOccurrenceID: "past-meeting-123",
+				MeetingID:              "meeting-456",
+				Visibility:             "public",
 			}),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error
@@ -453,21 +453,21 @@ func TestV1PastMeetingRecordingUpdateAccessHandler(t *testing.T) {
 	}{
 		{
 			name: "valid v1 recording with public visibility",
-			messageData: mustJSONV1(V1PastMeetingRecordingAccessMessage{
-				UID:                "recording-123",
-				V1PastMeetingUID:   "past-meeting-456",
-				ArtifactVisibility: "public",
-				Participants: []V1PastMeetingParticipant{
-					{Username: "user1", Host: true, IsInvited: true, IsAttended: true},
-				},
-			}),
+			messageData: []byte(`{
+				"id": "recording-123",
+				"meeting_and_occurrence_id": "past-meeting-456",
+				"recording_access": "public",
+				"participants": [
+					{"lf_sso": "user1", "host": true, "is_invited": true, "is_attended": true}
+				]
+			}`),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				msg.On("Respond", []byte("OK")).Return(nil).Once()
 
 				// Mock the Read operation for SyncObjectTuples
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
-					return req.Object != nil && *req.Object == "v1_past_meeting_recording:recording-123"
+					return req.Object != nil && *req.Object == "v1_past_meeting_recording:past-meeting-456"
 				}), mock.Anything).Return(&ClientReadResponse{
 					Tuples:            []openfga.Tuple{},
 					ContinuationToken: "",
@@ -494,10 +494,10 @@ func TestV1PastMeetingRecordingUpdateAccessHandler(t *testing.T) {
 		},
 		{
 			name: "missing v1 past meeting UID",
-			messageData: mustJSONV1(V1PastMeetingRecordingAccessMessage{
-				UID:                "recording-123",
-				ArtifactVisibility: "public",
-			}),
+			messageData: []byte(`{
+				"id": "recording-123",
+				"recording_access": "public"
+			}`),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error
 			},
@@ -624,7 +624,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 	}{
 		{
 			name: "put v1 participant (new registrant)",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-123",
 				Username:  "user-123",
 				MeetingID: "meeting-456",
@@ -654,7 +654,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 		},
 		{
 			name: "put v1 host (new registrant)",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-456",
 				Username:  "host-123",
 				MeetingID: "meeting-456",
@@ -684,7 +684,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 		},
 		{
 			name: "put v1 participant to host (role change)",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-789",
 				Username:  "user-123",
 				MeetingID: "meeting-456",
@@ -724,7 +724,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 		},
 		{
 			name: "put v1 host - already exists (no changes)",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-000",
 				Username:  "host-123",
 				MeetingID: "meeting-456",
@@ -758,7 +758,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 		},
 		{
 			name: "missing v1 username",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-111",
 				MeetingID: "meeting-456",
 				Host:      false,
@@ -770,7 +770,7 @@ func TestV1MeetingRegistrantPutHandler(t *testing.T) {
 		},
 		{
 			name: "missing v1 meeting ID",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:       "registrant-222",
 				Username: "user-123",
 				Host:     false,
@@ -818,7 +818,7 @@ func TestV1MeetingRegistrantRemoveHandler(t *testing.T) {
 	}{
 		{
 			name: "remove v1 participant",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-333",
 				Username:  "user-123",
 				MeetingID: "meeting-456",
@@ -840,7 +840,7 @@ func TestV1MeetingRegistrantRemoveHandler(t *testing.T) {
 		},
 		{
 			name: "remove v1 host",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-444",
 				Username:  "host-123",
 				MeetingID: "meeting-456",
@@ -870,7 +870,7 @@ func TestV1MeetingRegistrantRemoveHandler(t *testing.T) {
 		},
 		{
 			name: "missing v1 username",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:        "registrant-555",
 				MeetingID: "meeting-456",
 				Host:      false,
@@ -882,7 +882,7 @@ func TestV1MeetingRegistrantRemoveHandler(t *testing.T) {
 		},
 		{
 			name: "missing v1 meeting ID",
-			messageData: mustJSONV1(v1RegistrantStub{
+			messageData: mustMarshalJSON(v1RegistrantStub{
 				ID:       "registrant-666",
 				Username: "user-123",
 				Host:     false,

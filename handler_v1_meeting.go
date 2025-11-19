@@ -29,7 +29,7 @@ func (h *HandlerService) buildV1MeetingTuples(
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
 	// Convert the "public" attribute to a "user:*" relation.
-	if meeting.Visibility == "public" {
+	if meeting.Visibility == constants.VisibilityPublic {
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 	}
 
@@ -121,11 +121,11 @@ func (h *HandlerService) v1MeetingDeleteAllAccessHandler(message INatsMsg) error
 
 // v1PastMeetingStub represents the structure of v1 past meeting data for FGA sync.
 type v1PastMeetingStub struct {
-	MeetingAndOccurenceID string `json:"meeting_and_occurrence_id"` // The composite ID is the best unique identifier.
-	MeetingID             string `json:"meeting_id"`                // This is still a v1 meeting ID.
-	Visibility            string `json:"visibility"`                // v1 uses "visibility" instead of "public" boolean.
-	ProjectUID            string `json:"project_uid"`               // This will already have been translated to a v2 project UID.
-	Committee             string `json:"committee"`                 // This will already have been translated to a v2 committee UID.
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"` // The composite ID is the best unique identifier.
+	MeetingID              string `json:"meeting_id"`                // This is still a v1 meeting ID.
+	Visibility             string `json:"visibility"`                // v1 uses "visibility" instead of "public" boolean.
+	ProjectUID             string `json:"project_uid"`               // Translated to a v2 project UID.
+	Committee              string `json:"committee"`                 // Translated to a v2 committee UID.
 }
 
 // buildV1PastMeetingTuples builds all of the tuples for a v1 past meeting object.
@@ -136,7 +136,7 @@ func (h *HandlerService) buildV1PastMeetingTuples(
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
 	// Convert the "public" attribute to a "user:*" relation.
-	if pastMeeting.Visibility == "public" {
+	if pastMeeting.Visibility == constants.VisibilityPublic {
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 	}
 
@@ -188,7 +188,7 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return errors.New("v1 past meeting project ID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeeting + pastMeeting.MeetingAndOccurenceID
+	object := constants.ObjectTypeV1PastMeeting + pastMeeting.MeetingAndOccurrenceID
 
 	// Build a list of tuples to sync.
 	//
@@ -245,28 +245,28 @@ type V1PastMeetingParticipant struct {
 // V1PastMeetingRecordingAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 recordings.
 type V1PastMeetingRecordingAccessMessage struct {
-	UID                string                     `json:"uid"`
-	V1PastMeetingUID   string                     `json:"v1_past_meeting_uid"`
-	ArtifactVisibility string                     `json:"artifact_visibility"`
-	Participants       []V1PastMeetingParticipant `json:"participants"`
+	ID                     string                     `json:"id"`
+	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
+	RecordingAccess        string                     `json:"recording_access"`
+	Participants           []V1PastMeetingParticipant `json:"participants"`
 }
 
 // V1PastMeetingTranscriptAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 transcripts.
 type V1PastMeetingTranscriptAccessMessage struct {
-	UID                string                     `json:"uid"`
-	V1PastMeetingUID   string                     `json:"v1_past_meeting_uid"`
-	ArtifactVisibility string                     `json:"artifact_visibility"`
-	Participants       []V1PastMeetingParticipant `json:"participants"`
+	ID                     string                     `json:"id"`
+	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
+	TranscriptAccess       string                     `json:"transcript_access"`
+	Participants           []V1PastMeetingParticipant `json:"participants"`
 }
 
 // V1PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 summaries.
 type V1PastMeetingSummaryAccessMessage struct {
-	UID                string                     `json:"uid"`
-	V1PastMeetingUID   string                     `json:"v1_past_meeting_uid"`
-	ArtifactVisibility string                     `json:"artifact_visibility"`
-	Participants       []V1PastMeetingParticipant `json:"participants"`
+	ID                     string                     `json:"id"`
+	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
+	SummaryAccess          string                     `json:"summary_access"`
+	Participants           []V1PastMeetingParticipant `json:"participants"`
 }
 
 // buildV1PastMeetingArtifactTuples builds all of the tuples for a v1 past meeting artifact
@@ -289,11 +289,11 @@ func (h *HandlerService) buildV1PastMeetingArtifactTuples(
 
 	// Handle artifact visibility.
 	switch artifactVisibility {
-	case "public":
+	case constants.VisibilityPublic:
 		// Public access - all users get viewer access.
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 
-	case "meeting_hosts":
+	case constants.VisibilityMeetingHosts:
 		// Only hosts get viewer access.
 		for _, participant := range participants {
 			if participant.Host && participant.Username != "" {
@@ -304,7 +304,7 @@ func (h *HandlerService) buildV1PastMeetingArtifactTuples(
 			}
 		}
 
-	case "meeting_participants":
+	case constants.VisibilityMeetingParticipants:
 		// All participants get viewer access.
 		for _, participant := range participants {
 			if participant.Username != "" {
@@ -341,18 +341,18 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 	}
 
 	// Validate required fields.
-	if recording.V1PastMeetingUID == "" {
+	if recording.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingRecording + recording.UID
+	object := constants.ObjectTypeV1PastMeetingRecording + recording.MeetingAndOccurrenceID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
 		object,
-		recording.V1PastMeetingUID,
-		recording.ArtifactVisibility,
+		recording.MeetingAndOccurrenceID,
+		recording.RecordingAccess,
 		recording.Participants,
 	)
 	if err != nil {
@@ -404,18 +404,18 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 	}
 
 	// Validate required fields.
-	if transcript.V1PastMeetingUID == "" {
+	if transcript.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingTranscript + transcript.UID
+	object := constants.ObjectTypeV1PastMeetingTranscript + transcript.MeetingAndOccurrenceID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
 		object,
-		transcript.V1PastMeetingUID,
-		transcript.ArtifactVisibility,
+		transcript.MeetingAndOccurrenceID,
+		transcript.TranscriptAccess,
 		transcript.Participants,
 	)
 	if err != nil {
@@ -453,7 +453,10 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling v1 past meeting summary access control update")
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		"handling v1 past meeting summary access control update",
+	)
 
 	// Parse the event data.
 	summary := new(V1PastMeetingSummaryAccessMessage)
@@ -464,18 +467,18 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 	}
 
 	// Validate required fields.
-	if summary.V1PastMeetingUID == "" {
+	if summary.MeetingAndOccurrenceID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeetingSummary + summary.UID
+	object := constants.ObjectTypeV1PastMeetingSummary + summary.MeetingAndOccurrenceID
 
 	// Build a list of tuples to sync.
 	tuples, err := h.buildV1PastMeetingArtifactTuples(
 		object,
-		summary.V1PastMeetingUID,
-		summary.ArtifactVisibility,
+		summary.MeetingAndOccurrenceID,
+		summary.SummaryAccess,
 		summary.Participants,
 	)
 	if err != nil {
@@ -678,7 +681,11 @@ func (h *HandlerService) v1PutRegistrant(ctx context.Context, userPrincipal, mee
 }
 
 // v1RemoveRegistrant removes all registrant relations for a user from a v1 meeting.
-func (h *HandlerService) v1RemoveRegistrant(ctx context.Context, userPrincipal, meetingObject string, isHost bool) error {
+func (h *HandlerService) v1RemoveRegistrant(
+	ctx context.Context,
+	userPrincipal, meetingObject string,
+	isHost bool,
+) error {
 	// Determine the relation to remove.
 	relation := constants.RelationParticipant
 	if isHost {
