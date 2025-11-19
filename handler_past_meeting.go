@@ -83,18 +83,28 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 
 	object := constants.ObjectTypePastMeeting + pastMeeting.UID
 
-	// Build a list of tuples to sync.
+	// Build a list of tuples to sync. It should include all the tuples that need to be synced
+	// with respect to the past meeting object or else they will be deleted.
 	//
-	// It is important that all tuples that should exist with respect to the past meeting object
-	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
-	// all tuples that are not in the tuples list parameter.
+	// Note: host, invitee, and attendee relations, however, are excluded from the sync operation
+	// because they are managed separately via put_participant and remove_participant messages.
 	tuples, err := h.buildPastMeetingTuples(object, pastMeeting)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
 		return err
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	// Sync the tuples.
+	// Exclude host, invitee, and attendee relations from deletion - these are managed by other messages.
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
+		ctx,
+		object,
+		tuples,
+		constants.RelationOrganizer,
+		constants.RelationHost,
+		constants.RelationInvitee,
+		constants.RelationAttendee,
+	)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
@@ -234,7 +244,7 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 	isRemoving bool,
 ) error {
 	// If public visibility, artifacts use user:* so no individual user management needed
-	if artifactVisibility == "public" {
+	if artifactVisibility == constants.VisibilityPublic {
 		return nil
 	}
 
@@ -245,10 +255,10 @@ func (h *HandlerService) syncArtifactViewerAccessForParticipant(
 		shouldHaveViewerAccess = false
 	} else {
 		switch artifactVisibility {
-		case "meeting_hosts":
+		case constants.VisibilityMeetingHosts:
 			// Only hosts should have viewer access
 			shouldHaveViewerAccess = isHost
-		case "meeting_participants":
+		case constants.VisibilityMeetingParticipants:
 			// All participants (hosts and non-hosts) should have viewer access
 			shouldHaveViewerAccess = true
 		}
@@ -495,4 +505,105 @@ func (h *HandlerService) pastMeetingParticipantPutHandler(message INatsMsg) erro
 // pastMeetingParticipantRemoveHandler handles removing a past meeting participant from a past meeting.
 func (h *HandlerService) pastMeetingParticipantRemoveHandler(message INatsMsg) error {
 	return h.processPastMeetingParticipantMessage(message, pastMeetingParticipantRemove)
+}
+
+type pastMeetingAttachmentStub struct {
+	UID            string `json:"uid"`
+	PastMeetingUID string `json:"past_meeting_uid"`
+}
+
+// buildPastMeetingAttachmentTuples builds all of the tuples for a past meeting attachment object.
+func (h *HandlerService) buildPastMeetingAttachmentTuples(
+	object string,
+	attachment *pastMeetingAttachmentStub,
+) ([]client.ClientTupleKey, error) {
+	tuples := h.fgaService.NewTupleKeySlice(1)
+
+	// Add the past_meeting relation to associate this attachment with its past meeting
+	if attachment.PastMeetingUID != "" {
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+attachment.PastMeetingUID,
+				constants.RelationPastMeeting,
+				object,
+			),
+		)
+	}
+
+	return tuples, nil
+}
+
+// pastMeetingAttachmentUpdateAccessHandler handles past meeting attachment access control updates.
+func (h *HandlerService) pastMeetingAttachmentUpdateAccessHandler(message INatsMsg) error {
+	ctx := context.Background()
+
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		"handling past meeting attachment access control update",
+	)
+
+	// Parse the event data.
+	attachment := new(pastMeetingAttachmentStub)
+	var err error
+	err = json.Unmarshal(message.Data(), attachment)
+	if err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+		return err
+	}
+
+	// Validate required fields.
+	if attachment.UID == "" {
+		logger.ErrorContext(ctx, "past meeting attachment UID not found")
+		return errors.New("past meeting attachment UID not found")
+	}
+	if attachment.PastMeetingUID == "" {
+		logger.ErrorContext(ctx, "past meeting UID not found")
+		return errors.New("past meeting UID not found")
+	}
+
+	object := constants.ObjectTypePastMeetingAttachment + attachment.UID
+
+	// Build a list of tuples to sync.
+	//
+	// It is important that all tuples that should exist with respect to the past meeting attachment object
+	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
+	// all tuples that are not in the tuples list parameter.
+	tuples, err := h.buildPastMeetingAttachmentTuples(object, attachment)
+	if err != nil {
+		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting attachment tuples")
+		return err
+	}
+
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	if err != nil {
+		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		return err
+	}
+
+	logger.With(
+		"tuples", tuples,
+		"object", object,
+		"writes", tuplesWrites,
+		"deletes", tuplesDeletes,
+	).InfoContext(ctx, "synced tuples")
+
+	if message.Reply() != "" {
+		// Send a reply if an inbox was provided.
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.With("object", object).InfoContext(ctx, "sent past meeting attachment access control update response")
+	}
+
+	return nil
+}
+
+// pastMeetingAttachmentDeleteAccessHandler handles deleting all tuples for a past meeting attachment object.
+//
+// This should happen when a past meeting attachment is deleted.
+func (h *HandlerService) pastMeetingAttachmentDeleteAccessHandler(message INatsMsg) error {
+	return h.processDeleteAllAccessMessage(message, constants.ObjectTypePastMeetingAttachment, "past meeting attachment")
 }

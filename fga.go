@@ -176,6 +176,7 @@ func (s FgaService) SyncObjectTuples(
 	ctx context.Context,
 	object string,
 	relations []ClientTupleKey,
+	excludeRelations ...string,
 ) (
 	writes []ClientTupleKey,
 	deletes []ClientTupleKeyWithoutCondition,
@@ -184,6 +185,12 @@ func (s FgaService) SyncObjectTuples(
 	relationsMap, err := s.getRelationsMap(object, relations)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Create a map of relations to exclude from deletion
+	excludeMap := make(map[string]bool)
+	for _, rel := range excludeRelations {
+		excludeMap[rel] = true
 	}
 
 	tuples, err := s.ReadObjectTuples(ctx, object)
@@ -195,7 +202,8 @@ func (s FgaService) SyncObjectTuples(
 	// desired state of relationships passed as a function argument. Any matches
 	// seen are removed from "map" version of the desired relationships. Any live
 	// tuples not requested are added to the "deletes" list for the batch-write
-	// request. Any tuples for "user:<principal>" are added to a NATS message for
+	// request, assuming they are not in the excluded relations list.
+	// Any tuples for "user:<principal>" are added to a NATS message for
 	// a subsequent notify-after-invalidation.
 	for _, tuple := range tuples {
 		// See comment on our map key format earlier in this function.
@@ -212,6 +220,15 @@ func (s FgaService) SyncObjectTuples(
 				logger.With("message", msg).DebugContext(ctx, "will send user access notification")
 			}
 		case false:
+			// Check if this relation should be excluded from deletion
+			if excludeMap[tuple.Key.Relation] {
+				logger.With(
+					"user", tuple.Key.User,
+					"relation", tuple.Key.Relation,
+					"object", object,
+				).DebugContext(ctx, "skipping deletion of excluded relation")
+				continue
+			}
 			logger.With(
 				"user", tuple.Key.User,
 				"relation", tuple.Key.Relation,

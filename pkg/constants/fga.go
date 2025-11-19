@@ -36,17 +36,31 @@ const (
 	ObjectTypeCommittee             = "committee:"
 	ObjectTypeTeam                  = "team:"
 	ObjectTypeMeeting               = "meeting:"
+	ObjectTypeMeetingAttachment     = "meeting_attachment:"
 	ObjectTypePastMeeting           = "past_meeting:"
+	ObjectTypePastMeetingAttachment = "past_meeting_attachment:"
 	ObjectTypePastMeetingRecording  = "past_meeting_recording:"
 	ObjectTypePastMeetingTranscript = "past_meeting_transcript:"
 	ObjectTypePastMeetingSummary    = "past_meeting_summary:"
 	ObjectTypeGroupsIOService       = "groupsio_service:"
 	ObjectTypeGroupsIOMailingList   = "groupsio_mailing_list:"
 
+	// V1 object type prefixes (for read-only LFX v1 data sync)
+	ObjectTypeV1Meeting               = "v1_meeting:"
+	ObjectTypeV1PastMeeting           = "v1_past_meeting:"
+	ObjectTypeV1PastMeetingRecording  = "v1_past_meeting_recording:"
+	ObjectTypeV1PastMeetingTranscript = "v1_past_meeting_transcript:"
+	ObjectTypeV1PastMeetingSummary    = "v1_past_meeting_summary:"
+
 	// Special user identifiers
 	UserWildcard = "user:*" // Public access (all users)
 
-	// Operation types for logging and message processing
+	// Artifact visibility settings
+	VisibilityPublic              = "public"
+	VisibilityMeetingHosts        = "meeting_hosts"
+	VisibilityMeetingParticipants = "meeting_participants"
+
+	// Operation types
 	OperationPut    = "put"
 	OperationRemove = "remove"
 )

@@ -99,6 +99,58 @@ project-123
 
 Simple project UID string.
 
+### Committee Update Message (`lfx.update_access.committee`)
+
+```json
+{
+  "uid": "committee-123",
+  "object_type": "committee",
+  "public": true,
+  "relations": {
+    "member": ["user1", "user2"],
+    "viewer": ["user3"]
+  },
+  "references": {
+    "parent": "committee-456",
+    "project": "project-789"
+  }
+}
+```
+
+The committee update message uses a generic structure with `relations` and `references` maps to support flexible
+relation management.
+
+### Committee Delete Message (`lfx.delete_all_access.committee`)
+
+```text
+committee-123
+```
+
+Simple committee UID string.
+
+### Committee Member Put Message (`lfx.put_member.committee`)
+
+```json
+{
+  "username": "user-123",
+  "committee_uid": "committee-456"
+}
+```
+
+Adds a member to a committee. This is an idempotent operation that creates the `member` relation between the user
+and the committee.
+
+### Committee Member Remove Message (`lfx.remove_member.committee`)
+
+```json
+{
+  "username": "user-123",
+  "committee_uid": "committee-456"
+}
+```
+
+Removes a member from a committee. This deletes the `member` relation between the user and the committee.
+
 ### Meeting Update Message (`lfx.update_access.meeting`)
 
 ```json
@@ -139,6 +191,23 @@ Simple meeting UID string.
 }
 ```
 
+### Meeting Attachment Update Message (`lfx.update_access.meeting_attachment`)
+
+```json
+{
+  "uid": "attachment-123",
+  "meeting_uid": "meeting-456"
+}
+```
+
+### Meeting Attachment Delete Message (`lfx.delete_access.meeting_attachment`)
+
+```text
+attachment-123
+```
+
+Simple attachment UID string.
+
 ### Past Meeting Recording Update Message (`lfx.update_access.past_meeting_recording`)
 
 ```json
@@ -160,6 +229,7 @@ Simple meeting UID string.
 ```
 
 The `artifact_visibility` field determines who can access the recording:
+
 - `"public"`: All users get viewer access
 - `"meeting_hosts"`: Only participants with `host: true` get viewer access
 - `"meeting_participants"`: All participants get viewer access
@@ -185,6 +255,7 @@ The `artifact_visibility` field determines who can access the recording:
 ```
 
 The `artifact_visibility` field determines who can access the transcript:
+
 - `"public"`: All users get viewer access
 - `"meeting_hosts"`: Only participants with `host: true` get viewer access
 - `"meeting_participants"`: All participants get viewer access
@@ -210,6 +281,7 @@ The `artifact_visibility` field determines who can access the transcript:
 ```
 
 The `artifact_visibility` field determines who can access the summary:
+
 - `"public"`: All users get viewer access
 - `"meeting_hosts"`: Only participants with `host: true` get viewer access
 - `"meeting_participants"`: All participants get viewer access
@@ -229,6 +301,7 @@ The `artifact_visibility` field determines who can access the summary:
 ```
 
 When a participant is added or updated:
+
 1. Updates their relations on the past meeting (host, invitee, attendee)
 2. Syncs their viewer access to all artifacts based on `artifact_visibility`:
    - `"public"`: No action needed (user:* already grants access)
@@ -252,31 +325,26 @@ When a participant is added or updated:
 ```
 
 When a participant is removed:
+
 1. Removes all their relations from the past meeting
 2. Removes their viewer access from all artifacts (regardless of artifact_visibility)
 
-### Committee Member Put Message (`lfx.put_member.committee`)
+### Past Meeting Attachment Update Message (`lfx.update_access.past_meeting_attachment`)
 
 ```json
 {
-  "username": "user-123",
-  "committee_uid": "committee-456"
+  "uid": "attachment-123",
+  "past_meeting_uid": "past-meeting-456"
 }
 ```
 
-Adds a member to a committee. This is an idempotent operation that creates the `member` relation between the user
-and the committee.
+### Past Meeting Attachment Delete Message (`lfx.delete_access.past_meeting_attachment`)
 
-### Committee Member Remove Message (`lfx.remove_member.committee`)
-
-```json
-{
-  "username": "user-123",
-  "committee_uid": "committee-456"
-}
+```text
+attachment-123
 ```
 
-Removes a member from a committee. This deletes the `member` relation between the user and the committee.
+Simple attachment UID string.
 
 ## Testing
 
@@ -311,12 +379,14 @@ Each message type has a dedicated handler function:
 - `accessCheckHandler()` - Processes authorization queries with caching
 - `projectUpdateHandler()` - Manages project permission synchronization
 - `projectDeleteHandler()` - Handles cleanup of project permissions
+- `committeeUpdateAccessHandler()` - Manages committee permission synchronization
+- `committeeDeleteAllAccessHandler()` - Handles cleanup of committee permissions
+- `committeeMemberPutHandler()` - Adds committee members
+- `committeeMemberRemoveHandler()` - Removes committee members
 - `meetingUpdateAccessHandler()` - Manages meeting permission synchronization
 - `meetingDeleteAllAccessHandler()` - Handles cleanup of meeting permissions
 - `meetingRegistrantPutHandler()` - Adds meeting registrants (participant/host)
 - `meetingRegistrantRemoveHandler()` - Removes meeting registrants
-- `committeeMemberPutHandler()` - Adds committee members
-- `committeeMemberRemoveHandler()` - Removes committee members
 
 ### Service Abstraction
 
