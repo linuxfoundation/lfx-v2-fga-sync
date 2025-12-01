@@ -151,6 +151,14 @@ const (
 	// V1MeetingRegistrantRemoveSubject is the subject for removing v1 meeting registrants.
 	// The subject is of the form: lfx.remove_registrant.v1_meeting
 	V1MeetingRegistrantRemoveSubject = "lfx.remove_registrant.v1_meeting"
+
+	// V1PastMeetingParticipantPutSubject is the subject for adding v1 past meeting participants.
+	// The subject is of the form: lfx.put_participant.v1_past_meeting
+	V1PastMeetingParticipantPutSubject = "lfx.put_participant.v1_past_meeting"
+
+	// V1PastMeetingParticipantRemoveSubject is the subject for removing v1 past meeting participants.
+	// The subject is of the form: lfx.remove_participant.v1_past_meeting
+	V1PastMeetingParticipantRemoveSubject = "lfx.remove_participant.v1_past_meeting"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.

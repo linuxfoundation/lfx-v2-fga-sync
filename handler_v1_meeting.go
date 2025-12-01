@@ -253,28 +253,25 @@ type V1PastMeetingParticipant struct {
 // V1PastMeetingRecordingAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 recordings.
 type V1PastMeetingRecordingAccessMessage struct {
-	ID                     string                     `json:"id"`
-	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
-	RecordingAccess        string                     `json:"recording_access"`
-	Participants           []V1PastMeetingParticipant `json:"participants"`
+	ID                     string `json:"id"`
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
+	RecordingAccess        string `json:"recording_access"`
 }
 
 // V1PastMeetingTranscriptAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 transcripts.
 type V1PastMeetingTranscriptAccessMessage struct {
-	ID                     string                     `json:"id"`
-	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
-	TranscriptAccess       string                     `json:"transcript_access"`
-	Participants           []V1PastMeetingParticipant `json:"participants"`
+	ID                     string `json:"id"`
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
+	TranscriptAccess       string `json:"transcript_access"`
 }
 
 // V1PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for v1 summaries.
 type V1PastMeetingSummaryAccessMessage struct {
-	ID                     string                     `json:"id"`
-	MeetingAndOccurrenceID string                     `json:"meeting_and_occurrence_id"`
-	SummaryAccess          string                     `json:"summary_access"`
-	Participants           []V1PastMeetingParticipant `json:"participants"`
+	ID                     string `json:"id"`
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
+	SummaryAccess          string `json:"summary_access"`
 }
 
 // buildV1PastMeetingArtifactTuples builds all of the tuples for a v1 past meeting artifact
@@ -283,7 +280,6 @@ func (h *HandlerService) buildV1PastMeetingArtifactTuples(
 	object string,
 	v1PastMeetingUID string,
 	artifactVisibility string,
-	participants []V1PastMeetingParticipant,
 ) ([]client.ClientTupleKey, error) {
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
@@ -303,25 +299,35 @@ func (h *HandlerService) buildV1PastMeetingArtifactTuples(
 
 	case constants.VisibilityMeetingHosts:
 		// Only hosts get viewer access.
-		for _, participant := range participants {
-			if participant.Host && participant.Username != "" {
-				tuples = append(
-					tuples,
-					h.fgaService.TupleKey(constants.ObjectTypeUser+participant.Username, constants.RelationViewer, object),
-				)
-			}
-		}
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypeV1PastMeeting+v1PastMeetingUID,
+				constants.RelationPastMeetingForHostView,
+				object,
+			),
+		)
 
 	case constants.VisibilityMeetingParticipants:
 		// All participants get viewer access.
-		for _, participant := range participants {
-			if participant.Username != "" {
-				tuples = append(
-					tuples,
-					h.fgaService.TupleKey(constants.ObjectTypeUser+participant.Username, constants.RelationViewer, object),
-				)
-			}
-		}
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypeV1PastMeeting+v1PastMeetingUID,
+				constants.RelationPastMeetingForHostView,
+				object,
+			),
+			h.fgaService.TupleKey(
+				constants.ObjectTypeV1PastMeeting+v1PastMeetingUID,
+				constants.RelationPastMeetingForAttendeeView,
+				object,
+			),
+			h.fgaService.TupleKey(
+				constants.ObjectTypeV1PastMeeting+v1PastMeetingUID,
+				constants.RelationPastMeetingForParticipantView,
+				object,
+			),
+		)
 
 	default:
 		logger.ErrorContext(context.Background(), "unknown artifact visibility", "visibility", artifactVisibility)
@@ -365,7 +371,6 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 		object,
 		recording.MeetingAndOccurrenceID,
 		recording.RecordingAccess,
-		recording.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting recording tuples")
@@ -432,7 +437,6 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 		object,
 		transcript.MeetingAndOccurrenceID,
 		transcript.TranscriptAccess,
-		transcript.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting transcript tuples")
@@ -499,7 +503,6 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 		object,
 		summary.MeetingAndOccurrenceID,
 		summary.SummaryAccess,
-		summary.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting summary tuples")
@@ -740,4 +743,228 @@ func (h *HandlerService) v1MeetingRegistrantPutHandler(message INatsMsg) error {
 // v1MeetingRegistrantRemoveHandler handles removing a registrant from a v1 meeting.
 func (h *HandlerService) v1MeetingRegistrantRemoveHandler(message INatsMsg) error {
 	return h.v1ProcessRegistrantMessage(message, v1RegistrantRemove)
+}
+
+// v1PastMeetingParticipantStub represents the structure of v1 past meeting participant data for FGA sync.
+type v1PastMeetingParticipantStub struct {
+	UID                    string `json:"id"`
+	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
+	ArtifactVisibility     string `json:"artifact_visibility"`
+	Username               string `json:"lf_sso"`
+	Host                   bool   `json:"host"`
+	IsInvited              bool   `json:"is_invited"`
+	IsAttended             bool   `json:"is_attended"`
+}
+
+// v1PastMeetingParticipantOperation defines the type of operation to perform
+// on a v1 past meeting participant.
+type v1PastMeetingParticipantOperation int
+
+const (
+	v1PastMeetingParticipantPut v1PastMeetingParticipantOperation = iota
+	v1PastMeetingParticipantRemove
+)
+
+// v1ProcessPastMeetingParticipantMessage handles the complete message processing flow
+// for v1 past meeting participant operations.
+func (h *HandlerService) v1ProcessPastMeetingParticipantMessage(
+	message INatsMsg,
+	operation v1PastMeetingParticipantOperation,
+) error {
+	ctx := context.Background()
+
+	// Log the operation type
+	operationType := "put"
+	responseMsg := "sent v1 past meeting participant put response"
+	if operation == v1PastMeetingParticipantRemove {
+		operationType = "remove"
+		responseMsg = "sent v1 past meeting participant remove response"
+	}
+
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling v1 past meeting participant "+operationType)
+
+	// Parse the event data.
+	pastMeetingParticipant := new(v1PastMeetingParticipantStub)
+	err := json.Unmarshal(message.Data(), pastMeetingParticipant)
+	if err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+		return err
+	}
+
+	// Validate required fields.
+	if pastMeetingParticipant.Username == "" {
+		logger.ErrorContext(ctx, "v1 past meeting participant username not found")
+		return errors.New("v1 past meeting participant username not found")
+	}
+	if pastMeetingParticipant.MeetingAndOccurrenceID == "" {
+		logger.ErrorContext(ctx, "v1 past meeting UID not found")
+		return errors.New("v1 past meeting UID not found")
+	}
+
+	// Perform the FGA operation
+	err = h.v1HandlePastMeetingParticipantOperation(ctx, pastMeetingParticipant, operation)
+	if err != nil {
+		return err
+	}
+
+	// Send reply if requested
+	if message.Reply() != "" {
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.InfoContext(ctx, responseMsg,
+			"v1_past_meeting", constants.ObjectTypeV1PastMeeting+pastMeetingParticipant.MeetingAndOccurrenceID,
+			"v1_past_meeting_participant", constants.ObjectTypeUser+pastMeetingParticipant.Username,
+		)
+	}
+
+	return nil
+}
+
+// v1HandlePastMeetingParticipantOperation handles the FGA operation for putting/removing v1 past meeting participants
+func (h *HandlerService) v1HandlePastMeetingParticipantOperation(
+	ctx context.Context,
+	pastMeetingParticipant *v1PastMeetingParticipantStub,
+	operation v1PastMeetingParticipantOperation,
+) error {
+	pastMeetingObject := constants.ObjectTypeV1PastMeeting + pastMeetingParticipant.MeetingAndOccurrenceID
+	userPrincipal := constants.ObjectTypeUser + pastMeetingParticipant.Username
+
+	switch operation {
+	case v1PastMeetingParticipantPut:
+		return h.v1PutPastMeetingParticipant(ctx, userPrincipal, pastMeetingObject, pastMeetingParticipant)
+	case v1PastMeetingParticipantRemove:
+		return h.v1RemovePastMeetingParticipant(ctx, userPrincipal, pastMeetingObject, pastMeetingParticipant)
+	default:
+		return errors.New("unknown v1 past meeting participant operation")
+	}
+}
+
+// v1PutPastMeetingParticipant implements idempotent put operation for v1 past meeting participant relations
+func (h *HandlerService) v1PutPastMeetingParticipant(
+	ctx context.Context,
+	userPrincipal,
+	pastMeetingObject string,
+	participant *v1PastMeetingParticipantStub,
+) error {
+	// Determine desired relations based on participant flags
+	desiredRelationsMap := make(map[string]bool)
+	if participant.Host {
+		desiredRelationsMap[constants.RelationHost] = true
+	}
+	if participant.IsInvited {
+		desiredRelationsMap[constants.RelationInvitee] = true
+	}
+	if participant.IsAttended {
+		desiredRelationsMap[constants.RelationAttendee] = true
+	}
+
+	// Read existing relations for this user on this past meeting
+	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, pastMeetingObject)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to read existing v1 past meeting tuples",
+			errKey, err,
+			"user", userPrincipal,
+			"v1_past_meeting", pastMeetingObject,
+		)
+		return err
+	}
+
+	// Find existing participant relations for this user
+	var tuplesToDelete []client.ClientTupleKeyWithoutCondition
+	alreadyHasDesiredRelationsMap := make(map[string]bool)
+
+	for _, tuple := range existingTuples {
+		if tuple.Key.User == userPrincipal &&
+			(tuple.Key.Relation == constants.RelationHost ||
+				tuple.Key.Relation == constants.RelationInvitee ||
+				tuple.Key.Relation == constants.RelationAttendee) {
+			if desiredRelationsMap[tuple.Key.Relation] {
+				alreadyHasDesiredRelationsMap[tuple.Key.Relation] = true
+			} else {
+				// This is an existing relation that needs to be removed
+				tuplesToDelete = append(tuplesToDelete, client.ClientTupleKeyWithoutCondition{
+					User:     tuple.Key.User,
+					Relation: tuple.Key.Relation,
+					Object:   tuple.Key.Object,
+				})
+			}
+		}
+	}
+
+	// Prepare write operations
+	var tuplesToWrite []client.ClientTupleKey
+	for relation := range desiredRelationsMap {
+		if !alreadyHasDesiredRelationsMap[relation] {
+			tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, relation, pastMeetingObject))
+		}
+	}
+
+	// Apply changes if needed
+	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
+		err = h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
+		if err != nil {
+			logger.ErrorContext(ctx, "failed to put v1 past meeting participant tuples",
+				errKey, err,
+				"user", userPrincipal,
+				"tuples_to_write", tuplesToWrite,
+				"tuples_to_delete", tuplesToDelete,
+				"object", pastMeetingObject,
+			)
+			return err
+		}
+
+		logger.With(
+			"user", userPrincipal,
+			"relations", desiredRelationsMap,
+			"object", pastMeetingObject,
+		).InfoContext(ctx, "put v1 past meeting participant tuples")
+	} else {
+		logger.With(
+			"user", userPrincipal,
+			"relations", desiredRelationsMap,
+			"object", pastMeetingObject,
+		).InfoContext(ctx, "v1 past meeting participant already has correct past_meeting relations")
+	}
+
+	return nil
+}
+
+// v1RemovePastMeetingParticipant removes all existing v1 past meeting participant relations
+// for a user from a past meeting
+func (h *HandlerService) v1RemovePastMeetingParticipant(
+	ctx context.Context,
+	userPrincipal,
+	pastMeetingObject string,
+	participant *v1PastMeetingParticipantStub,
+) error {
+	err := h.fgaService.DeleteTuplesByUserAndObject(ctx, userPrincipal, pastMeetingObject)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to remove v1 past meeting participant tuples",
+			errKey, err,
+			"user", userPrincipal,
+			"object", pastMeetingObject,
+		)
+		return err
+	}
+
+	logger.With(
+		"user", userPrincipal,
+		"object", pastMeetingObject,
+	).InfoContext(ctx, "removed v1 past meeting participant tuples")
+
+	return nil
+}
+
+// v1PastMeetingParticipantPutHandler handles putting a v1 past meeting participant to a past meeting
+// (idempotent create/update).
+func (h *HandlerService) v1PastMeetingParticipantPutHandler(message INatsMsg) error {
+	return h.v1ProcessPastMeetingParticipantMessage(message, v1PastMeetingParticipantPut)
+}
+
+// v1PastMeetingParticipantRemoveHandler handles removing a v1 past meeting participant from a past meeting.
+func (h *HandlerService) v1PastMeetingParticipantRemoveHandler(message INatsMsg) error {
+	return h.v1ProcessPastMeetingParticipantMessage(message, v1PastMeetingParticipantRemove)
 }

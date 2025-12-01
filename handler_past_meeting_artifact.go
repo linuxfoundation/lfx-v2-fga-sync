@@ -22,28 +22,25 @@ type PastMeetingParticipant struct {
 // PastMeetingRecordingAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for recordings.
 type PastMeetingRecordingAccessMessage struct {
-	UID                string                   `json:"uid"`
-	PastMeetingUID     string                   `json:"past_meeting_uid"`
-	ArtifactVisibility string                   `json:"artifact_visibility"`
-	Participants       []PastMeetingParticipant `json:"participants"`
+	UID                string `json:"uid"`
+	PastMeetingUID     string `json:"past_meeting_uid"`
+	ArtifactVisibility string `json:"artifact_visibility"`
 }
 
 // PastMeetingTranscriptAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for transcripts.
 type PastMeetingTranscriptAccessMessage struct {
-	UID                string                   `json:"uid"`
-	PastMeetingUID     string                   `json:"past_meeting_uid"`
-	ArtifactVisibility string                   `json:"artifact_visibility"`
-	Participants       []PastMeetingParticipant `json:"participants"`
+	UID                string `json:"uid"`
+	PastMeetingUID     string `json:"past_meeting_uid"`
+	ArtifactVisibility string `json:"artifact_visibility"`
 }
 
 // PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
 // These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for summaries.
 type PastMeetingSummaryAccessMessage struct {
-	UID                string                   `json:"uid"`
-	PastMeetingUID     string                   `json:"past_meeting_uid"`
-	ArtifactVisibility string                   `json:"artifact_visibility"`
-	Participants       []PastMeetingParticipant `json:"participants"`
+	UID                string `json:"uid"`
+	PastMeetingUID     string `json:"past_meeting_uid"`
+	ArtifactVisibility string `json:"artifact_visibility"`
 }
 
 // buildPastMeetingArtifactTuples builds all of the tuples for a past meeting artifact
@@ -52,7 +49,6 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 	object string,
 	pastMeetingUID string,
 	artifactVisibility string,
-	participants []PastMeetingParticipant,
 ) ([]client.ClientTupleKey, error) {
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
@@ -64,33 +60,43 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 		)
 	}
 
-	// Handle artifact visibility
+	// Handle artifact visibility.
 	switch artifactVisibility {
 	case constants.VisibilityPublic:
-		// Public access - all users get viewer access
+		// Public access - all users get viewer access.
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 
 	case constants.VisibilityMeetingHosts:
-		// Only hosts get viewer access
-		for _, participant := range participants {
-			if participant.Host && participant.Username != "" {
-				tuples = append(
-					tuples,
-					h.fgaService.TupleKey(constants.ObjectTypeUser+participant.Username, constants.RelationViewer, object),
-				)
-			}
-		}
+		// Only hosts get viewer access.
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+pastMeetingUID,
+				constants.RelationPastMeetingForHostView,
+				object,
+			),
+		)
 
 	case constants.VisibilityMeetingParticipants:
-		// All participants get viewer access
-		for _, participant := range participants {
-			if participant.Username != "" {
-				tuples = append(
-					tuples,
-					h.fgaService.TupleKey(constants.ObjectTypeUser+participant.Username, constants.RelationViewer, object),
-				)
-			}
-		}
+		// All participants get viewer access.
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+pastMeetingUID,
+				constants.RelationPastMeetingForHostView,
+				object,
+			),
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+pastMeetingUID,
+				constants.RelationPastMeetingForAttendeeView,
+				object,
+			),
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+pastMeetingUID,
+				constants.RelationPastMeetingForParticipantView,
+				object,
+			),
+		)
 
 	default:
 		logger.ErrorContext(context.Background(), "unknown artifact visibility", "visibility", artifactVisibility)
@@ -130,7 +136,6 @@ func (h *HandlerService) pastMeetingRecordingUpdateAccessHandler(message INatsMs
 		object,
 		recording.PastMeetingUID,
 		recording.ArtifactVisibility,
-		recording.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting recording tuples")
@@ -193,7 +198,6 @@ func (h *HandlerService) pastMeetingTranscriptUpdateAccessHandler(message INatsM
 		object,
 		transcript.PastMeetingUID,
 		transcript.ArtifactVisibility,
-		transcript.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting transcript tuples")
@@ -253,7 +257,6 @@ func (h *HandlerService) pastMeetingSummaryUpdateAccessHandler(message INatsMsg)
 		object,
 		summary.PastMeetingUID,
 		summary.ArtifactVisibility,
-		summary.Participants,
 	)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting summary tuples")
