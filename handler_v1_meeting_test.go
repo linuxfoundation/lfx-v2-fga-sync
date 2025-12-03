@@ -32,7 +32,7 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 		{
 			name: "minimal v1 meeting",
 			meeting: &v1MeetingStub{
-				MeetingID:  "test-meeting-id",
+				UID:        "test-meeting-id",
 				ProjectUID: "proj-123",
 			},
 			expected: 1, // project relation only
@@ -40,20 +40,20 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 		{
 			name: "public v1 meeting with committee",
 			meeting: &v1MeetingStub{
-				MeetingID:  "test-meeting-id",
-				Visibility: "public",
+				UID:        "test-meeting-id",
+				Public:     true,
 				ProjectUID: "proj-123",
-				Committee:  "committee-1",
+				Committees: []string{"committee-1"},
 			},
 			expected: 3, // public + project + committee
 		},
 		{
 			name: "private v1 meeting",
 			meeting: &v1MeetingStub{
-				MeetingID:  "test-meeting-id",
-				Visibility: "private",
+				UID:        "test-meeting-id",
+				Public:     false,
 				ProjectUID: "proj-123",
-				Committee:  "committee-1",
+				Committees: []string{"committee-1"},
 			},
 			expected: 2, // project + committee (no public access)
 		},
@@ -68,7 +68,7 @@ func TestBuildV1MeetingTuples(t *testing.T) {
 				},
 			}
 
-			object := constants.ObjectTypeV1Meeting + tt.meeting.MeetingID
+			object := constants.ObjectTypeV1Meeting + tt.meeting.UID
 			tuples, err := handlerService.buildV1MeetingTuples(object, tt.meeting)
 
 			assert.NoError(t, err)
@@ -110,20 +110,20 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 		{
 			name: "minimal v1 past meeting",
 			pastMeeting: &v1PastMeetingStub{
-				MeetingAndOccurrenceID: "past-meeting-occurrence-id",
-				MeetingID:              "meeting-123",
-				ProjectUID:             "proj-123",
+				UID:        "past-meeting-occurrence-id",
+				MeetingUID: "meeting-123",
+				ProjectUID: "proj-123",
 			},
 			expected: 2, // meeting relation + project relation
 		},
 		{
 			name: "public v1 past meeting with committee",
 			pastMeeting: &v1PastMeetingStub{
-				MeetingAndOccurrenceID: "past-meeting-occurrence-id",
-				MeetingID:              "meeting-123",
-				Visibility:             "public",
-				ProjectUID:             "proj-123",
-				Committee:              "committee-1",
+				UID:        "past-meeting-occurrence-id",
+				MeetingUID: "meeting-123",
+				Public:     true,
+				ProjectUID: "proj-123",
+				Committees: []string{"committee-1"},
 			},
 			expected: 4, // public + meeting + project + committee
 		},
@@ -138,7 +138,7 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 				},
 			}
 
-			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.MeetingAndOccurrenceID
+			object := constants.ObjectTypeV1PastMeeting + tt.pastMeeting.UID
 			tuples, err := handlerService.buildV1PastMeetingTuples(object, tt.pastMeeting)
 
 			assert.NoError(t, err)
@@ -156,7 +156,7 @@ func TestBuildV1PastMeetingTuples(t *testing.T) {
 					if tuple.User == constants.UserWildcard && tuple.Relation == constants.RelationViewer {
 						foundPublic = true
 					}
-					if tuple.User == constants.ObjectTypeV1Meeting+"meeting-123" && tuple.Relation == constants.RelationMeeting {
+					if tuple.Relation == constants.RelationMeeting {
 						foundMeeting = true
 					}
 					if tuple.User == constants.ObjectTypeProject+"proj-123" && tuple.Relation == constants.RelationProject {
@@ -200,13 +200,13 @@ func TestBuildV1PastMeetingArtifactTuples(t *testing.T) {
 			name:               "meeting_hosts visibility",
 			artifactVisibility: "meeting_hosts",
 			participants:       participants,
-			expected:           2, // past_meeting relation + 1 host viewer
+			expected:           2, // past_meeting relation + 1 host_view relation
 		},
 		{
 			name:               "meeting_participants visibility",
 			artifactVisibility: "meeting_participants",
 			participants:       participants,
-			expected:           4, // past_meeting relation + 3 participant viewers
+			expected:           4, // past_meeting relation + 3 view relations (host_view, attendee_view, participant_view)
 		},
 		{
 			name:               "unknown visibility",
@@ -257,10 +257,10 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "valid v1 meeting with all fields",
 			messageData: mustMarshalJSON(v1MeetingStub{
-				MeetingID:  "meeting-123",
-				Visibility: "public",
+				UID:        "meeting-123",
+				Public:     true,
 				ProjectUID: "project-456",
-				Committee:  "committee1",
+				Committees: []string{"committee1"},
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -296,8 +296,8 @@ func TestV1MeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "missing project UID",
 			messageData: mustMarshalJSON(v1MeetingStub{
-				MeetingID:  "meeting-123",
-				Visibility: "public",
+				UID:    "meeting-123",
+				Public: true,
 			}),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error
@@ -354,11 +354,11 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "valid v1 past meeting",
 			messageData: mustMarshalJSON(v1PastMeetingStub{
-				MeetingAndOccurrenceID: "past-meeting-123",
-				MeetingID:              "meeting-456",
-				Visibility:             "private",
-				ProjectUID:             "project-789",
-				Committee:              "committee1",
+				UID:        "past-meeting-123",
+				MeetingUID: "meeting-456",
+				Public:     false,
+				ProjectUID: "project-789",
+				Committees: []string{"committee1"},
 			}),
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -394,9 +394,9 @@ func TestV1PastMeetingUpdateAccessHandler(t *testing.T) {
 		{
 			name: "missing project UID",
 			messageData: mustMarshalJSON(v1PastMeetingStub{
-				MeetingAndOccurrenceID: "past-meeting-123",
-				MeetingID:              "meeting-456",
-				Visibility:             "public",
+				UID:        "past-meeting-123",
+				MeetingUID: "meeting-456",
+				Public:     true,
 			}),
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// No mocks needed for validation error

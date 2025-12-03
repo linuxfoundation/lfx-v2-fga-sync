@@ -15,10 +15,11 @@ import (
 
 // v1MeetingStub represents the structure of v1 meeting data for FGA sync.
 type v1MeetingStub struct {
-	MeetingID  string `json:"meeting_id"`  // This is still a v1 meeting ID.
-	Visibility string `json:"visibility"`  // v1 uses "visibility" instead of "public" boolean.
-	ProjectUID string `json:"project_uid"` // This will already have been translated to a v2 project UID.
-	Committee  string `json:"committee"`   // This will already have been translated to a v2 committee UID.
+	UID        string   `json:"meeting_id"`
+	Public     bool     `json:"public"`
+	ProjectUID string   `json:"project_uid"`
+	Organizers []string `json:"organizers"`
+	Committees []string `json:"committees"`
 }
 
 // buildV1MeetingTuples builds all of the tuples for a v1 meeting object.
@@ -29,7 +30,7 @@ func (h *HandlerService) buildV1MeetingTuples(
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
 	// Convert the "public" attribute to a "user:*" relation.
-	if meeting.Visibility == constants.VisibilityPublic {
+	if meeting.Public {
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 	}
 
@@ -42,10 +43,10 @@ func (h *HandlerService) buildV1MeetingTuples(
 	}
 
 	// Add the committee relation to associate this v1 meeting with its committee.
-	if meeting.Committee != "" {
+	for _, committee := range meeting.Committees {
 		tuples = append(
 			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeCommittee+meeting.Committee, constants.RelationCommittee, object),
+			h.fgaService.TupleKey(constants.ObjectTypeCommittee+committee, constants.RelationCommittee, object),
 		)
 	}
 
@@ -67,7 +68,7 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 		return err
 	}
 
-	if meeting.MeetingID == "" {
+	if meeting.UID == "" {
 		logger.ErrorContext(ctx, "v1 meeting ID not found")
 		return errors.New("v1 meeting ID not found")
 	}
@@ -77,7 +78,7 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 		return errors.New("v1 meeting project ID not found")
 	}
 
-	object := constants.ObjectTypeV1Meeting + meeting.MeetingID
+	object := constants.ObjectTypeV1Meeting + meeting.UID
 
 	// Build a list of tuples to sync.
 	//
@@ -125,11 +126,11 @@ func (h *HandlerService) v1MeetingDeleteAllAccessHandler(message INatsMsg) error
 
 // v1PastMeetingStub represents the structure of v1 past meeting data for FGA sync.
 type v1PastMeetingStub struct {
-	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"` // The composite ID is the best unique identifier.
-	MeetingID              string `json:"meeting_id"`                // This is still a v1 meeting ID.
-	Visibility             string `json:"visibility"`                // v1 uses "visibility" instead of "public" boolean.
-	ProjectUID             string `json:"project_uid"`               // Translated to a v2 project UID.
-	Committee              string `json:"committee"`                 // Translated to a v2 committee UID.
+	UID        string   `json:"uid"`
+	MeetingUID string   `json:"meeting_uid"`
+	Public     bool     `json:"public"`
+	ProjectUID string   `json:"project_uid"`
+	Committees []string `json:"committees"`
 }
 
 // buildV1PastMeetingTuples builds all of the tuples for a v1 past meeting object.
@@ -140,15 +141,15 @@ func (h *HandlerService) buildV1PastMeetingTuples(
 	tuples := h.fgaService.NewTupleKeySlice(4)
 
 	// Convert the "public" attribute to a "user:*" relation.
-	if pastMeeting.Visibility == constants.VisibilityPublic {
+	if pastMeeting.Public {
 		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
 	}
 
 	// Add the meeting relation to associate this v1 past meeting with its v1 meeting.
-	if pastMeeting.MeetingID != "" {
+	if pastMeeting.MeetingUID != "" {
 		tuples = append(
 			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeV1Meeting+pastMeeting.MeetingID, constants.RelationMeeting, object),
+			h.fgaService.TupleKey(constants.ObjectTypeV1Meeting+pastMeeting.MeetingUID, constants.RelationMeeting, object),
 		)
 	}
 
@@ -161,10 +162,10 @@ func (h *HandlerService) buildV1PastMeetingTuples(
 	}
 
 	// Add the committee relation to associate this v1 meeting with its committee.
-	if pastMeeting.Committee != "" {
+	for _, committee := range pastMeeting.Committees {
 		tuples = append(
 			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeCommittee+pastMeeting.Committee, constants.RelationCommittee, object),
+			h.fgaService.TupleKey(constants.ObjectTypeCommittee+committee, constants.RelationCommittee, object),
 		)
 	}
 
@@ -186,7 +187,7 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return err
 	}
 
-	if pastMeeting.MeetingAndOccurrenceID == "" {
+	if pastMeeting.UID == "" {
 		logger.ErrorContext(ctx, "v1 past meeting ID not found")
 		return errors.New("v1 past meeting ID not found")
 	}
@@ -196,7 +197,7 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return errors.New("v1 past meeting project ID not found")
 	}
 
-	object := constants.ObjectTypeV1PastMeeting + pastMeeting.MeetingAndOccurrenceID
+	object := constants.ObjectTypeV1PastMeeting + pastMeeting.UID
 
 	// Build a list of tuples to sync.
 	//
