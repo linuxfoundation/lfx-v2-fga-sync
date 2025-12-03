@@ -244,7 +244,7 @@ func (h *HandlerService) v1PastMeetingDeleteAllAccessHandler(message INatsMsg) e
 
 // V1PastMeetingParticipant represents a participant of a v1 past meeting.
 type V1PastMeetingParticipant struct {
-	Username   string `json:"lf_sso"`
+	Username   string `json:"username"`
 	Host       bool   `json:"host"`
 	IsInvited  bool   `json:"is_invited"`
 	IsAttended bool   `json:"is_attended"`
@@ -750,7 +750,7 @@ type v1PastMeetingParticipantStub struct {
 	UID                    string `json:"id"`
 	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
 	ArtifactVisibility     string `json:"artifact_visibility"`
-	Username               string `json:"lf_sso"`
+	Username               string `json:"username"`
 	Host                   bool   `json:"host"`
 	IsInvited              bool   `json:"is_invited"`
 	IsAttended             bool   `json:"is_attended"`

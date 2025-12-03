@@ -457,7 +457,7 @@ func TestV1PastMeetingRecordingUpdateAccessHandler(t *testing.T) {
 				"meeting_and_occurrence_id": "past-meeting-456",
 				"recording_access": "public",
 				"participants": [
-					{"lf_sso": "user1", "host": true, "is_invited": true, "is_attended": true}
+					{"username": "user1", "host": true, "is_invited": true, "is_attended": true}
 				]
 			}`),
 			replySubject: "reply.subject",
