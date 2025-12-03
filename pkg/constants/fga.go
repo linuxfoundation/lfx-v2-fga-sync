@@ -17,15 +17,18 @@ const (
 	RelationViewer             = "viewer"
 
 	// Meeting relations
-	RelationProject     = "project"
-	RelationCommittee   = "committee"
-	RelationOrganizer   = "organizer"
-	RelationHost        = "host"
-	RelationParticipant = "participant"
-	RelationAttendee    = "attendee"
-	RelationInvitee     = "invitee"
-	RelationMeeting     = "meeting"
-	RelationPastMeeting = "past_meeting"
+	RelationProject                       = "project"
+	RelationCommittee                     = "committee"
+	RelationOrganizer                     = "organizer"
+	RelationHost                          = "host"
+	RelationParticipant                   = "participant"
+	RelationAttendee                      = "attendee"
+	RelationInvitee                       = "invitee"
+	RelationMeeting                       = "meeting"
+	RelationPastMeeting                   = "past_meeting"
+	RelationPastMeetingForParticipantView = "past_meeting_for_participant_view"
+	RelationPastMeetingForAttendeeView    = "past_meeting_for_attendee_view"
+	RelationPastMeetingForHostView        = "past_meeting_for_host_view"
 
 	// Team relations
 	RelationMember = "member"

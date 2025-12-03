@@ -231,7 +231,6 @@ func TestBuildV1PastMeetingArtifactTuples(t *testing.T) {
 				object,
 				"past-meeting-uid",
 				tt.artifactVisibility,
-				tt.participants,
 			)
 
 			if tt.expectError {

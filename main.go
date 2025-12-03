@@ -480,6 +480,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			handler:     handlerService.v1MeetingRegistrantRemoveHandler,
 			description: "v1 meeting registrant remove",
 		},
+		{
+			subject:     constants.V1PastMeetingParticipantPutSubject,
+			handler:     handlerService.v1PastMeetingParticipantPutHandler,
+			description: "v1 past meeting participant put",
+		},
+		{
+			subject:     constants.V1PastMeetingParticipantRemoveSubject,
+			handler:     handlerService.v1PastMeetingParticipantRemoveHandler,
+			description: "v1 past meeting participant remove",
+		},
 	}
 
 	// Subscribe to each subject using the helper function

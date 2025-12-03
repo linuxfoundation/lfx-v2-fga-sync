@@ -13,6 +13,11 @@ import (
 	"github.com/openfga/go-sdk/client" // Only for client types, not the full SDK
 )
 
+const (
+	operationTypePut    = "put"
+	operationTypeRemove = "remove"
+)
+
 type pastMeetingStub struct {
 	UID        string   `json:"uid"`
 	MeetingUID string   `json:"meeting_uid"`
@@ -164,10 +169,10 @@ func (h *HandlerService) processPastMeetingParticipantMessage(
 	ctx := context.Background()
 
 	// Log the operation type
-	operationType := "put"
+	operationType := operationTypePut
 	responseMsg := "sent past meeting participant put response"
 	if operation == pastMeetingParticipantRemove {
-		operationType = "remove"
+		operationType = operationTypeRemove
 		responseMsg = "sent past meeting participant remove response"
 	}
 
@@ -230,109 +235,6 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 	default:
 		return errors.New("unknown past meeting participant operation")
 	}
-}
-
-// syncArtifactViewerAccessForParticipant updates viewer access on all artifacts based on
-// artifact visibility and the participant's host status.
-// If isRemoving is true, this will always remove viewer access regardless of visibility settings.
-func (h *HandlerService) syncArtifactViewerAccessForParticipant(
-	ctx context.Context,
-	pastMeetingUID string,
-	userPrincipal string,
-	artifactVisibility string,
-	isHost bool,
-	isRemoving bool,
-) error {
-	// If public visibility, artifacts use user:* so no individual user management needed
-	if artifactVisibility == constants.VisibilityPublic {
-		return nil
-	}
-
-	// Determine if this user should have viewer access based on visibility setting
-	shouldHaveViewerAccess := false
-	if isRemoving {
-		// When removing a participant, always remove viewer access
-		shouldHaveViewerAccess = false
-	} else {
-		switch artifactVisibility {
-		case constants.VisibilityMeetingHosts:
-			// Only hosts should have viewer access
-			shouldHaveViewerAccess = isHost
-		case constants.VisibilityMeetingParticipants:
-			// All participants (hosts and non-hosts) should have viewer access
-			shouldHaveViewerAccess = true
-		}
-	}
-
-	// Find all artifacts that have a past_meeting relation to this past meeting
-	pastMeetingObject := constants.ObjectTypePastMeeting + pastMeetingUID
-
-	// Define artifact types we care about (type names for List Objects API)
-	artifactTypes := []string{
-		"past_meeting_recording",
-		"past_meeting_transcript",
-		"past_meeting_summary",
-	}
-
-	// Query for all objects of each artifact type using List Objects API
-	for _, typeName := range artifactTypes {
-		artifactObjects, err := h.fgaService.ListObjectsByUserAndRelation(
-			ctx,
-			typeName,
-			constants.RelationPastMeeting,
-			pastMeetingObject,
-		)
-		if err != nil {
-			logger.ErrorContext(ctx, "failed to list objects for artifact type",
-				errKey, err,
-				"past_meeting", pastMeetingObject,
-				"artifact_type", typeName,
-			)
-			return err
-		}
-
-		// Process each artifact object
-		for _, artifactObject := range artifactObjects {
-			// ListObjects API returns full object strings with type prefix already included
-			fullArtifactObject := artifactObject
-
-			if shouldHaveViewerAccess {
-				// Add viewer access (idempotent - WriteTuple handles duplicates)
-				err = h.fgaService.WriteTuple(ctx, userPrincipal, constants.RelationViewer, fullArtifactObject)
-				if err != nil {
-					logger.ErrorContext(ctx, "failed to add viewer access to artifact",
-						errKey, err,
-						"user", userPrincipal,
-						"artifact", fullArtifactObject,
-					)
-					return err
-				}
-				logger.InfoContext(ctx, "ensured viewer access to artifact",
-					"user", userPrincipal,
-					"artifact", fullArtifactObject,
-					"is_host", isHost,
-				)
-			} else {
-				// Remove viewer access
-				err = h.fgaService.DeleteTuple(ctx, userPrincipal, constants.RelationViewer, fullArtifactObject)
-				if err != nil {
-					logger.ErrorContext(ctx, "failed to remove viewer access from artifact",
-						errKey, err,
-						"user", userPrincipal,
-						"artifact", fullArtifactObject,
-					)
-					return err
-				}
-				logger.InfoContext(ctx, "removed viewer access from artifact",
-					"user", userPrincipal,
-					"artifact", fullArtifactObject,
-					"is_host", isHost,
-				)
-			}
-		}
-	}
-
-	return nil
 }
 
 // putPastMeetingParticipant implements idempotent put operation for past meeting participant relations
@@ -431,25 +333,6 @@ func (h *HandlerService) putPastMeetingParticipant(
 		).InfoContext(ctx, "past meeting participant already has correct past_meeting relations")
 	}
 
-	// Sync artifact viewer access based on artifact visibility and participant's host status
-	pastMeetingUID := participant.PastMeetingUID
-	err = h.syncArtifactViewerAccessForParticipant(
-		ctx,
-		pastMeetingUID,
-		userPrincipal,
-		participant.ArtifactVisibility,
-		participant.Host,
-		false,
-	)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to sync artifact viewer access",
-			errKey, err,
-			"user", userPrincipal,
-			"past_meeting_uid", pastMeetingUID,
-		)
-		return err
-	}
-
 	return nil
 }
 
@@ -474,24 +357,6 @@ func (h *HandlerService) removePastMeetingParticipant(
 		"user", userPrincipal,
 		"object", pastMeetingObject,
 	).InfoContext(ctx, "removed past meeting participant tuples for past meeting")
-
-	pastMeetingUID := participant.PastMeetingUID
-	err = h.syncArtifactViewerAccessForParticipant(
-		ctx,
-		pastMeetingUID,
-		userPrincipal,
-		participant.ArtifactVisibility,
-		false,
-		true,
-	)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to sync artifact viewer access on removal",
-			errKey, err,
-			"user", userPrincipal,
-			"past_meeting_uid", pastMeetingUID,
-		)
-		return err
-	}
 
 	return nil
 }
