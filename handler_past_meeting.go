@@ -80,9 +80,11 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 		return err
 	}
 
+	funcLogger := logger.With("past_meeting", pastMeeting)
+
 	// Grab the project ID.
 	if pastMeeting.ProjectUID == "" {
-		logger.ErrorContext(ctx, "past meeting project ID not found")
+		funcLogger.ErrorContext(ctx, "past meeting project ID not found")
 		return errors.New("past meeting project ID not found")
 	}
 
@@ -95,7 +97,7 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 	// because they are managed separately via put_participant and remove_participant messages.
 	tuples, err := h.buildPastMeetingTuples(object, pastMeeting)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
 		return err
 	}
 
@@ -111,11 +113,11 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 		constants.RelationAttendee,
 	)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -125,11 +127,11 @@ func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error 
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent past meeting access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent past meeting access control update response")
 	}
 
 	return nil
@@ -188,11 +190,11 @@ func (h *HandlerService) processPastMeetingParticipantMessage(
 
 	// Validate required fields.
 	if pastMeetingParticipant.Username == "" {
-		logger.ErrorContext(ctx, "past meeting participant username not found")
+		logger.With("participant", pastMeetingParticipant).ErrorContext(ctx, "past meeting participant username not found")
 		return errors.New("past meeting participant username not found")
 	}
 	if pastMeetingParticipant.PastMeetingUID == "" {
-		logger.ErrorContext(ctx, "past meeting UID not found")
+		logger.With("participant", pastMeetingParticipant).ErrorContext(ctx, "past meeting UID not found")
 		return errors.New("past meeting UID not found")
 	}
 

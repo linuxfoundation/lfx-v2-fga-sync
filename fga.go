@@ -301,6 +301,8 @@ func (s FgaService) invalidateCache(ctx context.Context) error {
 
 // WriteAndDeleteTuples writes and/or deletes the given tuples to/from OpenFGA.
 // This is a general-purpose method for modifying tuples without reading existing state.
+// OpenFGA has a limit of 100 total operations (writes + deletes combined) per request,
+// so this function will automatically batch operations if needed.
 func (s FgaService) WriteAndDeleteTuples(
 	ctx context.Context,
 	writes []ClientTupleKey,
@@ -311,6 +313,90 @@ func (s FgaService) WriteAndDeleteTuples(
 		return nil
 	}
 
+	// This max operations limit is set by the OpenFGA Write API
+	const maxOperationsPerBatch = 100
+	totalOperations := len(writes) + len(deletes)
+
+	// If total operations fit in a single batch, process normally
+	if totalOperations <= maxOperationsPerBatch {
+		return s.writeAndDeleteTuplesBatch(ctx, writes, deletes)
+	}
+
+	// Need to batch the operations
+	logger.With(
+		"total_operations", totalOperations,
+		"writes_count", len(writes),
+		"deletes_count", len(deletes),
+	).InfoContext(ctx, "batching write operations due to size")
+
+	// Process writes and deletes in batches
+	writeIdx := 0
+	deleteIdx := 0
+	batchNumber := 0
+
+	for writeIdx < len(writes) || deleteIdx < len(deletes) {
+		batchNumber++
+		var batchWrites []ClientTupleKey
+		var batchDeletes []ClientTupleKeyWithoutCondition
+
+		// Fill the batch with writes first, then deletes, up to maxOperationsPerBatch
+		remainingCapacity := maxOperationsPerBatch
+
+		// Add writes to this batch
+		if writeIdx < len(writes) && remainingCapacity > 0 {
+			writeEnd := writeIdx + remainingCapacity
+			if writeEnd > len(writes) {
+				writeEnd = len(writes)
+			}
+			batchWrites = writes[writeIdx:writeEnd]
+			writeIdx = writeEnd
+			remainingCapacity -= len(batchWrites)
+		}
+
+		// Add deletes to this batch
+		if deleteIdx < len(deletes) && remainingCapacity > 0 {
+			deleteEnd := deleteIdx + remainingCapacity
+			if deleteEnd > len(deletes) {
+				deleteEnd = len(deletes)
+			}
+			batchDeletes = deletes[deleteIdx:deleteEnd]
+			deleteIdx = deleteEnd
+		}
+
+		// Execute this batch
+		logger.With(
+			"batch_number", batchNumber,
+			"batch_writes", len(batchWrites),
+			"batch_deletes", len(batchDeletes),
+		).DebugContext(ctx, "executing batch")
+
+		if err := s.writeAndDeleteTuplesBatch(ctx, batchWrites, batchDeletes); err != nil {
+			logger.With(errKey, err,
+				"batch_number", batchNumber,
+				"total_operations", totalOperations,
+				"batch_writes", len(batchWrites),
+				"batch_deletes", len(batchDeletes),
+			).ErrorContext(ctx, "failed to execute batch")
+			return err
+		}
+	}
+
+	logger.With(
+		"total_batches", batchNumber,
+		"total_writes", len(writes),
+		"total_deletes", len(deletes),
+	).InfoContext(ctx, "completed batched write operations")
+
+	return nil
+}
+
+// writeAndDeleteTuplesBatch performs a single write/delete operation to OpenFGA.
+// This is an internal helper function that should not be called directly.
+func (s FgaService) writeAndDeleteTuplesBatch(
+	ctx context.Context,
+	writes []ClientTupleKey,
+	deletes []ClientTupleKeyWithoutCondition,
+) error {
 	req := ClientWriteRequest{
 		Writes:  writes,
 		Deletes: deletes,
