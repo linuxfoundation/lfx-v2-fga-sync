@@ -68,13 +68,15 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 		return err
 	}
 
+	funcLogger := logger.With("meeting", meeting)
+
 	if meeting.UID == "" {
-		logger.ErrorContext(ctx, "v1 meeting ID not found")
+		funcLogger.ErrorContext(ctx, "v1 meeting ID not found")
 		return errors.New("v1 meeting ID not found")
 	}
 
 	if meeting.ProjectUID == "" {
-		logger.ErrorContext(ctx, "v1 meeting project ID not found")
+		funcLogger.ErrorContext(ctx, "v1 meeting project ID not found")
 		return errors.New("v1 meeting project ID not found")
 	}
 
@@ -87,17 +89,17 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 	// all tuples that are not in the tuples list parameter.
 	tuples, err := h.buildV1MeetingTuples(object, meeting)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 meeting tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 meeting tuples")
 		return err
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -107,11 +109,11 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent v1 meeting access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent v1 meeting access control update response")
 	}
 
 	return nil
@@ -187,13 +189,15 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return err
 	}
 
+	funcLogger := logger.With("past_meeting", pastMeeting)
+
 	if pastMeeting.UID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting ID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting ID not found")
 		return errors.New("v1 past meeting ID not found")
 	}
 
 	if pastMeeting.ProjectUID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting project ID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting project ID not found")
 		return errors.New("v1 past meeting project ID not found")
 	}
 
@@ -206,17 +210,17 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 	// all tuples that are not in the tuples list parameter.
 	tuples, err := h.buildV1PastMeetingTuples(object, pastMeeting)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting tuples")
 		return err
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -226,11 +230,11 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent v1 past meeting access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent v1 past meeting access control update response")
 	}
 
 	return nil
@@ -331,7 +335,11 @@ func (h *HandlerService) buildV1PastMeetingArtifactTuples(
 		)
 
 	default:
-		logger.ErrorContext(context.Background(), "unknown artifact visibility", "visibility", artifactVisibility)
+		logger.ErrorContext(context.Background(), "unknown artifact visibility",
+			"visibility", artifactVisibility,
+			"object", object,
+			"v1_past_meeting_uid", v1PastMeetingUID,
+		)
 		return nil, errors.New("unknown artifact visibility: " + artifactVisibility)
 	}
 
@@ -355,13 +363,15 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 		return err
 	}
 
+	funcLogger := logger.With("recording", recording)
+
 	if recording.ID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting recording ID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting recording ID not found")
 		return errors.New("v1 past meeting recording ID not found")
 	}
 
 	if recording.MeetingAndOccurrenceID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting UID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
@@ -374,17 +384,17 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 		recording.RecordingAccess,
 	)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting recording tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting recording tuples")
 		return err
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -394,11 +404,11 @@ func (h *HandlerService) v1PastMeetingRecordingUpdateAccessHandler(message INats
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent v1 past meeting recording access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent v1 past meeting recording access control update response")
 	}
 
 	return nil
@@ -421,13 +431,15 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 		return err
 	}
 
+	funcLogger := logger.With("transcript", transcript)
+
 	if transcript.ID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting transcript ID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting transcript ID not found")
 		return errors.New("v1 past meeting transcript ID not found")
 	}
 
 	if transcript.MeetingAndOccurrenceID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting UID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
@@ -440,17 +452,17 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 		transcript.TranscriptAccess,
 	)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting transcript tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting transcript tuples")
 		return err
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -460,11 +472,11 @@ func (h *HandlerService) v1PastMeetingTranscriptUpdateAccessHandler(message INat
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent v1 past meeting transcript access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent v1 past meeting transcript access control update response")
 	}
 
 	return nil
@@ -487,13 +499,15 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 		return err
 	}
 
+	funcLogger := logger.With("summary", summary)
+
 	if summary.ID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting summary ID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting summary ID not found")
 		return errors.New("v1 past meeting summary ID not found")
 	}
 
 	if summary.MeetingAndOccurrenceID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting UID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
@@ -506,17 +520,17 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 		summary.SummaryAccess,
 	)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting summary tuples")
+		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build v1 past meeting summary tuples")
 		return err
 	}
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
-	logger.With(
+	funcLogger.With(
 		"tuples", tuples,
 		"object", object,
 		"writes", tuplesWrites,
@@ -526,11 +540,11 @@ func (h *HandlerService) v1PastMeetingSummaryUpdateAccessHandler(message INatsMs
 	if message.Reply() != "" {
 		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent v1 past meeting summary access control update response")
+		funcLogger.With("object", object).InfoContext(ctx, "sent v1 past meeting summary access control update response")
 	}
 
 	return nil
@@ -579,13 +593,15 @@ func (h *HandlerService) v1ProcessRegistrantMessage(message INatsMsg, operation 
 		return err
 	}
 
+	funcLogger := logger.With("registrant", registrant)
+
 	// Validate required fields.
 	if registrant.Username == "" {
-		logger.ErrorContext(ctx, "v1 registrant username not found")
+		funcLogger.ErrorContext(ctx, "v1 registrant username not found")
 		return errors.New("v1 registrant username not found")
 	}
 	if registrant.MeetingID == "" {
-		logger.ErrorContext(ctx, "v1 meeting ID not found")
+		funcLogger.ErrorContext(ctx, "v1 meeting ID not found")
 		return errors.New("v1 meeting ID not found")
 	}
 
@@ -599,11 +615,11 @@ func (h *HandlerService) v1ProcessRegistrantMessage(message INatsMsg, operation 
 	replySubject := message.Reply()
 	if replySubject != "" {
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.InfoContext(ctx, responseMsg,
+		funcLogger.InfoContext(ctx, responseMsg,
 			"meeting", constants.ObjectTypeV1Meeting+registrant.MeetingID,
 			"registrant", constants.ObjectTypeUser+registrant.Username,
 		)
@@ -750,7 +766,6 @@ func (h *HandlerService) v1MeetingRegistrantRemoveHandler(message INatsMsg) erro
 type v1PastMeetingParticipantStub struct {
 	UID                    string `json:"id"`
 	MeetingAndOccurrenceID string `json:"meeting_and_occurrence_id"`
-	ArtifactVisibility     string `json:"artifact_visibility"`
 	Username               string `json:"username"`
 	Host                   bool   `json:"host"`
 	IsInvited              bool   `json:"is_invited"`
@@ -792,13 +807,15 @@ func (h *HandlerService) v1ProcessPastMeetingParticipantMessage(
 		return err
 	}
 
+	funcLogger := logger.With("past_meeting_participant", pastMeetingParticipant)
+
 	// Validate required fields.
 	if pastMeetingParticipant.Username == "" {
-		logger.ErrorContext(ctx, "v1 past meeting participant username not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting participant username not found")
 		return errors.New("v1 past meeting participant username not found")
 	}
 	if pastMeetingParticipant.MeetingAndOccurrenceID == "" {
-		logger.ErrorContext(ctx, "v1 past meeting UID not found")
+		funcLogger.ErrorContext(ctx, "v1 past meeting UID not found")
 		return errors.New("v1 past meeting UID not found")
 	}
 
@@ -811,13 +828,13 @@ func (h *HandlerService) v1ProcessPastMeetingParticipantMessage(
 	// Send reply if requested
 	if message.Reply() != "" {
 		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 
-		logger.InfoContext(ctx, responseMsg,
-			"v1_past_meeting", constants.ObjectTypeV1PastMeeting+pastMeetingParticipant.MeetingAndOccurrenceID,
-			"v1_past_meeting_participant", constants.ObjectTypeUser+pastMeetingParticipant.Username,
+		funcLogger.InfoContext(ctx, responseMsg,
+			"object", constants.ObjectTypeV1PastMeeting+pastMeetingParticipant.MeetingAndOccurrenceID,
+			"user", constants.ObjectTypeUser+pastMeetingParticipant.Username,
 		)
 	}
 
