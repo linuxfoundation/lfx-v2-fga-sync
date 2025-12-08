@@ -72,7 +72,8 @@
     "nindent",
     "LFID",
     "groupsio",
-    "techdocs"
+    "techdocs",
+    "mkdocs"
   ],
   "overrides": [
     {
