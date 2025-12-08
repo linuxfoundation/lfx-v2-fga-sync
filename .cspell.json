@@ -71,7 +71,8 @@
     "sigstore",
     "nindent",
     "LFID",
-    "groupsio"
+    "groupsio",
+    "techdocs"
   ],
   "overrides": [
     {
