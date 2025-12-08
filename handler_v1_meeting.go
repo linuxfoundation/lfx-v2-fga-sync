@@ -91,7 +91,13 @@ func (h *HandlerService) v1MeetingUpdateAccessHandler(message INatsMsg) error {
 		return err
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
+		ctx,
+		object,
+		tuples,
+		constants.RelationParticipant,
+		constants.RelationHost,
+	)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
@@ -210,7 +216,15 @@ func (h *HandlerService) v1PastMeetingUpdateAccessHandler(message INatsMsg) erro
 		return err
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
+		ctx,
+		object,
+		tuples,
+		constants.RelationOrganizer,
+		constants.RelationHost,
+		constants.RelationInvitee,
+		constants.RelationAttendee,
+	)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
