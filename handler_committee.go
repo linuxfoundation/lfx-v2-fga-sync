@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/internal/domain"
+	"github.com/linuxfoundation/lfx-v2-fga-sync/internal/service"
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/openfga/go-sdk/client" // Only for client types, not the full SDK
 )
@@ -20,6 +22,7 @@ type committeeStub struct {
 	Public     bool                `json:"public"`
 	Relations  map[string][]string `json:"relations"`
 	References map[string]string   `json:"references"`
+	Policies   []domain.Policy     `json:"policies"`
 }
 
 // committeeUpdateAccessHandler handles committee access control updates.
@@ -72,10 +75,26 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 		}
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	// Sync committee tuples
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, "member")
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
+	}
+
+	if len(committee.Policies) > 0 {
+		policyEval := service.NewPolicyHandler(h.fgaService)
+
+		// Evaluate each policy associated with the committee
+		for _, policy := range committee.Policies {
+
+			err = policyEval.EvaluatePolicy(ctx, policy, object)
+			if err != nil {
+				logger.With(errKey, err, "policy", policy, "object", object).ErrorContext(ctx, "failed to evaluate policy")
+				return err
+			}
+		}
+
 	}
 
 	logger.With(
