@@ -83,7 +83,7 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 	}
 
 	if len(committee.Policies) > 0 {
-		policyEval := service.NewPolicyHandler(h.fgaService)
+		policyEval := service.NewPolicyHandler(logger, h.fgaService)
 
 		// Evaluate each policy associated with the committee
 		for _, policy := range committee.Policies {

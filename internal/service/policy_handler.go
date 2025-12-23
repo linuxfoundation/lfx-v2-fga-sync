@@ -5,7 +5,8 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log/slog"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/internal/domain"
 	"github.com/openfga/go-sdk/client"
@@ -18,6 +19,7 @@ type PolicyHandler interface {
 
 type policyHandler struct {
 	synchronizer RelationshipSynchronizer
+	logger       *slog.Logger
 }
 
 // EvaluatePolicy creates and syncs the two-level policy relationship structure.
@@ -50,7 +52,7 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	}
 
 	if objectID == "" {
-		return fmt.Errorf("object ID cannot be empty")
+		return errors.New("object ID is required for policy evaluation")
 	}
 
 	// Helper function to check existing tuples
@@ -58,9 +60,10 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	// If exact tuple exists, it will not be added again
 	// If conflicting tuples exist, they will be marked for deletion
 	checkTuple := func(object, user, relation string) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
-		existingTuples, err := ph.synchronizer.ReadObjectTuples(ctx, object)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read tuples for %s: %w", object, err)
+		existingTuples, errReadObjectTuples := ph.synchronizer.ReadObjectTuples(ctx, object)
+		if errReadObjectTuples != nil {
+			ph.logger.With("error", errReadObjectTuples, "object", object).Error("failed to read existing object tuples")
+			return nil, nil, errReadObjectTuples
 		}
 
 		var (
@@ -72,7 +75,7 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 		for _, tuple := range existingTuples {
 
 			if tuple.Key.User == user && tuple.Key.Relation != relation {
-				tuplesToDelete = append(tuplesToDelete, ph.synchronizer.TupleKeyWithoutCondition(user, relation, object))
+				tuplesToDelete = append(tuplesToDelete, ph.synchronizer.TupleKeyWithoutCondition(user, tuple.Key.Relation, object))
 				continue
 			}
 			if tuple.Key.User == user && tuple.Key.Relation == relation {
@@ -118,11 +121,23 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	tuplesToWrite = append(tuplesToWrite, writePolicyRelation...)
 	tuplesToDelete = append(tuplesToDelete, deletePolicyRelation...)
 
+	ph.logger.With(
+		"objectID", objectID,
+		"policy", policy,
+		"tuplesToWrite", tuplesToWrite,
+		"tuplesToDelete", tuplesToDelete,
+	).Debug("prepared policy tuples for synchronization")
+
 	// Write tuples only if there are new ones to write or delete
 	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
-		err = ph.synchronizer.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
-		if err != nil {
-			return fmt.Errorf("failed to write policy tuples: %w", err)
+		errWriteAndDeleteTuples := ph.synchronizer.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
+		if errWriteAndDeleteTuples != nil {
+			ph.logger.With(
+				"error", errWriteAndDeleteTuples,
+				"tuplesToWrite", tuplesToWrite,
+				"tuplesToDelete", tuplesToDelete,
+			).Error("failed to write and delete policy tuples")
+			return errWriteAndDeleteTuples
 		}
 	}
 
@@ -130,8 +145,9 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 }
 
 // NewPolicyHandler creates a new instance of PolicyHandler with the given RelationshipSynchronizer.
-func NewPolicyHandler(synchronizer RelationshipSynchronizer) PolicyHandler {
+func NewPolicyHandler(logger *slog.Logger, synchronizer RelationshipSynchronizer) PolicyHandler {
 	return &policyHandler{
 		synchronizer: synchronizer,
+		logger:       logger,
 	}
 }
