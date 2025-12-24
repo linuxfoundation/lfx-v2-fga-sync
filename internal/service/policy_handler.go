@@ -45,7 +45,10 @@ type policyHandler struct {
 //	└── relation: visibility_policy → user: visibility_policy:basic_profile
 //	    └── relation: allows_basic_profile → user: committee:1234#member
 //	        └── contains: user:user_5678
-func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID, userObjectRelation string) error {
+func (ph *policyHandler) EvaluatePolicy(
+	ctx context.Context,
+	policy domain.Policy,
+	objectID, userObjectRelation string) error {
 	// Validate policy using domain validation
 	if err := policy.Validate(); err != nil {
 		ph.logger.With("error", err, "policy", policy).ErrorContext(ctx, "invalid policy")
