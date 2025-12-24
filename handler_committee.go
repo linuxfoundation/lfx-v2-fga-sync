@@ -89,7 +89,10 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 		for _, policy := range committee.Policies {
 			errEvaluatePolicy := policyEval.EvaluatePolicy(ctx, policy, object, "member")
 			if errEvaluatePolicy != nil {
-				logger.With(errKey, errEvaluatePolicy, "policy", policy, "object", object).ErrorContext(ctx, "failed to evaluate policy")
+				logger.With(errKey, errEvaluatePolicy,
+					"policy", policy,
+					"object", object,
+				).ErrorContext(ctx, "failed to evaluate policy")
 				return errEvaluatePolicy
 			}
 		}
