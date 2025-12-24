@@ -59,7 +59,9 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	// for a given object, user, and relation
 	// If exact tuple exists, it will not be added again
 	// If conflicting tuples exist, they will be marked for deletion
-	checkTuple := func(object, user, relation string) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
+	checkTuple := func(
+		object, user, relation string,
+	) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
 		existingTuples, errReadObjectTuples := ph.synchronizer.ReadObjectTuples(ctx, object)
 		if errReadObjectTuples != nil {
 			ph.logger.With("error", errReadObjectTuples, "object", object).Error("failed to read existing object tuples")

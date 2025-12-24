@@ -19,5 +19,9 @@ type RelationshipSynchronizer interface {
 	TupleKey(user, relation, object string) client.ClientTupleKey
 	TupleKeyWithoutCondition(user, relation, object string) client.ClientTupleKeyWithoutCondition
 	ReadObjectTuples(ctx context.Context, object string) ([]openfga.Tuple, error)
-	WriteAndDeleteTuples(ctx context.Context, writes []client.ClientTupleKey, deletes []client.ClientTupleKeyWithoutCondition) error
+	WriteAndDeleteTuples(
+		ctx context.Context,
+		writes []client.ClientTupleKey,
+		deletes []client.ClientTupleKeyWithoutCondition,
+	) error
 }
