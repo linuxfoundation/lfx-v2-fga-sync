@@ -125,7 +125,7 @@ func TestPolicyHandler_EvaluatePolicy_ValidationErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := handler.EvaluatePolicy(ctx, tt.policy, tt.objectID)
+			err := handler.EvaluatePolicy(ctx, tt.policy, tt.objectID, "member")
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EvaluatePolicy() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -151,7 +151,7 @@ func TestPolicyHandler_EvaluatePolicy_NoExistingTuples(t *testing.T) {
 	}
 	objectID := "committee:f01dec3e-2611-482e-bffc-b4a6d9cd0afd"
 
-	err := handler.EvaluatePolicy(ctx, policy, objectID)
+	err := handler.EvaluatePolicy(ctx, policy, objectID, "member")
 	if err != nil {
 		t.Errorf("EvaluatePolicy() unexpected error = %v", err)
 	}
@@ -228,7 +228,7 @@ func TestPolicyHandler_EvaluatePolicy_ExistingTuples(t *testing.T) {
 	}
 	objectID := "committee:f01dec3e-2611-482e-bffc-b4a6d9cd0afd"
 
-	err := handler.EvaluatePolicy(ctx, policy, objectID)
+	err := handler.EvaluatePolicy(ctx, policy, objectID, "member")
 	if err != nil {
 		t.Errorf("EvaluatePolicy() unexpected error = %v", err)
 	}
@@ -263,7 +263,7 @@ func TestPolicyHandler_EvaluatePolicy_ConflictingTuples(t *testing.T) {
 	}
 	objectID := "committee:f01dec3e-2611-482e-bffc-b4a6d9cd0afd"
 
-	err := handler.EvaluatePolicy(ctx, policy, objectID)
+	err := handler.EvaluatePolicy(ctx, policy, objectID, "member")
 	if err != nil {
 		t.Errorf("EvaluatePolicy() unexpected error = %v", err)
 	}
@@ -299,7 +299,7 @@ func TestPolicyHandler_EvaluatePolicy_ReadError(t *testing.T) {
 	}
 	objectID := "committee:123"
 
-	err := handler.EvaluatePolicy(ctx, policy, objectID)
+	err := handler.EvaluatePolicy(ctx, policy, objectID, "member")
 	if err == nil {
 		t.Error("Expected error, got nil")
 	}
@@ -326,12 +326,12 @@ func TestPolicyHandler_EvaluatePolicy_WriteError(t *testing.T) {
 	}
 	objectID := "committee:123"
 
-	err := handler.EvaluatePolicy(ctx, policy, objectID)
+	err := handler.EvaluatePolicy(ctx, policy, objectID, "member")
 	if err == nil {
 		t.Error("Expected error, got nil")
 	}
 
-	if !errors.Is(err, expectedError) && err.Error() != "failed to write policy tuples: write error" {
+	if !errors.Is(err, expectedError) {
 		t.Errorf("Expected write error, got: %v", err)
 	}
 }
@@ -380,7 +380,7 @@ func TestPolicyHandler_EvaluatePolicy_DifferentPolicies(t *testing.T) {
 			}
 			handler := NewPolicyHandler(newDiscardLogger(), mock)
 
-			err := handler.EvaluatePolicy(ctx, tt.policy, tt.objectID)
+			err := handler.EvaluatePolicy(ctx, tt.policy, tt.objectID, "member")
 			if err != nil {
 				t.Errorf("EvaluatePolicy() unexpected error = %v", err)
 			}

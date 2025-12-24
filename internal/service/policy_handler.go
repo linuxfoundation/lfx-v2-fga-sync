@@ -14,7 +14,7 @@ import (
 
 // PolicyHandler defines the interface for handling fine-grained authorization policies.
 type PolicyHandler interface {
-	EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID string) error
+	EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID, userObjectRelation string) error
 }
 
 type policyHandler struct {
@@ -45,7 +45,7 @@ type policyHandler struct {
 //	└── relation: visibility_policy → user: visibility_policy:basic_profile
 //	    └── relation: allows_basic_profile → user: committee:1234#member
 //	        └── contains: user:user_5678
-func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID string) error {
+func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID, userObjectRelation string) error {
 	// Validate policy using domain validation
 	if err := policy.Validate(); err != nil {
 		return err
@@ -75,7 +75,6 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 
 		exists := false
 		for _, tuple := range existingTuples {
-
 			if tuple.Key.User == user && tuple.Key.Relation != relation {
 				tuplesToDelete = append(tuplesToDelete, ph.synchronizer.TupleKeyWithoutCondition(user, tuple.Key.Relation, object))
 				continue
@@ -115,7 +114,7 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	// 2. Link the policy to user relation
 	// Format: policy.Name:policy.Value -> policy.Relation -> objectID#userRelation
 	// Example: visibility_policy:basic_profile#allows_basic_profile@committee:C#member
-	userRelation := policy.UserRelation(objectID, "member") // Default to "member" relation
+	userRelation := policy.UserRelation(objectID, userObjectRelation) // Default to "member" relation
 	writePolicyRelation, deletePolicyRelation, err := checkTuple(policyObject, userRelation, policy.Relation)
 	if err != nil {
 		return err
