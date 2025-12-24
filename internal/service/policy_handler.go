@@ -48,10 +48,12 @@ type policyHandler struct {
 func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Policy, objectID, userObjectRelation string) error {
 	// Validate policy using domain validation
 	if err := policy.Validate(); err != nil {
+		ph.logger.With("error", err, "policy", policy).ErrorContext(ctx, "invalid policy")
 		return err
 	}
 
 	if objectID == "" {
+		ph.logger.ErrorContext(ctx, "object ID is required for policy evaluation")
 		return errors.New("object ID is required for policy evaluation")
 	}
 
@@ -62,6 +64,13 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 	checkTuple := func(
 		object, user, relation string,
 	) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
+
+		ph.logger.With(
+			"object", object,
+			"user", user,
+			"relation", relation,
+		).Debug("checking existing tuples for policy evaluation")
+
 		existingTuples, errReadObjectTuples := ph.synchronizer.ReadObjectTuples(ctx, object)
 		if errReadObjectTuples != nil {
 			ph.logger.With("error", errReadObjectTuples, "object", object).Error("failed to read existing object tuples")
@@ -76,10 +85,21 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 		exists := false
 		for _, tuple := range existingTuples {
 			if tuple.Key.User == user && tuple.Key.Relation != relation {
+				ph.logger.With(
+					"object", object,
+					"user", user,
+					"existing_relation", tuple.Key.Relation,
+					"conflicting_relation", relation,
+				).Debug("found conflicting tuple, marking for deletion")
 				tuplesToDelete = append(tuplesToDelete, ph.synchronizer.TupleKeyWithoutCondition(user, tuple.Key.Relation, object))
 				continue
 			}
 			if tuple.Key.User == user && tuple.Key.Relation == relation {
+				ph.logger.With(
+					"object", object,
+					"user", user,
+					"relation", relation,
+				).Debug("exact tuple already exists, no need to write")
 				exists = true
 				continue
 			}
@@ -87,6 +107,11 @@ func (ph *policyHandler) EvaluatePolicy(ctx context.Context, policy domain.Polic
 
 		// If no existing tuple found, prepare to write a new one
 		if !exists {
+			ph.logger.With(
+				"object", object,
+				"user", user,
+				"relation", relation,
+			).Debug("no existing tuple found, preparing to write a new one")
 			tuplesToWrite = append(tuplesToWrite, ph.synchronizer.TupleKey(user, relation, object))
 		}
 
