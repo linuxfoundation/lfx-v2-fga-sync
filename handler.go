@@ -83,13 +83,12 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 	// for parent relation, project relation, etc
 	for reference, valueList := range obj.References {
 		refType := reference
+		// When the reference is parent, use the object type itself as the reference type.
+		// i.e. if the object type is committee, the parent relation should be committee:<parent_id>.
+		if reference == constants.RelationParent {
+			refType = obj.ObjectType
+		}
 		for _, value := range valueList {
-			// When the reference is parent, use the object type itself as the reference type.
-			// i.e. if the object type is committee, the parent relation should be committee:<parent_id>.
-			if reference == constants.RelationParent {
-				refType = obj.ObjectType
-			}
-
 			key := fmt.Sprintf("%s:%s", refType, value)
 			tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
 		}

@@ -464,8 +464,8 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 							parentCount++
 							// Verify parent references use objectType prefix
 							if tuple.User != "committee:parent-1" &&
-							   tuple.User != "committee:parent-2" &&
-							   tuple.User != "committee:parent-3" {
+								tuple.User != "committee:parent-2" &&
+								tuple.User != "committee:parent-3" {
 								return false
 							}
 						}
@@ -544,7 +544,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return counts["parent"] == 2 && counts["project"] == 3 &&
-					       counts["committee"] == 1 && counts["team"] == 4
+						counts["committee"] == 1 && counts["team"] == 4
 				})).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
