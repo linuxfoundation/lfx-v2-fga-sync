@@ -209,7 +209,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "committee",
 				Public:     true,
 				Relations:  map[string][]string{"writer": {"user1", "user2"}},
-				References: map[string]string{"parent": "parent-123"},
+				References: map[string][]string{"parent": {"parent-123"}},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -235,10 +235,10 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 					"viewer":  {"user4", "user5", "user6"},
 					"admin":   {"user7"},
 				},
-				References: map[string]string{
-					"parent":  "parent-456",
-					"project": "project-789",
-					"team":    "team-101",
+				References: map[string][]string{
+					"parent":  {"parent-456"},
+					"project": {"project-789"},
+					"team":    {"team-101"},
 				},
 			},
 			replySubject: "reply.subject",
@@ -260,7 +260,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "committee",
 				Public:     true,
 				Relations:  map[string][]string{"owner": {"user1"}},
-				References: map[string]string{"parent": "parent-committee-456"},
+				References: map[string][]string{"parent": {"parent-committee-456"}},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -292,7 +292,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "committee",
 				Public:     true,
 				Relations:  map[string][]string{"writer": {"user1"}},
-				References: map[string]string{},
+				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -308,7 +308,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "groupsio_service",
 				Public:     true,
 				Relations:  map[string][]string{"writer": {"user1"}},
-				References: map[string]string{},
+				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -326,7 +326,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "committee",
 				Public:     true,
 				Relations:  map[string][]string{},
-				References: map[string]string{},
+				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -348,7 +348,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "groupsio_service",
 				Public:     false,
 				Relations:  map[string][]string{"writer": {"user1"}},
-				References: map[string]string{},
+				References: map[string][]string{},
 			},
 			replySubject: "",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -366,7 +366,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				ObjectType: "committee",
 				Public:     true,
 				Relations:  map[string][]string{},
-				References: map[string]string{},
+				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
@@ -392,12 +392,12 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 					"admin":   {"user13"},
 					"owner":   {"user14", "user15"},
 				},
-				References: map[string]string{
-					"parent":     "parent-999",
-					"project":    "project-888",
-					"team":       "team-777",
-					"department": "dept-666",
-					"region":     "region-555",
+				References: map[string][]string{
+					"parent":     {"parent-999"},
+					"project":    {"project-888"},
+					"team":       {"team-777"},
+					"department": {"dept-666"},
+					"region":     {"region-555"},
 				},
 			},
 			replySubject: "reply.subject",
@@ -422,8 +422,8 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 					"writer": {"user:special@example.com", "user:test_user.123"},
 					"viewer": {"user:another+user@domain.org"},
 				},
-				References: map[string]string{
-					"parent": "parent-with_special.chars-789",
+				References: map[string][]string{
+					"parent": {"parent-with_special.chars-789"},
 				},
 			},
 			replySubject: "reply.subject",
@@ -432,6 +432,153 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 					// Should have: 1 parent + 3 relations = 4 tuples (no public)
 					return len(req.Writes) == 4 && len(req.Deletes) == 0
+				})).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "multiple parents with same reference name",
+			obj: &standardAccessStub{
+				UID:        "multi-parent-123",
+				ObjectType: "committee",
+				Public:     true,
+				Relations:  map[string][]string{"writer": {"user1"}},
+				References: map[string][]string{
+					"parent": {"parent-1", "parent-2", "parent-3"},
+				},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: 1 public + 3 parents + 1 writer = 5 tuples
+					if len(req.Writes) != 5 || len(req.Deletes) != 0 {
+						return false
+					}
+					// Count parent relations
+					parentCount := 0
+					for _, tuple := range req.Writes {
+						if tuple.Relation == "parent" {
+							parentCount++
+							// Verify parent references use objectType prefix
+							if tuple.User != "committee:parent-1" &&
+							   tuple.User != "committee:parent-2" &&
+							   tuple.User != "committee:parent-3" {
+								return false
+							}
+						}
+					}
+					return parentCount == 3
+				})).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "multiple committees with same reference name",
+			obj: &standardAccessStub{
+				UID:        "multi-committee-456",
+				ObjectType: "meeting",
+				Public:     false,
+				Relations:  map[string][]string{"organizer": {"user1", "user2"}},
+				References: map[string][]string{
+					"committee": {"committee-1", "committee-2", "committee-3", "committee-4"},
+					"project":   {"project-789"},
+				},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: 4 committees + 1 project + 2 organizers = 7 tuples
+					if len(req.Writes) != 7 || len(req.Deletes) != 0 {
+						return false
+					}
+					// Count committee relations
+					committeeCount := 0
+					for _, tuple := range req.Writes {
+						if tuple.Relation == "committee" {
+							committeeCount++
+						}
+					}
+					return committeeCount == 4
+				})).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "multiple references of different types",
+			obj: &standardAccessStub{
+				UID:        "multi-ref-789",
+				ObjectType: "groupsio_service",
+				Public:     true,
+				Relations: map[string][]string{
+					"writer": {"user1"},
+					"viewer": {"user2", "user3"},
+				},
+				References: map[string][]string{
+					"parent":    {"parent-1", "parent-2"},
+					"project":   {"project-1", "project-2", "project-3"},
+					"committee": {"committee-1"},
+					"team":      {"team-1", "team-2", "team-3", "team-4"},
+				},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: 1 public + 2 parents + 3 projects + 1 committee + 4 teams + 3 relations = 14 tuples
+					if len(req.Writes) != 14 || len(req.Deletes) != 0 {
+						return false
+					}
+					// Verify counts
+					counts := map[string]int{"parent": 0, "project": 0, "committee": 0, "team": 0}
+					for _, tuple := range req.Writes {
+						if _, ok := counts[tuple.Relation]; ok {
+							counts[tuple.Relation]++
+						}
+					}
+					return counts["parent"] == 2 && counts["project"] == 3 &&
+					       counts["committee"] == 1 && counts["team"] == 4
+				})).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "empty array for reference should result in no tuples for that reference",
+			obj: &standardAccessStub{
+				UID:        "empty-ref-101",
+				ObjectType: "committee",
+				Public:     false,
+				Relations:  map[string][]string{"writer": {"user1"}},
+				References: map[string][]string{
+					"parent":    {},
+					"committee": {"committee-1", "committee-2"},
+					"project":   {},
+				},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: 2 committees + 1 writer = 3 tuples (no parent or project)
+					if len(req.Writes) != 3 || len(req.Deletes) != 0 {
+						return false
+					}
+					// Verify no parent or project relations
+					for _, tuple := range req.Writes {
+						if tuple.Relation == "parent" || tuple.Relation == "project" {
+							return false
+						}
+					}
+					return true
 				})).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},

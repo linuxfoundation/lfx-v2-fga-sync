@@ -23,7 +23,7 @@ type standardAccessStub struct {
 	ObjectType string              `json:"object_type"`
 	Public     bool                `json:"public"`
 	Relations  map[string][]string `json:"relations"`
-	References map[string]string   `json:"references"`
+	References map[string][]string `json:"references"`
 }
 
 // INatsMsg is an interface for [nats.Msg] that allows for mocking.
@@ -81,14 +81,18 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 	}
 
 	// for parent relation, project relation, etc
-	for reference, value := range obj.References {
+	for reference, valueList := range obj.References {
 		refType := reference
-		if reference == constants.RelationParent {
-			refType = obj.ObjectType
-		}
+		for _, value := range valueList {
+			// When the reference is parent, use the object type itself as the reference type.
+			// i.e. if the object type is committee, the parent relation should be committee:<parent_id>.
+			if reference == constants.RelationParent {
+				refType = obj.ObjectType
+			}
 
-		key := fmt.Sprintf("%s:%s", refType, value)
-		tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
+			key := fmt.Sprintf("%s:%s", refType, value)
+			tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
+		}
 	}
 
 	// Add each principal from the object as the corresponding relationship tuple
