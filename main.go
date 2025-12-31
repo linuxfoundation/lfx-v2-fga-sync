@@ -412,12 +412,12 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 		},
 		{
 			subject:     constants.GroupsIOMailingListPutMemberSubject,
-			handler:     handlerService.groupsioMailingListMemberPutHandler,
+			handler:     handlerService.groupsIOMailingListMemberPutHandler,
 			description: "groups.io mailing list member put",
 		},
 		{
 			subject:     constants.GroupsIOMailingListRemoveMemberSubject,
-			handler:     handlerService.groupsioMailingListMemberRemoveHandler,
+			handler:     handlerService.groupsIOMailingListMemberRemoveHandler,
 			description: "groups.io mailing list member remove",
 		},
 		{

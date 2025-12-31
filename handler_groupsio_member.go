@@ -13,8 +13,8 @@ import (
 	"github.com/openfga/go-sdk/client" // Only for client types, not the full SDK
 )
 
-// groupsioMailingListMemberStub represents the structure of GroupsIO mailing list member data for FGA sync.
-type groupsioMailingListMemberStub struct {
+// groupsIOMailingListMemberStub represents the structure of GroupsIO mailing list member data for FGA sync.
+type groupsIOMailingListMemberStub struct {
 	// UID is the mailing list member ID.
 	UID string `json:"uid"`
 	// Username is the username (i.e. LFID) of the member. This is the identity of the user object in FGA.
@@ -23,26 +23,26 @@ type groupsioMailingListMemberStub struct {
 	MailingListUID string `json:"mailing_list_uid"`
 }
 
-// groupsioMailingListMemberOperation defines the type of operation to perform on a mailing list member
-type groupsioMailingListMemberOperation int
+// groupsIOMailingListMemberOperation defines the type of operation to perform on a mailing list member
+type groupsIOMailingListMemberOperation int
 
 const (
-	groupsioMailingListMemberPut groupsioMailingListMemberOperation = iota
-	groupsioMailingListMemberRemove
+	groupsIOMailingListMemberPut groupsIOMailingListMemberOperation = iota
+	groupsIOMailingListMemberRemove
 )
 
 // processGroupsIOMailingListMemberMessage handles the complete message processing flow
 // for mailing list member operations
 func (h *HandlerService) processGroupsIOMailingListMemberMessage(
 	message INatsMsg,
-	operation groupsioMailingListMemberOperation,
+	operation groupsIOMailingListMemberOperation,
 ) error {
 	ctx := context.Background()
 
 	// Log the operation type
 	operationType := constants.OperationPut
 	responseMsg := "sent groupsio mailing list member put response"
-	if operation == groupsioMailingListMemberRemove {
+	if operation == groupsIOMailingListMemberRemove {
 		operationType = constants.OperationRemove
 		responseMsg = "sent groupsio mailing list member remove response"
 	}
@@ -50,7 +50,7 @@ func (h *HandlerService) processGroupsIOMailingListMemberMessage(
 	logger.With("message", string(message.Data())).InfoContext(ctx, "handling groupsio mailing list member "+operationType)
 
 	// Parse the event data.
-	member := new(groupsioMailingListMemberStub)
+	member := new(groupsIOMailingListMemberStub)
 	err := json.Unmarshal(message.Data(), member)
 	if err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
@@ -94,16 +94,16 @@ func (h *HandlerService) processGroupsIOMailingListMemberMessage(
 // handleGroupsIOMailingListMemberOperation handles the FGA operation for putting/removing mailing list members
 func (h *HandlerService) handleGroupsIOMailingListMemberOperation(
 	ctx context.Context,
-	member *groupsioMailingListMemberStub,
-	operation groupsioMailingListMemberOperation,
+	member *groupsIOMailingListMemberStub,
+	operation groupsIOMailingListMemberOperation,
 ) error {
 	mailingListObject := constants.ObjectTypeGroupsIOMailingList + member.MailingListUID
 	userPrincipal := constants.ObjectTypeUser + member.Username
 
 	switch operation {
-	case groupsioMailingListMemberPut:
+	case groupsIOMailingListMemberPut:
 		return h.putGroupsIOMailingListMember(ctx, userPrincipal, mailingListObject)
-	case groupsioMailingListMemberRemove:
+	case groupsIOMailingListMemberRemove:
 		return h.removeGroupsIOMailingListMember(ctx, userPrincipal, mailingListObject)
 	default:
 		return errors.New("unknown groupsio mailing list member operation")
@@ -195,12 +195,12 @@ func (h *HandlerService) removeGroupsIOMailingListMember(
 	return nil
 }
 
-// groupsioMailingListMemberPutHandler handles putting a member to a GroupsIO mailing list (idempotent create/update).
-func (h *HandlerService) groupsioMailingListMemberPutHandler(message INatsMsg) error {
-	return h.processGroupsIOMailingListMemberMessage(message, groupsioMailingListMemberPut)
+// groupsIOMailingListMemberPutHandler handles putting a member to a GroupsIO mailing list (idempotent create/update).
+func (h *HandlerService) groupsIOMailingListMemberPutHandler(message INatsMsg) error {
+	return h.processGroupsIOMailingListMemberMessage(message, groupsIOMailingListMemberPut)
 }
 
-// groupsioMailingListMemberRemoveHandler handles removing a member from a GroupsIO mailing list.
-func (h *HandlerService) groupsioMailingListMemberRemoveHandler(message INatsMsg) error {
-	return h.processGroupsIOMailingListMemberMessage(message, groupsioMailingListMemberRemove)
+// groupsIOMailingListMemberRemoveHandler handles removing a member from a GroupsIO mailing list.
+func (h *HandlerService) groupsIOMailingListMemberRemoveHandler(message INatsMsg) error {
+	return h.processGroupsIOMailingListMemberMessage(message, groupsIOMailingListMemberRemove)
 }
