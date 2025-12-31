@@ -208,6 +208,28 @@ attachment-123
 
 Simple attachment UID string.
 
+### GroupsIO Mailing List Member Put Message (`lfx.put_member.groupsio_mailing_list`)
+
+```json
+{
+  "username": "user-123",
+  "mailing_list_uid": "mailing-list-456"
+}
+```
+
+Adds a member to a GroupsIO mailing list. This is an idempotent operation that creates the `member` relation between the user and the mailing list.
+
+### GroupsIO Mailing List Member Remove Message (`lfx.remove_member.groupsio_mailing_list`)
+
+```json
+{
+  "username": "user-123",
+  "mailing_list_uid": "mailing-list-456"
+}
+```
+
+Removes a member from a GroupsIO mailing list. This deletes the `member` relation between the user and the mailing list.
+
 ### Past Meeting Recording Update Message (`lfx.update_access.past_meeting_recording`)
 
 ```json

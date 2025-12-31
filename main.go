@@ -411,6 +411,16 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			description: "groups.io MailingList delete all access",
 		},
 		{
+			subject:     constants.GroupsIOMailingListPutMemberSubject,
+			handler:     handlerService.groupsioMailingListMemberPutHandler,
+			description: "groups.io mailing list member put",
+		},
+		{
+			subject:     constants.GroupsIOMailingListRemoveMemberSubject,
+			handler:     handlerService.groupsioMailingListMemberRemoveHandler,
+			description: "groups.io mailing list member remove",
+		},
+		{
 			subject:     constants.PastMeetingRecordingUpdateAccessSubject,
 			handler:     handlerService.pastMeetingRecordingUpdateAccessHandler,
 			description: "past meeting recording update access",
