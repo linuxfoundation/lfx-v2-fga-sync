@@ -5,5 +5,5 @@ apiVersion: v2
 name: lfx-v2-fga-sync
 description: LFX Platform V2 FGA Sync chart
 type: application
-version: 0.2.10
+version: 0.2.11
 appVersion: "latest"
