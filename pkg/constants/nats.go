@@ -95,6 +95,14 @@ const (
 	// The subject is of the form: lfx.delete_all_access.groupsio_mailing_list
 	GroupsIOMailingListDeleteAllAccessSubject = "lfx.delete_all_access.groupsio_mailing_list"
 
+	// GroupsIOMailingListPutMemberSubject is the subject for adding groups.io mailing list members.
+	// The subject is of the form: lfx.put_member.groupsio_mailing_list
+	GroupsIOMailingListPutMemberSubject = "lfx.put_member.groupsio_mailing_list"
+
+	// GroupsIOMailingListRemoveMemberSubject is the subject for removing groups.io mailing list members.
+	// The subject is of the form: lfx.remove_member.groupsio_mailing_list
+	GroupsIOMailingListRemoveMemberSubject = "lfx.remove_member.groupsio_mailing_list"
+
 	// PastMeetingRecordingUpdateAccessSubject is the subject for the past meeting recording access control updates.
 	// The subject is of the form: lfx.update_access.past_meeting_recording
 	PastMeetingRecordingUpdateAccessSubject = "lfx.update_access.past_meeting_recording"
