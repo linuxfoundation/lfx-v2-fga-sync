@@ -20,6 +20,7 @@ type committeeStub struct {
 	Public     bool                `json:"public"`
 	Relations  map[string][]string `json:"relations"`
 	References map[string]string   `json:"references"`
+	Self       []string            `json:"self"`
 }
 
 // committeeUpdateAccessHandler handles committee access control updates.
@@ -72,7 +73,12 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 		}
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	// self relations
+	for _, relation := range committee.Self {
+		tuples = append(tuples, h.fgaService.TupleKey(object, relation, object))
+	}
+
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, "member")
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
