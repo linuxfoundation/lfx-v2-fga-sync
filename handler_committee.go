@@ -80,7 +80,7 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 		tuples = append(tuples, h.fgaService.TupleKey(object, relation, object))
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, "member")
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, constants.RelationMember)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
