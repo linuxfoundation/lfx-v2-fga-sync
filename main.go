@@ -17,8 +17,11 @@ import (
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/utils"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	slogotel "github.com/remychantenay/slog-otel"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 const (
@@ -83,8 +86,25 @@ func main() {
 		logOptions.AddSource = true
 	}
 
-	logger = slog.New(slog.NewJSONHandler(os.Stdout, logOptions))
+	// Create JSON handler and wrap with slog-otel to add trace_id and span_id from context
+	jsonHandler := slog.NewJSONHandler(os.Stdout, logOptions)
+	otelHandler := slogotel.OtelHandler{Next: jsonHandler}
+	logger = slog.New(otelHandler)
 	slog.SetDefault(logger)
+
+	// Set up OpenTelemetry SDK.
+	ctx := context.Background()
+	otelConfig := utils.OTelConfigFromEnv()
+	otelShutdown, err := utils.SetupOTelSDKWithConfig(ctx, otelConfig)
+	if err != nil {
+		logger.With(errKey, err).Error("error setting up OpenTelemetry SDK")
+		os.Exit(1)
+	}
+	defer func() {
+		if shutdownErr := otelShutdown(context.Background()); shutdownErr != nil {
+			logger.With(errKey, shutdownErr).Error("error shutting down OpenTelemetry SDK")
+		}
+	}()
 
 	// Create an OpenFGA client.
 	fgaClient, err := connectFga()
@@ -219,9 +239,12 @@ func startHTTPListener(bind, port string) {
 	} else {
 		addr = bind + ":" + port
 	}
+	// Wrap the handler with OpenTelemetry instrumentation
+	handler := otelhttp.NewHandler(http.DefaultServeMux, "fga-sync")
+
 	httpServer = &http.Server{
 		Addr:              addr,
-		Handler:           http.DefaultServeMux,
+		Handler:           handler,
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 	go func() {
