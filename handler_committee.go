@@ -73,7 +73,9 @@ func (h *HandlerService) committeeUpdateAccessHandler(message INatsMsg) error {
 		}
 	}
 
-	// self relations
+	// Add self relations where the committee object is both the subject and the resource.
+	// These are used for intrinsic roles or capabilities of the committee itself (for example,
+	// roles that are defined on the committee object in the OpenFGA schema rather than on users).
 	for _, relation := range committee.Self {
 		tuples = append(tuples, h.fgaService.TupleKey(object, relation, object))
 	}
