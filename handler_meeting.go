@@ -344,40 +344,20 @@ type meetingAttachmentStub struct {
 	MeetingUID string `json:"meeting_uid"`
 }
 
-// buildMeetingAttachmentTuples builds all of the tuples for a meeting attachment object.
-func (h *HandlerService) buildMeetingAttachmentTuples(
-	object string,
-	attachment *meetingAttachmentStub,
-) ([]client.ClientTupleKey, error) {
-	tuples := h.fgaService.NewTupleKeySlice(1)
-
-	// Add the meeting relation to associate this attachment with its meeting
-	if attachment.MeetingUID != "" {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeMeeting+attachment.MeetingUID, constants.RelationMeeting, object),
-		)
-	}
-
-	return tuples, nil
-}
-
 // meetingAttachmentUpdateAccessHandler handles meeting attachment access control updates.
 func (h *HandlerService) meetingAttachmentUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
 	logger.With("message", string(message.Data())).InfoContext(ctx, "handling meeting attachment access control update")
 
-	// Parse the event data.
+	// Parse the event data
 	attachment := new(meetingAttachmentStub)
-	var err error
-	err = json.Unmarshal(message.Data(), attachment)
-	if err != nil {
+	if err := json.Unmarshal(message.Data(), attachment); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
 		return err
 	}
 
-	// Validate required fields.
+	// Validate required fields
 	if attachment.UID == "" {
 		logger.ErrorContext(ctx, "meeting attachment UID not found")
 		return errors.New("meeting attachment UID not found")
@@ -389,17 +369,16 @@ func (h *HandlerService) meetingAttachmentUpdateAccessHandler(message INatsMsg) 
 
 	object := constants.ObjectTypeMeetingAttachment + attachment.UID
 
-	// Build a list of tuples to sync.
-	//
-	// It is important that all tuples that should exist with respect to the meeting attachment object
-	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
-	// all tuples that are not in the tuples list parameter.
-	tuples, err := h.buildMeetingAttachmentTuples(object, attachment)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build meeting attachment tuples")
-		return err
+	// Build tuples - associate attachment with its meeting
+	tuples := h.fgaService.NewTupleKeySlice(1)
+	if attachment.MeetingUID != "" {
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(constants.ObjectTypeMeeting+attachment.MeetingUID, constants.RelationMeeting, object),
+		)
 	}
 
+	// Sync tuples
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
@@ -413,8 +392,8 @@ func (h *HandlerService) meetingAttachmentUpdateAccessHandler(message INatsMsg) 
 		"deletes", tuplesDeletes,
 	).InfoContext(ctx, "synced tuples")
 
+	// Reply handling
 	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
 			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err

@@ -379,47 +379,20 @@ type pastMeetingAttachmentStub struct {
 	PastMeetingUID string `json:"past_meeting_uid"`
 }
 
-// buildPastMeetingAttachmentTuples builds all of the tuples for a past meeting attachment object.
-func (h *HandlerService) buildPastMeetingAttachmentTuples(
-	object string,
-	attachment *pastMeetingAttachmentStub,
-) ([]client.ClientTupleKey, error) {
-	tuples := h.fgaService.NewTupleKeySlice(1)
-
-	// Add the past_meeting relation to associate this attachment with its past meeting
-	if attachment.PastMeetingUID != "" {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(
-				constants.ObjectTypePastMeeting+attachment.PastMeetingUID,
-				constants.RelationPastMeeting,
-				object,
-			),
-		)
-	}
-
-	return tuples, nil
-}
-
 // pastMeetingAttachmentUpdateAccessHandler handles past meeting attachment access control updates.
 func (h *HandlerService) pastMeetingAttachmentUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(
-		ctx,
-		"handling past meeting attachment access control update",
-	)
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling past meeting attachment access control update")
 
-	// Parse the event data.
+	// Parse the event data
 	attachment := new(pastMeetingAttachmentStub)
-	var err error
-	err = json.Unmarshal(message.Data(), attachment)
-	if err != nil {
+	if err := json.Unmarshal(message.Data(), attachment); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
 		return err
 	}
 
-	// Validate required fields.
+	// Validate required fields
 	if attachment.UID == "" {
 		logger.ErrorContext(ctx, "past meeting attachment UID not found")
 		return errors.New("past meeting attachment UID not found")
@@ -431,17 +404,20 @@ func (h *HandlerService) pastMeetingAttachmentUpdateAccessHandler(message INatsM
 
 	object := constants.ObjectTypePastMeetingAttachment + attachment.UID
 
-	// Build a list of tuples to sync.
-	//
-	// It is important that all tuples that should exist with respect to the past meeting attachment object
-	// should be added to this tuples list because when SyncObjectTuples is called, it will delete
-	// all tuples that are not in the tuples list parameter.
-	tuples, err := h.buildPastMeetingAttachmentTuples(object, attachment)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting attachment tuples")
-		return err
+	// Build tuples - associate attachment with its past meeting
+	tuples := h.fgaService.NewTupleKeySlice(1)
+	if attachment.PastMeetingUID != "" {
+		tuples = append(
+			tuples,
+			h.fgaService.TupleKey(
+				constants.ObjectTypePastMeeting+attachment.PastMeetingUID,
+				constants.RelationPastMeeting,
+				object,
+			),
+		)
 	}
 
+	// Sync tuples
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
@@ -455,8 +431,8 @@ func (h *HandlerService) pastMeetingAttachmentUpdateAccessHandler(message INatsM
 		"deletes", tuplesDeletes,
 	).InfoContext(ctx, "synced tuples")
 
+	// Reply handling
 	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
 		if err = message.Respond([]byte("OK")); err != nil {
 			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
