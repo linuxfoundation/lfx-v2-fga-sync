@@ -5,12 +5,9 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
-	"github.com/openfga/go-sdk/client" // Only for client types, not the full SDK
 )
 
 // groupsIOMailingListMemberStub represents the structure of GroupsIO mailing list member data for FGA sync.
@@ -23,184 +20,49 @@ type groupsIOMailingListMemberStub struct {
 	MailingListUID string `json:"mailing_list_uid"`
 }
 
-// groupsIOMailingListMemberOperation defines the type of operation to perform on a mailing list member
-type groupsIOMailingListMemberOperation int
-
-const (
-	groupsIOMailingListMemberPut groupsIOMailingListMemberOperation = iota
-	groupsIOMailingListMemberRemove
-)
-
-// processGroupsIOMailingListMemberMessage handles the complete message processing flow
-// for mailing list member operations
-func (h *HandlerService) processGroupsIOMailingListMemberMessage(
-	message INatsMsg,
-	operation groupsIOMailingListMemberOperation,
-) error {
-	ctx := context.Background()
-
-	// Log the operation type
-	operationType := constants.OperationPut
-	responseMsg := "sent groupsio mailing list member put response"
-	if operation == groupsIOMailingListMemberRemove {
-		operationType = constants.OperationRemove
-		responseMsg = "sent groupsio mailing list member remove response"
-	}
-
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling groupsio mailing list member "+operationType)
-
-	// Parse the event data.
-	member := new(groupsIOMailingListMemberStub)
-	err := json.Unmarshal(message.Data(), member)
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
-		return err
-	}
-
-	funcLogger := logger.With("mailing_list_member", member)
-
-	// Validate required fields.
-	if member.Username == "" {
-		funcLogger.ErrorContext(ctx, "groupsio mailing list member username not found")
-		return errors.New("groupsio mailing list member username not found")
-	}
-	if member.MailingListUID == "" {
-		funcLogger.ErrorContext(ctx, "groupsio mailing list UID not found")
-		return errors.New("groupsio mailing list UID not found")
-	}
-
-	// Perform the FGA operation
-	err = h.handleGroupsIOMailingListMemberOperation(ctx, member, operation)
-	if err != nil {
-		return err
-	}
-
-	// Send reply if requested
-	if message.Reply() != "" {
-		if err = message.Respond([]byte("OK")); err != nil {
-			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		funcLogger.InfoContext(ctx, responseMsg,
-			"mailing_list", constants.ObjectTypeGroupsIOMailingList+member.MailingListUID,
-			"member", constants.ObjectTypeUser+member.Username,
-		)
-	}
-
-	return nil
-}
-
-// handleGroupsIOMailingListMemberOperation handles the FGA operation for putting/removing mailing list members
-func (h *HandlerService) handleGroupsIOMailingListMemberOperation(
-	ctx context.Context,
-	member *groupsIOMailingListMemberStub,
-	operation groupsIOMailingListMemberOperation,
-) error {
-	mailingListObject := constants.ObjectTypeGroupsIOMailingList + member.MailingListUID
-	userPrincipal := constants.ObjectTypeUser + member.Username
-
-	switch operation {
-	case groupsIOMailingListMemberPut:
-		return h.putGroupsIOMailingListMember(ctx, userPrincipal, mailingListObject)
-	case groupsIOMailingListMemberRemove:
-		return h.removeGroupsIOMailingListMember(ctx, userPrincipal, mailingListObject)
-	default:
-		return errors.New("unknown groupsio mailing list member operation")
-	}
-}
-
-// putGroupsIOMailingListMember implements idempotent put operation for mailing list member relations
-func (h *HandlerService) putGroupsIOMailingListMember(
-	ctx context.Context,
-	userPrincipal,
-	mailingListObject string,
-) error {
-	// Read existing relations for this user on this mailing list
-	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, mailingListObject)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to read existing groupsio mailing list tuples",
-			errKey, err,
-			"user", userPrincipal,
-			"mailing_list", mailingListObject,
-		)
-		return err
-	}
-
-	// Check if the member relation already exists
-	var hasMemberRelation bool
-	for _, tuple := range existingTuples {
-		if tuple.Key.User == userPrincipal && tuple.Key.Relation == constants.RelationMember {
-			hasMemberRelation = true
-			break
-		}
-	}
-
-	// Only write if the relation doesn't already exist
-	if !hasMemberRelation {
-		tuples := []client.ClientTupleKey{
-			h.fgaService.TupleKey(userPrincipal, constants.RelationMember, mailingListObject),
-		}
-
-		err = h.fgaService.WriteTuples(ctx, tuples)
-		if err != nil {
-			logger.ErrorContext(ctx, "failed to put groupsio mailing list member tuple",
-				errKey, err,
-				"user", userPrincipal,
-				"relation", constants.RelationMember,
-				"mailing_list", mailingListObject,
-			)
-			return err
-		}
-
-		logger.With(
-			"user", userPrincipal,
-			"relation", constants.RelationMember,
-			"mailing_list", mailingListObject,
-		).InfoContext(ctx, "put member to groupsio mailing list")
-	} else {
-		logger.With(
-			"user", userPrincipal,
-			"relation", constants.RelationMember,
-			"mailing_list", mailingListObject,
-		).InfoContext(ctx, "member already has correct relation - no changes needed")
-	}
-
-	return nil
-}
-
-// removeGroupsIOMailingListMember removes the member relation for a user from a mailing list
-func (h *HandlerService) removeGroupsIOMailingListMember(
-	ctx context.Context,
-	userPrincipal,
-	mailingListObject string,
-) error {
-	err := h.fgaService.DeleteTuple(ctx, userPrincipal, constants.RelationMember, mailingListObject)
-	if err != nil {
-		logger.ErrorContext(ctx, "failed to remove groupsio mailing list member tuple",
-			errKey, err,
-			"user", userPrincipal,
-			"relation", constants.RelationMember,
-			"mailing_list", mailingListObject,
-		)
-		return err
-	}
-
-	logger.With(
-		"user", userPrincipal,
-		"relation", constants.RelationMember,
-		"mailing_list", mailingListObject,
-	).InfoContext(ctx, "removed member from groupsio mailing list")
-
-	return nil
-}
 
 // groupsIOMailingListMemberPutHandler handles putting a member to a GroupsIO mailing list (idempotent create/update).
 func (h *HandlerService) groupsIOMailingListMemberPutHandler(message INatsMsg) error {
-	return h.processGroupsIOMailingListMemberMessage(message, groupsIOMailingListMemberPut)
+	// Parse GroupsIO-specific format
+	groupsIOMember := new(groupsIOMailingListMemberStub)
+	if err := json.Unmarshal(message.Data(), groupsIOMember); err != nil {
+		return err
+	}
+
+	// Convert to generic format
+	genericMember := &memberOperationStub{
+		Username:  groupsIOMember.Username,
+		ObjectUID: groupsIOMember.MailingListUID,
+	}
+
+	config := memberOperationConfig{
+		objectTypePrefix: constants.ObjectTypeGroupsIOMailingList,
+		objectTypeName:   "groupsio mailing list",
+		relation:         constants.RelationMember,
+	}
+
+	return h.processMemberOperation(message, genericMember, memberOperationPut, config)
 }
 
 // groupsIOMailingListMemberRemoveHandler handles removing a member from a GroupsIO mailing list.
 func (h *HandlerService) groupsIOMailingListMemberRemoveHandler(message INatsMsg) error {
-	return h.processGroupsIOMailingListMemberMessage(message, groupsIOMailingListMemberRemove)
+	// Parse GroupsIO-specific format
+	groupsIOMember := new(groupsIOMailingListMemberStub)
+	if err := json.Unmarshal(message.Data(), groupsIOMember); err != nil {
+		return err
+	}
+
+	// Convert to generic format
+	genericMember := &memberOperationStub{
+		Username:  groupsIOMember.Username,
+		ObjectUID: groupsIOMember.MailingListUID,
+	}
+
+	config := memberOperationConfig{
+		objectTypePrefix: constants.ObjectTypeGroupsIOMailingList,
+		objectTypeName:   "groupsio mailing list",
+		relation:         constants.RelationMember,
+	}
+
+	return h.processMemberOperation(message, genericMember, memberOperationRemove, config)
 }

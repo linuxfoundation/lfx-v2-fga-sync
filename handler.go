@@ -26,6 +26,27 @@ type standardAccessStub struct {
 	References map[string][]string `json:"references"`
 }
 
+// memberOperationStub represents a generic member operation message
+type memberOperationStub struct {
+	Username  string `json:"username"`
+	ObjectUID string `json:"object_uid"` // committee_uid, mailing_list_uid, etc.
+}
+
+// memberOperationConfig configures the behavior of member operations
+type memberOperationConfig struct {
+	objectTypePrefix string // e.g., "committee:"
+	objectTypeName   string // e.g., "committee" (for logging)
+	relation         string // e.g., constants.RelationMember
+}
+
+// memberOperation defines the type of operation to perform on a member
+type memberOperation int
+
+const (
+	memberOperationPut memberOperation = iota
+	memberOperationRemove
+)
+
 // INatsMsg is an interface for [nats.Msg] that allows for mocking.
 type INatsMsg interface {
 	Reply() string
@@ -181,6 +202,148 @@ func (h *HandlerService) processDeleteAllAccessMessage(
 
 		logger.With("object", object).InfoContext(ctx, "sent "+objectTypeName+" access control delete all response")
 	}
+
+	return nil
+}
+
+// processMemberOperation handles member put/remove operations generically
+func (h *HandlerService) processMemberOperation(
+	message INatsMsg,
+	member *memberOperationStub,
+	operation memberOperation,
+	config memberOperationConfig,
+) error {
+	ctx := context.Background()
+
+	// Log the operation type
+	operationType := "put"
+	if operation == memberOperationRemove {
+		operationType = "remove"
+	}
+
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+config.objectTypeName+" member "+operationType)
+
+	// Validate
+	if member.Username == "" {
+		logger.ErrorContext(ctx, config.objectTypeName+" member username not found")
+		return errors.New(config.objectTypeName + " member username not found")
+	}
+	if member.ObjectUID == "" {
+		logger.ErrorContext(ctx, config.objectTypeName+" UID not found")
+		return errors.New(config.objectTypeName + " UID not found")
+	}
+
+	// Build identifiers
+	objectFull := config.objectTypePrefix + member.ObjectUID
+	userPrincipal := constants.ObjectTypeUser + member.Username
+
+	// Execute operation
+	var err error
+	if operation == memberOperationPut {
+		err = h.putMember(ctx, userPrincipal, objectFull, config)
+	} else {
+		err = h.removeMember(ctx, userPrincipal, objectFull, config)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Send reply
+	if message.Reply() != "" {
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.InfoContext(ctx, "sent "+config.objectTypeName+" member "+operationType+" response",
+			"object", objectFull,
+			"member", userPrincipal,
+		)
+	}
+
+	return nil
+}
+
+// putMember implements idempotent put operation (generic)
+func (h *HandlerService) putMember(
+	ctx context.Context,
+	userPrincipal, object string,
+	config memberOperationConfig,
+) error {
+	// Read existing tuples
+	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, object)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to read existing tuples",
+			errKey, err,
+			"user", userPrincipal,
+			"object", object,
+		)
+		return err
+	}
+
+	// Check if relation already exists (idempotency)
+	var hasRelation bool
+	for _, tuple := range existingTuples {
+		if tuple.Key.User == userPrincipal && tuple.Key.Relation == config.relation {
+			hasRelation = true
+			break
+		}
+	}
+
+	// Write if needed
+	if !hasRelation {
+		tuples := h.fgaService.NewTupleKeySlice(1)
+		tuples = append(tuples, h.fgaService.TupleKey(userPrincipal, config.relation, object))
+
+		if err := h.fgaService.WriteTuples(ctx, tuples); err != nil {
+			logger.ErrorContext(ctx, "failed to put member tuple",
+				errKey, err,
+				"user", userPrincipal,
+				"relation", config.relation,
+				"object", object,
+			)
+			return err
+		}
+
+		logger.With(
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		).InfoContext(ctx, "put member to "+config.objectTypeName)
+	} else {
+		logger.With(
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		).InfoContext(ctx, "member already has correct relation - no changes needed")
+	}
+
+	return nil
+}
+
+// removeMember removes a member relation (generic)
+func (h *HandlerService) removeMember(
+	ctx context.Context,
+	userPrincipal, object string,
+	config memberOperationConfig,
+) error {
+	err := h.fgaService.DeleteTuple(ctx, userPrincipal, config.relation, object)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to remove member tuple",
+			errKey, err,
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		)
+		return err
+	}
+
+	logger.With(
+		"user", userPrincipal,
+		"relation", config.relation,
+		"object", object,
+	).InfoContext(ctx, "removed member from "+config.objectTypeName)
 
 	return nil
 }

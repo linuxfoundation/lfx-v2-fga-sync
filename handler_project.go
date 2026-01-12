@@ -7,7 +7,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 )
@@ -23,84 +22,50 @@ type projectStub struct {
 	MeetingCoordinators []string `json:"meeting_coordinators"`
 }
 
+// toStandardAccessStub converts a projectStub to the standard access control format
+func (p *projectStub) toStandardAccessStub() *standardAccessStub {
+	stub := &standardAccessStub{
+		UID:        p.UID,
+		ObjectType: "project", // Without colon - processStandardAccessUpdate adds it
+		Public:     p.Public,
+		Relations:  make(map[string][]string),
+		References: make(map[string][]string),
+	}
+
+	// Convert parent_uid to References
+	if p.ParentUID != "" {
+		stub.References[constants.RelationParent] = []string{p.ParentUID}
+	}
+
+	// Convert role arrays to Relations
+	if len(p.Writers) > 0 {
+		stub.Relations[constants.RelationWriter] = p.Writers
+	}
+	if len(p.Auditors) > 0 {
+		stub.Relations[constants.RelationAuditor] = p.Auditors
+	}
+	if len(p.MeetingCoordinators) > 0 {
+		stub.Relations[constants.RelationMeetingCoordinator] = p.MeetingCoordinators
+	}
+
+	return stub
+}
+
 // projectUpdateAccessHandler handles project access control updates.
 func (h *HandlerService) projectUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling project access control update")
-
-	// Parse the event data.
+	// Parse the event data as projectStub for backward compatibility
 	project := new(projectStub)
-	var err error
-	err = json.Unmarshal(message.Data(), project)
+	err := json.Unmarshal(message.Data(), project)
 	if err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
 		return err
 	}
 
-	// Grab the project ID.
-	if project.UID == "" {
-		logger.ErrorContext(ctx, "project ID not found")
-		return errors.New("project ID not found")
-	}
-
-	object := constants.ObjectTypeProject + project.UID
-
-	// Build a list of tuples to sync.
-	tuples := h.fgaService.NewTupleKeySlice(4)
-
-	// Convert the "public" attribute to a "user:*" relation.
-	if project.Public {
-		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
-	}
-
-	// Handle the parent relation.
-	if project.ParentUID != "" {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeProject+project.ParentUID, constants.RelationParent, object),
-		)
-	}
-
-	// Add each principal from the object as the corresponding relationship tuple
-	// (as defined in the OpenFGA schema).
-	for _, principal := range project.Writers {
-		tuples = append(tuples, h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationWriter, object))
-	}
-	for _, principal := range project.Auditors {
-		tuples = append(tuples, h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationAuditor, object))
-	}
-	for _, principal := range project.MeetingCoordinators {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeUser+principal, constants.RelationMeetingCoordinator, object),
-		)
-	}
-
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
-	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	logger.With(
-		"tuples", tuples,
-		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		logger.With("object", object).InfoContext(ctx, "sent project access control update response")
-	}
-
-	return nil
+	// Convert to standard access stub and use the generic handler
+	standardAccess := project.toStandardAccessStub()
+	return h.processStandardAccessUpdate(message, standardAccess)
 }
 
 // projectDeleteAllAccessHandler handles project access control deletions.
