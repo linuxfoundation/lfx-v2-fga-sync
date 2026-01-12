@@ -19,28 +19,71 @@ type PastMeetingParticipant struct {
 	Host     bool   `json:"host"`
 }
 
-// PastMeetingRecordingAccessMessage is the schema for the data in the message sent to the fga-sync service.
-// These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for recordings.
-type PastMeetingRecordingAccessMessage struct {
+// artifactAccessMessage is a generic structure for past meeting artifact access messages.
+// This is used for recordings, transcripts, and summaries.
+type artifactAccessMessage struct {
 	UID                string `json:"uid"`
 	PastMeetingUID     string `json:"past_meeting_uid"`
 	ArtifactVisibility string `json:"artifact_visibility"`
 }
 
-// PastMeetingTranscriptAccessMessage is the schema for the data in the message sent to the fga-sync service.
-// These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for transcripts.
-type PastMeetingTranscriptAccessMessage struct {
-	UID                string `json:"uid"`
-	PastMeetingUID     string `json:"past_meeting_uid"`
-	ArtifactVisibility string `json:"artifact_visibility"`
+// artifactConfig configures the behavior of artifact operations
+type artifactConfig struct {
+	objectTypePrefix string // e.g., constants.ObjectTypePastMeetingRecording
+	objectTypeName   string // e.g., "past meeting recording" (for logging)
 }
 
-// PastMeetingSummaryAccessMessage is the schema for the data in the message sent to the fga-sync service.
-// These are the fields that the fga-sync service needs in order to update the OpenFGA permissions for summaries.
-type PastMeetingSummaryAccessMessage struct {
-	UID                string `json:"uid"`
-	PastMeetingUID     string `json:"past_meeting_uid"`
-	ArtifactVisibility string `json:"artifact_visibility"`
+// processArtifactUpdate handles artifact access control updates generically
+func (h *HandlerService) processArtifactUpdate(
+	message INatsMsg,
+	artifact *artifactAccessMessage,
+	config artifactConfig,
+) error {
+	ctx := context.Background()
+
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+config.objectTypeName+" access control update")
+
+	// Validate required fields
+	if artifact.PastMeetingUID == "" {
+		logger.ErrorContext(ctx, "past meeting UID not found")
+		return errors.New("past meeting UID not found")
+	}
+
+	// Build object identifier
+	object := config.objectTypePrefix + artifact.UID
+
+	// Build tuples using the shared artifact logic
+	tuples, err := h.buildPastMeetingArtifactTuples(object, artifact.PastMeetingUID, artifact.ArtifactVisibility)
+	if err != nil {
+		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build "+config.objectTypeName+" tuples")
+		return err
+	}
+
+	// Sync tuples
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	if err != nil {
+		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		return err
+	}
+
+	logger.With(
+		"tuples", tuples,
+		"object", object,
+		"writes", tuplesWrites,
+		"deletes", tuplesDeletes,
+	).InfoContext(ctx, "synced tuples")
+
+	// Reply handling
+	if message.Reply() != "" {
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.With("object", object).InfoContext(ctx, "sent "+config.objectTypeName+" access control update response")
+	}
+
+	return nil
 }
 
 // buildPastMeetingArtifactTuples builds all of the tuples for a past meeting artifact
@@ -108,183 +151,51 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 
 // pastMeetingRecordingUpdateAccessHandler handles past meeting recording access control updates.
 func (h *HandlerService) pastMeetingRecordingUpdateAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
-
-	logger.With("message", string(message.Data())).InfoContext(
-		ctx,
-		"handling past meeting recording access control update",
-	)
-
-	// Parse the event data.
-	recording := new(PastMeetingRecordingAccessMessage)
-	err := json.Unmarshal(message.Data(), recording)
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+	// Parse the artifact message
+	artifact := new(artifactAccessMessage)
+	if err := json.Unmarshal(message.Data(), artifact); err != nil {
 		return err
 	}
 
-	// Validate required fields.
-	if recording.PastMeetingUID == "" {
-		logger.ErrorContext(ctx, "past meeting UID not found")
-		return errors.New("past meeting UID not found")
+	// Configure for recording
+	config := artifactConfig{
+		objectTypePrefix: constants.ObjectTypePastMeetingRecording,
+		objectTypeName:   "past meeting recording",
 	}
 
-	object := constants.ObjectTypePastMeetingRecording + recording.UID
-
-	// Build a list of tuples to sync.
-	tuples, err := h.buildPastMeetingArtifactTuples(
-		object,
-		recording.PastMeetingUID,
-		recording.ArtifactVisibility,
-	)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting recording tuples")
-		return err
-	}
-
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
-	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	logger.With(
-		"tuples", tuples,
-		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		logger.With("object", object).InfoContext(ctx, "sent past meeting recording access control update response")
-	}
-
-	return nil
+	return h.processArtifactUpdate(message, artifact, config)
 }
 
 // pastMeetingTranscriptUpdateAccessHandler handles past meeting transcript access control updates.
 func (h *HandlerService) pastMeetingTranscriptUpdateAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
-
-	logger.With("message", string(message.Data())).InfoContext(
-		ctx,
-		"handling past meeting transcript access control update",
-	)
-
-	// Parse the event data.
-	transcript := new(PastMeetingTranscriptAccessMessage)
-	err := json.Unmarshal(message.Data(), transcript)
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+	// Parse the artifact message
+	artifact := new(artifactAccessMessage)
+	if err := json.Unmarshal(message.Data(), artifact); err != nil {
 		return err
 	}
 
-	// Validate required fields.
-	if transcript.PastMeetingUID == "" {
-		logger.ErrorContext(ctx, "past meeting UID not found")
-		return errors.New("past meeting UID not found")
+	// Configure for transcript
+	config := artifactConfig{
+		objectTypePrefix: constants.ObjectTypePastMeetingTranscript,
+		objectTypeName:   "past meeting transcript",
 	}
 
-	object := constants.ObjectTypePastMeetingTranscript + transcript.UID
-
-	// Build a list of tuples to sync.
-	tuples, err := h.buildPastMeetingArtifactTuples(
-		object,
-		transcript.PastMeetingUID,
-		transcript.ArtifactVisibility,
-	)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting transcript tuples")
-		return err
-	}
-
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
-	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	logger.With(
-		"tuples", tuples,
-		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		logger.With("object", object).InfoContext(ctx, "sent past meeting transcript access control update response")
-	}
-
-	return nil
+	return h.processArtifactUpdate(message, artifact, config)
 }
 
 // pastMeetingSummaryUpdateAccessHandler handles past meeting summary access control updates.
 func (h *HandlerService) pastMeetingSummaryUpdateAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
-
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling past meeting summary access control update")
-
-	// Parse the event data.
-	summary := new(PastMeetingSummaryAccessMessage)
-	err := json.Unmarshal(message.Data(), summary)
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
+	// Parse the artifact message
+	artifact := new(artifactAccessMessage)
+	if err := json.Unmarshal(message.Data(), artifact); err != nil {
 		return err
 	}
 
-	// Validate required fields.
-	if summary.PastMeetingUID == "" {
-		logger.ErrorContext(ctx, "past meeting UID not found")
-		return errors.New("past meeting UID not found")
+	// Configure for summary
+	config := artifactConfig{
+		objectTypePrefix: constants.ObjectTypePastMeetingSummary,
+		objectTypeName:   "past meeting summary",
 	}
 
-	object := constants.ObjectTypePastMeetingSummary + summary.UID
-
-	// Build a list of tuples to sync.
-	tuples, err := h.buildPastMeetingArtifactTuples(
-		object,
-		summary.PastMeetingUID,
-		summary.ArtifactVisibility,
-	)
-	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting summary tuples")
-		return err
-	}
-
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
-	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	logger.With(
-		"tuples", tuples,
-		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		logger.With("object", object).InfoContext(ctx, "sent past meeting summary access control update response")
-	}
-
-	return nil
+	return h.processArtifactUpdate(message, artifact, config)
 }
