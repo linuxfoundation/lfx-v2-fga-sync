@@ -160,10 +160,9 @@ func (h *HandlerService) meetingRegistrantRemoveHandler(message INatsMsg) error 
 
 	// Configure with mutually exclusive relations
 	config := memberOperationConfig{
-		objectTypePrefix:      constants.ObjectTypeMeeting,
-		objectTypeName:        "meeting",
-		relation:              relation,
-		mutuallyExclusiveWith: []string{constants.RelationParticipant, constants.RelationHost},
+		objectTypePrefix: constants.ObjectTypeMeeting,
+		objectTypeName:   "meeting",
+		relation:         relation,
 	}
 
 	return h.processMemberOperation(message, genericMember, memberOperationRemove, config)
@@ -573,7 +572,10 @@ type pastMeetingAttachmentStub struct {
 func (h *HandlerService) pastMeetingAttachmentUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling past meeting attachment access control update")
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		"handling past meeting attachment access control update",
+	)
 
 	// Parse the event data
 	attachment := new(pastMeetingAttachmentStub)
@@ -673,7 +675,10 @@ func (h *HandlerService) processArtifactUpdate(
 ) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+config.objectTypeName+" access control update")
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		"handling "+config.objectTypeName+" access control update",
+	)
 
 	// Validate required fields
 	if artifact.PastMeetingUID == "" {

@@ -35,10 +35,10 @@ type memberOperationStub struct {
 
 // memberOperationConfig configures the behavior of member operations
 type memberOperationConfig struct {
-	objectTypePrefix       string   // e.g., "committee:"
-	objectTypeName         string   // e.g., "committee" (for logging)
-	relation               string   // e.g., constants.RelationMember
-	mutuallyExclusiveWith  []string // Optional: relations that should be removed when this relation is added
+	objectTypePrefix      string   // e.g., "committee:"
+	objectTypeName        string   // e.g., "committee" (for logging)
+	relation              string   // e.g., constants.RelationMember
+	mutuallyExclusiveWith []string // Optional: relations that should be removed when this relation is added
 }
 
 // memberOperation defines the type of operation to perform on a member
@@ -83,7 +83,11 @@ func (m *NatsMsg) Subject() string {
 }
 
 // processStandardAccessUpdate handles the default access control update logic
-func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *standardAccessStub, excludeRelations ...string) error {
+func (h *HandlerService) processStandardAccessUpdate(
+	message INatsMsg,
+	obj *standardAccessStub,
+	excludeRelations ...string,
+) error {
 	ctx := context.Background()
 
 	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+obj.ObjectType+" access control update")
@@ -223,7 +227,10 @@ func (h *HandlerService) processMemberOperation(
 		operationType = constants.OperationRemove
 	}
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+config.objectTypeName+" member "+operationType)
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		"handling "+config.objectTypeName+" member "+operationType,
+	)
 
 	// Validate
 	if member.Username == "" {
