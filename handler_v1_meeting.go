@@ -590,10 +590,10 @@ func (h *HandlerService) v1ProcessRegistrantMessage(message INatsMsg, operation 
 	ctx := context.Background()
 
 	// Log the operation type.
-	operationType := "put"
+	operationType := constants.OperationPut
 	responseMsg := "sent v1 registrant put response"
 	if operation == v1RegistrantRemove {
-		operationType = "remove"
+		operationType = constants.OperationRemove
 		responseMsg = "sent v1 registrant remove response"
 	}
 
@@ -804,10 +804,10 @@ func (h *HandlerService) v1ProcessPastMeetingParticipantMessage(
 	ctx := context.Background()
 
 	// Log the operation type
-	operationType := "put"
+	operationType := constants.OperationPut
 	responseMsg := "sent v1 past meeting participant put response"
 	if operation == v1PastMeetingParticipantRemove {
-		operationType = "remove"
+		operationType = constants.OperationRemove
 		responseMsg = "sent v1 past meeting participant remove response"
 	}
 

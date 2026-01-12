@@ -218,9 +218,9 @@ func (h *HandlerService) processMemberOperation(
 	ctx := context.Background()
 
 	// Log the operation type
-	operationType := "put"
+	operationType := constants.OperationPut
 	if operation == memberOperationRemove {
-		operationType = "remove"
+		operationType = constants.OperationRemove
 	}
 
 	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+config.objectTypeName+" member "+operationType)

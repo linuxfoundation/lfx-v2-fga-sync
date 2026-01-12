@@ -13,11 +13,6 @@ import (
 	"github.com/openfga/go-sdk/client"
 )
 
-const (
-	operationTypePut    = "put"
-	operationTypeRemove = "remove"
-)
-
 // ============================================================================
 // Meeting Handlers
 // ============================================================================
@@ -362,10 +357,10 @@ func (h *HandlerService) processPastMeetingParticipantMessage(
 	ctx := context.Background()
 
 	// Log the operation type
-	operationType := operationTypePut
+	operationType := constants.OperationPut
 	responseMsg := "sent past meeting participant put response"
 	if operation == pastMeetingParticipantRemove {
-		operationType = operationTypeRemove
+		operationType = constants.OperationRemove
 		responseMsg = "sent past meeting participant remove response"
 	}
 
