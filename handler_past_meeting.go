@@ -26,115 +26,65 @@ type pastMeetingStub struct {
 	Committees []string `json:"committees"`
 }
 
-// buildPastMeetingTuples builds all of the tuples for a past meeting object.
-func (h *HandlerService) buildPastMeetingTuples(
-	object string,
-	meeting *pastMeetingStub,
-) ([]client.ClientTupleKey, error) {
-	tuples := h.fgaService.NewTupleKeySlice(4)
-
-	// Convert the "public" attribute to a "user:*" relation.
-	if meeting.Public {
-		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
+// toStandardAccessStub converts pastMeetingStub to standardAccessStub format.
+func (p *pastMeetingStub) toStandardAccessStub() *standardAccessStub {
+	stub := &standardAccessStub{
+		UID:        p.UID,
+		ObjectType: "past_meeting", // Without colon - processStandardAccessUpdate adds it
+		Public:     p.Public,
+		Relations:  make(map[string][]string),
+		References: make(map[string][]string),
 	}
 
-	// Add the meeting relation to associate this past meeting with its meeting
-	if meeting.MeetingUID != "" {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeMeeting+meeting.MeetingUID, constants.RelationMeeting, object),
-		)
+	// Convert meeting_uid to References
+	if p.MeetingUID != "" {
+		stub.References[constants.RelationMeeting] = []string{p.MeetingUID}
 	}
 
-	// Add the project relation to associate this past meeting with its project
-	if meeting.ProjectUID != "" {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeProject+meeting.ProjectUID, constants.RelationProject, object),
-		)
+	// Convert project_uid to References
+	if p.ProjectUID != "" {
+		stub.References[constants.RelationProject] = []string{p.ProjectUID}
 	}
 
-	// Each committee should have a committee relation with the past meeting.
-	for _, committee := range meeting.Committees {
-		tuples = append(
-			tuples,
-			h.fgaService.TupleKey(constants.ObjectTypeCommittee+committee, constants.RelationCommittee, object),
-		)
+	// Convert committees to References
+	if len(p.Committees) > 0 {
+		stub.References[constants.RelationCommittee] = p.Committees
 	}
 
-	return tuples, nil
+	return stub
 }
 
 // pastMeetingUpdateAccessHandler handles past meeting access control updates.
 func (h *HandlerService) pastMeetingUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling past meeting access control update")
-
 	// Parse the event data.
 	pastMeeting := new(pastMeetingStub)
-	var err error
-	err = json.Unmarshal(message.Data(), pastMeeting)
+	err := json.Unmarshal(message.Data(), pastMeeting)
 	if err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "event data parse error")
 		return err
 	}
 
-	funcLogger := logger.With("past_meeting", pastMeeting)
-
-	// Grab the project ID.
+	// Validate project ID.
 	if pastMeeting.ProjectUID == "" {
-		funcLogger.ErrorContext(ctx, "past meeting project ID not found")
+		logger.With("past_meeting", pastMeeting).ErrorContext(ctx, "past meeting project ID not found")
 		return errors.New("past meeting project ID not found")
 	}
 
-	object := constants.ObjectTypePastMeeting + pastMeeting.UID
+	// Convert to standard format
+	standardAccess := pastMeeting.toStandardAccessStub()
 
-	// Build a list of tuples to sync. It should include all the tuples that need to be synced
-	// with respect to the past meeting object or else they will be deleted.
-	//
-	// Note: host, invitee, and attendee relations, however, are excluded from the sync operation
-	// because they are managed separately via put_participant and remove_participant messages.
-	tuples, err := h.buildPastMeetingTuples(object, pastMeeting)
-	if err != nil {
-		funcLogger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build past meeting tuples")
-		return err
-	}
-
-	// Sync the tuples.
-	// Exclude host, invitee, and attendee relations from deletion - these are managed by other messages.
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(
-		ctx,
-		object,
-		tuples,
+	// Use the generic handler with excluded relations.
+	// Exclude organizer, host, invitee, and attendee relations from deletion - these are managed by other messages.
+	return h.processStandardAccessUpdate(
+		message,
+		standardAccess,
 		constants.RelationOrganizer,
 		constants.RelationHost,
 		constants.RelationInvitee,
 		constants.RelationAttendee,
 	)
-	if err != nil {
-		funcLogger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
-		return err
-	}
-
-	funcLogger.With(
-		"tuples", tuples,
-		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "synced tuples")
-
-	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			funcLogger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-
-		funcLogger.With("object", object).InfoContext(ctx, "sent past meeting access control update response")
-	}
-
-	return nil
 }
 
 // pastMeetingDeleteAllAccessHandler handles deleting all tuples for a past meeting object.

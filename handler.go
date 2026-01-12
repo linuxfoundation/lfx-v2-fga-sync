@@ -10,6 +10,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
+	"github.com/openfga/go-sdk/client"
 )
 
 // HandlerService is the service that handles the messages from NATS about FGA syncing.
@@ -34,9 +35,10 @@ type memberOperationStub struct {
 
 // memberOperationConfig configures the behavior of member operations
 type memberOperationConfig struct {
-	objectTypePrefix string // e.g., "committee:"
-	objectTypeName   string // e.g., "committee" (for logging)
-	relation         string // e.g., constants.RelationMember
+	objectTypePrefix       string   // e.g., "committee:"
+	objectTypeName         string   // e.g., "committee" (for logging)
+	relation               string   // e.g., constants.RelationMember
+	mutuallyExclusiveWith  []string // Optional: relations that should be removed when this relation is added
 }
 
 // memberOperation defines the type of operation to perform on a member
@@ -81,7 +83,7 @@ func (m *NatsMsg) Subject() string {
 }
 
 // processStandardAccessUpdate handles the default access control update logic
-func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *standardAccessStub) error {
+func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *standardAccessStub, excludeRelations ...string) error {
 	ctx := context.Background()
 
 	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+obj.ObjectType+" access control update")
@@ -124,7 +126,7 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 		}
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, excludeRelations...)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
@@ -282,21 +284,40 @@ func (h *HandlerService) putMember(
 		return err
 	}
 
-	// Check if relation already exists (idempotency)
+	// Build a map of mutually exclusive relations for quick lookup
+	mutuallyExclusiveMap := make(map[string]bool)
+	for _, rel := range config.mutuallyExclusiveWith {
+		mutuallyExclusiveMap[rel] = true
+	}
+
+	// Check if relation already exists and find mutually exclusive relations to remove
 	var hasRelation bool
+	var tuplesToDelete []client.ClientTupleKeyWithoutCondition
+
 	for _, tuple := range existingTuples {
-		if tuple.Key.User == userPrincipal && tuple.Key.Relation == config.relation {
-			hasRelation = true
-			break
+		if tuple.Key.User == userPrincipal {
+			if tuple.Key.Relation == config.relation {
+				hasRelation = true
+			} else if mutuallyExclusiveMap[tuple.Key.Relation] {
+				// This is a mutually exclusive relation that needs to be removed
+				tuplesToDelete = append(tuplesToDelete, client.ClientTupleKeyWithoutCondition{
+					User:     tuple.Key.User,
+					Relation: tuple.Key.Relation,
+					Object:   tuple.Key.Object,
+				})
+			}
 		}
 	}
 
-	// Write if needed
+	// Prepare write operations
+	var tuplesToWrite []client.ClientTupleKey
 	if !hasRelation {
-		tuples := h.fgaService.NewTupleKeySlice(1)
-		tuples = append(tuples, h.fgaService.TupleKey(userPrincipal, config.relation, object))
+		tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, config.relation, object))
+	}
 
-		if err := h.fgaService.WriteTuples(ctx, tuples); err != nil {
+	// Apply changes if needed
+	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
+		if err := h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete); err != nil {
 			logger.ErrorContext(ctx, "failed to put member tuple",
 				errKey, err,
 				"user", userPrincipal,
