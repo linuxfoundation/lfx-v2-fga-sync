@@ -730,7 +730,7 @@ Remove `attendee` if they didn't actually attend:
 
 All operations return a simple `"OK"` string on success:
 
-```
+```text
 OK
 ```
 
@@ -886,7 +886,7 @@ Based on production testing:
 
 **Invalid JSON:**
 
-```
+```text
 Error: failed to parse generic message
 ```
 

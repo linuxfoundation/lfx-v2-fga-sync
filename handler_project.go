@@ -26,7 +26,7 @@ type projectStub struct {
 func (p *projectStub) toStandardAccessStub() *standardAccessStub {
 	stub := &standardAccessStub{
 		UID:        p.UID,
-		ObjectType: "project", // Without colon - processStandardAccessUpdate adds it
+		ObjectType: "project",
 		Public:     p.Public,
 		Relations:  make(map[string][]string),
 		References: make(map[string][]string),

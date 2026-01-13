@@ -64,7 +64,7 @@ func (h *HandlerService) groupsIOMailingListDeleteAllAccessHandler(message INats
 	ctx := context.Background()
 	logger.With("subject", message.Subject()).InfoContext(ctx, "handling groups.io mailing list access control deletion")
 
-	return h.processDeleteAllAccessMessage(message, constants.ObjectTypeGroupsIOMailingList, "groupsio_mailing_list")
+	return h.processDeleteAllAccessMessage(message, constants.ObjectTypeGroupsIOMailingList, "groupsio mailing list")
 }
 
 // ============================================================================

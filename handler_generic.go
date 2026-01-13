@@ -146,6 +146,10 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 		logger.ErrorContext(ctx, "object_type is required")
 		return errors.New("object_type is required")
 	}
+	if genericMsg.Operation != "delete_access" {
+		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
+		return errors.New("invalid operation for delete_access handler")
+	}
 
 	// Parse data field
 	data := new(GenericDeleteData)
@@ -154,14 +158,19 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 		return err
 	}
 
+	// Validate UID is non-empty
+	if data.UID == "" {
+		logger.ErrorContext(ctx, "uid is required")
+		return errors.New("uid is required")
+	}
+
 	logger.With(
 		"object_type", genericMsg.ObjectType,
 		"uid", data.UID,
 	).InfoContext(ctx, "handling generic delete_access")
 
-	// Build object identifier
-	objectTypePrefix := genericMsg.ObjectType + ":"
-	object := objectTypePrefix + data.UID
+	// Build object identifier using standard helper
+	object := buildObjectID(genericMsg.ObjectType, data.UID)
 
 	// Use existing generic sync with empty tuples (deletes all)
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, nil)
@@ -231,38 +240,10 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 	ctx := context.Background()
 
-	// Parse generic message
-	genericMsg := new(GenericFGAMessage)
-	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
+	// Parse and validate message
+	genericMsg, data, err := h.parseAndValidateMemberPutMessage(ctx, message)
+	if err != nil {
 		return err
-	}
-
-	// Validate
-	if genericMsg.ObjectType == "" {
-		logger.ErrorContext(ctx, "object_type is required")
-		return errors.New("object_type is required")
-	}
-
-	// Parse data field
-	data := new(GenericMemberData)
-	if err := genericMsg.UnmarshalData(data); err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
-		return err
-	}
-
-	// Validate required fields
-	if data.Username == "" {
-		logger.ErrorContext(ctx, "username is required")
-		return errors.New("username is required")
-	}
-	if data.UID == "" {
-		logger.ErrorContext(ctx, "uid is required")
-		return errors.New("uid is required")
-	}
-	if len(data.Relations) == 0 {
-		logger.ErrorContext(ctx, "relations array cannot be empty")
-		return errors.New("relations array cannot be empty")
 	}
 
 	logger.With(
@@ -272,18 +253,93 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 		"relations", data.Relations,
 	).InfoContext(ctx, "handling generic member_put")
 
-	// Build identifiers
-	objectTypePrefix := genericMsg.ObjectType + ":"
-	object := objectTypePrefix + data.UID
+	// Build identifiers using standard helper
+	object := buildObjectID(genericMsg.ObjectType, data.UID)
 	userPrincipal := constants.ObjectTypeUser + data.Username
 
+	// Compute tuple changes
+	tuplesToWrite, tuplesToDelete, err := h.computeMemberPutChanges(ctx, object, userPrincipal, data)
+	if err != nil {
+		return err
+	}
+
+	// Apply changes
+	err = h.applyMemberPutChanges(
+		ctx, genericMsg.ObjectType, object, userPrincipal, data.Relations, tuplesToWrite, tuplesToDelete,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Send reply
+	return h.sendReplyIfNeeded(ctx, message)
+}
+
+// parseAndValidateMemberPutMessage parses and validates the member_put message
+func (h *HandlerService) parseAndValidateMemberPutMessage(
+	ctx context.Context, message INatsMsg,
+) (*GenericFGAMessage, *GenericMemberData, error) {
+	// Parse generic message
+	genericMsg := new(GenericFGAMessage)
+	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
+		return nil, nil, err
+	}
+
+	// Validate object_type
+	if genericMsg.ObjectType == "" {
+		logger.ErrorContext(ctx, "object_type is required")
+		return nil, nil, errors.New("object_type is required")
+	}
+	if genericMsg.Operation != "member_put" {
+		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
+		return nil, nil, errors.New("invalid operation for member_put handler")
+	}
+
+	// Parse data field
+	data := new(GenericMemberData)
+	if err := genericMsg.UnmarshalData(data); err != nil {
+		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
+		return nil, nil, err
+	}
+
+	// Validate required fields
+	if data.Username == "" {
+		logger.ErrorContext(ctx, "username is required")
+		return nil, nil, errors.New("username is required")
+	}
+	if data.UID == "" {
+		logger.ErrorContext(ctx, "uid is required")
+		return nil, nil, errors.New("uid is required")
+	}
+	if len(data.Relations) == 0 {
+		logger.ErrorContext(ctx, "relations array cannot be empty")
+		return nil, nil, errors.New("relations array cannot be empty")
+	}
+	// Validate each relation is non-empty
+	for _, relation := range data.Relations {
+		if relation == "" {
+			logger.ErrorContext(ctx, "relation value cannot be empty")
+			return nil, nil, errors.New("relation value cannot be empty")
+		}
+	}
+
+	return genericMsg, data, nil
+}
+
+// computeMemberPutChanges determines which tuples to write and delete
+func (h *HandlerService) computeMemberPutChanges(
+	ctx context.Context,
+	object, userPrincipal string,
+	data *GenericMemberData,
+) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
 	// Build mutually exclusive map for quick lookup
 	mutuallyExclusiveMap := make(map[string]bool)
 	for _, rel := range data.MutuallyExclusiveWith {
 		mutuallyExclusiveMap[rel] = true
 	}
 
-	// Read existing tuples to check what needs to be added/removed
+	// Read existing tuples
 	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, object)
 	if err != nil {
 		logger.ErrorContext(ctx, "failed to read existing tuples",
@@ -291,7 +347,7 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 			"user", userPrincipal,
 			"object", object,
 		)
-		return err
+		return nil, nil, err
 	}
 
 	// Build desired relations set
@@ -300,7 +356,7 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 		desiredRelations[rel] = true
 	}
 
-	// Determine what to write and what to delete
+	// Determine what to write and delete
 	var tuplesToWrite []client.ClientTupleKey
 	var tuplesToDelete []client.ClientTupleKeyWithoutCondition
 	existingRelationsMap := make(map[string]bool)
@@ -327,14 +383,24 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 		}
 	}
 
-	// Apply changes if needed
+	return tuplesToWrite, tuplesToDelete, nil
+}
+
+// applyMemberPutChanges applies the computed tuple changes
+func (h *HandlerService) applyMemberPutChanges(
+	ctx context.Context,
+	objectType, object, userPrincipal string,
+	relations []string,
+	tuplesToWrite []client.ClientTupleKey,
+	tuplesToDelete []client.ClientTupleKeyWithoutCondition,
+) error {
 	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
-		err = h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
+		err := h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to put member relations",
 				errKey, err,
 				"user", userPrincipal,
-				"relations", data.Relations,
+				"relations", relations,
 				"object", object,
 			)
 			return err
@@ -342,27 +408,30 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 
 		logger.With(
 			"user", userPrincipal,
-			"relations", data.Relations,
+			"relations", relations,
 			"object", object,
 			"writes", len(tuplesToWrite),
 			"deletes", len(tuplesToDelete),
-		).InfoContext(ctx, "put member to "+genericMsg.ObjectType)
+		).InfoContext(ctx, "put member to "+objectType)
 	} else {
 		logger.With(
 			"user", userPrincipal,
-			"relations", data.Relations,
+			"relations", relations,
 			"object", object,
 		).InfoContext(ctx, "member already has correct relations - no changes needed")
 	}
 
-	// Send reply
+	return nil
+}
+
+// sendReplyIfNeeded sends a reply message if requested
+func (h *HandlerService) sendReplyIfNeeded(ctx context.Context, message INatsMsg) error {
 	if message.Reply() != "" {
-		if err = message.Respond([]byte("OK")); err != nil {
+		if err := message.Respond([]byte("OK")); err != nil {
 			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
 			return err
 		}
 	}
-
 	return nil
 }
 
@@ -410,6 +479,10 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 		logger.ErrorContext(ctx, "object_type is required")
 		return errors.New("object_type is required")
 	}
+	if genericMsg.Operation != "member_remove" {
+		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
+		return errors.New("invalid operation for member_remove handler")
+	}
 
 	// Parse data field
 	data := new(GenericMemberData)
@@ -435,13 +508,20 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 		"relations", data.Relations,
 	).InfoContext(ctx, "handling generic member_remove")
 
-	// Build identifiers
-	objectTypePrefix := genericMsg.ObjectType + ":"
-	object := objectTypePrefix + data.UID
+	// Build identifiers using standard helper
+	object := buildObjectID(genericMsg.ObjectType, data.UID)
 	userPrincipal := constants.ObjectTypeUser + data.Username
 
-	// If no specific relations provided, delete ALL relations for this user
-	if len(data.Relations) == 0 {
+	// Filter out empty relations and build list of valid relations to delete
+	var validRelations []string
+	for _, relation := range data.Relations {
+		if relation != "" {
+			validRelations = append(validRelations, relation)
+		}
+	}
+
+	// If no specific relations provided (or all were empty), delete ALL relations for this user
+	if len(validRelations) == 0 {
 		err := h.fgaService.DeleteTuplesByUserAndObject(ctx, userPrincipal, object)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to remove all member relations",
@@ -457,9 +537,9 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 			"object", object,
 		).InfoContext(ctx, "removed all relations from "+genericMsg.ObjectType)
 	} else {
-		// Delete specific relations
+		// Delete specific relations (only non-empty ones)
 		var tuplesToDelete []client.ClientTupleKeyWithoutCondition
-		for _, relation := range data.Relations {
+		for _, relation := range validRelations {
 			tuplesToDelete = append(tuplesToDelete, client.ClientTupleKeyWithoutCondition{
 				User:     userPrincipal,
 				Relation: relation,
@@ -473,7 +553,7 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 			logger.ErrorContext(ctx, "failed to remove member relations",
 				errKey, err,
 				"user", userPrincipal,
-				"relations", data.Relations,
+				"relations", validRelations,
 				"object", object,
 			)
 			return err
@@ -481,7 +561,7 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 
 		logger.With(
 			"user", userPrincipal,
-			"relations", data.Relations,
+			"relations", validRelations,
 			"object", object,
 			"deletes", len(tuplesToDelete),
 		).InfoContext(ctx, "removed member from "+genericMsg.ObjectType)

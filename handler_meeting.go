@@ -29,7 +29,7 @@ type meetingStub struct {
 func (m *meetingStub) toStandardAccessStub() *standardAccessStub {
 	stub := &standardAccessStub{
 		UID:        m.UID,
-		ObjectType: "meeting", // Without colon - processStandardAccessUpdate adds it
+		ObjectType: "meeting",
 		Public:     m.Public,
 		Relations:  make(map[string][]string),
 		References: make(map[string][]string),
@@ -261,7 +261,7 @@ type pastMeetingStub struct {
 func (p *pastMeetingStub) toStandardAccessStub() *standardAccessStub {
 	stub := &standardAccessStub{
 		UID:        p.UID,
-		ObjectType: "past_meeting", // Without colon - processStandardAccessUpdate adds it
+		ObjectType: "past_meeting",
 		Public:     p.Public,
 		Relations:  make(map[string][]string),
 		References: make(map[string][]string),
@@ -418,7 +418,7 @@ func (h *HandlerService) handlePastMeetingParticipantOperation(
 	case pastMeetingParticipantPut:
 		return h.putPastMeetingParticipant(ctx, userPrincipal, pastMeetingObject, pastMeetingParticipant)
 	case pastMeetingParticipantRemove:
-		return h.removePastMeetingParticipant(ctx, userPrincipal, pastMeetingObject, pastMeetingParticipant)
+		return h.removePastMeetingParticipant(ctx, userPrincipal, pastMeetingObject)
 	default:
 		return errors.New("unknown past meeting participant operation")
 	}
@@ -528,7 +528,6 @@ func (h *HandlerService) removePastMeetingParticipant(
 	ctx context.Context,
 	userPrincipal,
 	pastMeetingObject string,
-	participant *pastMeetingParticipantStub,
 ) error {
 	err := h.fgaService.DeleteTuplesByUserAndObject(ctx, userPrincipal, pastMeetingObject)
 	if err != nil {
@@ -690,7 +689,7 @@ func (h *HandlerService) processArtifactUpdate(
 	object := config.objectTypePrefix + artifact.UID
 
 	// Build tuples using the shared artifact logic
-	tuples, err := h.buildPastMeetingArtifactTuples(object, artifact.PastMeetingUID, artifact.ArtifactVisibility)
+	tuples, err := h.buildPastMeetingArtifactTuples(ctx, object, artifact.PastMeetingUID, artifact.ArtifactVisibility)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build "+config.objectTypeName+" tuples")
 		return err
@@ -726,6 +725,7 @@ func (h *HandlerService) processArtifactUpdate(
 // buildPastMeetingArtifactTuples builds all of the tuples for a past meeting artifact
 // (recording, transcript, or summary).
 func (h *HandlerService) buildPastMeetingArtifactTuples(
+	ctx context.Context,
 	object string,
 	pastMeetingUID string,
 	artifactVisibility string,
@@ -779,7 +779,7 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 		)
 
 	default:
-		logger.ErrorContext(context.Background(), "unknown artifact visibility", "visibility", artifactVisibility)
+		logger.ErrorContext(ctx, "unknown artifact visibility", "visibility", artifactVisibility)
 		return nil, errors.New("unknown artifact visibility: " + artifactVisibility)
 	}
 

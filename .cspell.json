@@ -71,7 +71,10 @@
     "sigstore",
     "nindent",
     "LFID",
-    "groupsio"
+    "groupsio",
+    "omitempty",
+    "unmarshals",
+    "uids"
   ],
   "overrides": [
     {

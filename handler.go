@@ -19,6 +19,13 @@ type HandlerService struct {
 	fgaService FgaService
 }
 
+// buildObjectID constructs a standardized object identifier from type and UID.
+// This ensures consistent object identifier construction across all handlers.
+// Format: "objectType:uid" (e.g., "committee:123", "project:abc-def")
+func buildObjectID(objectType, uid string) string {
+	return fmt.Sprintf("%s:%s", objectType, uid)
+}
+
 // standardAccessStub represents the default structure for access control objects
 type standardAccessStub struct {
 	UID        string              `json:"uid"`
@@ -91,14 +98,17 @@ func (h *HandlerService) processStandardAccessUpdate(
 ) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+obj.ObjectType+" access control update")
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		fmt.Sprintf("handling %s access control update", obj.ObjectType),
+	)
 
 	if obj.UID == "" {
-		logger.ErrorContext(ctx, obj.ObjectType+" ID not found")
-		return errors.New(obj.ObjectType + " ID not found")
+		logger.ErrorContext(ctx, fmt.Sprintf("%s ID not found", obj.ObjectType))
+		return fmt.Errorf("%s ID not found", obj.ObjectType)
 	}
 
-	object := fmt.Sprintf("%s:%s", obj.ObjectType, obj.UID)
+	object := buildObjectID(obj.ObjectType, obj.UID)
 
 	// Build a list of tuples to sync.
 	tuples := h.fgaService.NewTupleKeySlice(4)
@@ -120,7 +130,16 @@ func (h *HandlerService) processStandardAccessUpdate(
 			// Check if value already contains a type prefix (e.g., "committee:123")
 			var key string
 			if strings.Contains(value, ":") {
-				// Value already has type:id format, use as-is
+				// Validate type:id format - must have exactly one colon with non-empty parts
+				parts := strings.SplitN(value, ":", 2)
+				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+					logger.ErrorContext(ctx, "invalid reference format: must be 'type:id' with both parts non-empty",
+						"reference", reference,
+						"value", value,
+					)
+					return fmt.Errorf("invalid reference format '%s': must be 'type:id' with both parts non-empty", value)
+				}
+				// Value already has valid type:id format, use as-is
 				key = value
 			} else {
 				// Value is just an ID, prepend the type
@@ -159,7 +178,7 @@ func (h *HandlerService) processStandardAccessUpdate(
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent "+obj.ObjectType+" access control update response")
+		logger.With("object", object).InfoContext(ctx, fmt.Sprintf("sent %s access control update response", obj.ObjectType))
 	}
 
 	return nil
@@ -175,7 +194,7 @@ func (h *HandlerService) processDeleteAllAccessMessage(
 
 	logger.InfoContext(
 		ctx,
-		"handling "+objectTypeName+" access control delete all",
+		fmt.Sprintf("handling %s access control delete all", objectTypeName),
 		"message", string(message.Data()),
 	)
 
@@ -215,7 +234,10 @@ func (h *HandlerService) processDeleteAllAccessMessage(
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent "+objectTypeName+" access control delete all response")
+		logger.With("object", object).InfoContext(
+			ctx,
+			fmt.Sprintf("sent %s access control delete all response", objectTypeName),
+		)
 	}
 
 	return nil
@@ -238,17 +260,17 @@ func (h *HandlerService) processMemberOperation(
 
 	logger.With("message", string(message.Data())).InfoContext(
 		ctx,
-		"handling "+config.objectTypeName+" member "+operationType,
+		fmt.Sprintf("handling %s member %s", config.objectTypeName, operationType),
 	)
 
 	// Validate
 	if member.Username == "" {
-		logger.ErrorContext(ctx, config.objectTypeName+" member username not found")
-		return errors.New(config.objectTypeName + " member username not found")
+		logger.ErrorContext(ctx, fmt.Sprintf("%s member username not found", config.objectTypeName))
+		return fmt.Errorf("%s member username not found", config.objectTypeName)
 	}
 	if member.ObjectUID == "" {
-		logger.ErrorContext(ctx, config.objectTypeName+" UID not found")
-		return errors.New(config.objectTypeName + " UID not found")
+		logger.ErrorContext(ctx, fmt.Sprintf("%s UID not found", config.objectTypeName))
+		return fmt.Errorf("%s UID not found", config.objectTypeName)
 	}
 
 	// Build identifiers
@@ -274,7 +296,7 @@ func (h *HandlerService) processMemberOperation(
 			return err
 		}
 
-		logger.InfoContext(ctx, "sent "+config.objectTypeName+" member "+operationType+" response",
+		logger.InfoContext(ctx, fmt.Sprintf("sent %s member %s response", config.objectTypeName, operationType),
 			"object", objectFull,
 			"member", userPrincipal,
 		)
@@ -347,7 +369,7 @@ func (h *HandlerService) putMember(
 			"user", userPrincipal,
 			"relation", config.relation,
 			"object", object,
-		).InfoContext(ctx, "put member to "+config.objectTypeName)
+		).InfoContext(ctx, fmt.Sprintf("put member to %s", config.objectTypeName))
 	} else {
 		logger.With(
 			"user", userPrincipal,
@@ -380,7 +402,7 @@ func (h *HandlerService) removeMember(
 		"user", userPrincipal,
 		"relation", config.relation,
 		"object", object,
-	).InfoContext(ctx, "removed member from "+config.objectTypeName)
+	).InfoContext(ctx, fmt.Sprintf("removed member from %s", config.objectTypeName))
 
 	return nil
 }
