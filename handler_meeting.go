@@ -647,12 +647,6 @@ func (h *HandlerService) pastMeetingAttachmentDeleteAccessHandler(message INatsM
 // Past Meeting Artifact Handlers (Recording, Transcript, Summary)
 // ============================================================================
 
-// PastMeetingParticipant represents a participant of a past meeting.
-type PastMeetingParticipant struct {
-	Username string `json:"username"`
-	Host     bool   `json:"host"`
-}
-
 // artifactAccessMessage is a generic structure for past meeting artifact access messages.
 // This is used for recordings, transcripts, and summaries.
 type artifactAccessMessage struct {
@@ -690,7 +684,7 @@ func (h *HandlerService) processArtifactUpdate(
 	object := config.objectTypePrefix + artifact.UID
 
 	// Build tuples using the shared artifact logic
-	tuples, err := h.buildPastMeetingArtifactTuples(object, artifact.PastMeetingUID, artifact.ArtifactVisibility)
+	tuples, err := h.buildPastMeetingArtifactTuples(ctx, object, artifact.PastMeetingUID, artifact.ArtifactVisibility)
 	if err != nil {
 		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to build "+config.objectTypeName+" tuples")
 		return err
@@ -726,6 +720,7 @@ func (h *HandlerService) processArtifactUpdate(
 // buildPastMeetingArtifactTuples builds all of the tuples for a past meeting artifact
 // (recording, transcript, or summary).
 func (h *HandlerService) buildPastMeetingArtifactTuples(
+	ctx context.Context,
 	object string,
 	pastMeetingUID string,
 	artifactVisibility string,
@@ -779,7 +774,7 @@ func (h *HandlerService) buildPastMeetingArtifactTuples(
 		)
 
 	default:
-		logger.ErrorContext(context.Background(), "unknown artifact visibility", "visibility", artifactVisibility)
+		logger.ErrorContext(ctx, "unknown artifact visibility", "visibility", artifactVisibility)
 		return nil, errors.New("unknown artifact visibility: " + artifactVisibility)
 	}
 
