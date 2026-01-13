@@ -645,12 +645,6 @@ func (h *HandlerService) pastMeetingAttachmentDeleteAccessHandler(message INatsM
 // Past Meeting Artifact Handlers (Recording, Transcript, Summary)
 // ============================================================================
 
-// PastMeetingParticipant represents a participant of a past meeting.
-type PastMeetingParticipant struct {
-	Username string `json:"username"`
-	Host     bool   `json:"host"`
-}
-
 // artifactAccessMessage is a generic structure for past meeting artifact access messages.
 // This is used for recordings, transcripts, and summaries.
 type artifactAccessMessage struct {
@@ -677,6 +671,11 @@ func (h *HandlerService) processArtifactUpdate(
 		ctx,
 		"handling "+config.objectTypeName+" access control update",
 	)
+
+	if artifact.UID == "" {
+		logger.ErrorContext(ctx, "artifact UID not found")
+		return errors.New("artifact UID not found")
+	}
 
 	// Validate required fields
 	if artifact.PastMeetingUID == "" {
