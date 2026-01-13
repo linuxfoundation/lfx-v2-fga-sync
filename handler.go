@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
@@ -116,7 +117,15 @@ func (h *HandlerService) processStandardAccessUpdate(
 			refType = obj.ObjectType
 		}
 		for _, value := range valueList {
-			key := fmt.Sprintf("%s:%s", refType, value)
+			// Check if value already contains a type prefix (e.g., "committee:123")
+			var key string
+			if strings.Contains(value, ":") {
+				// Value already has type:id format, use as-is
+				key = value
+			} else {
+				// Value is just an ID, prepend the type
+				key = fmt.Sprintf("%s:%s", refType, value)
+			}
 			tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
 		}
 	}
