@@ -330,13 +330,12 @@ func (h *HandlerService) pastMeetingDeleteAllAccessHandler(message INatsMsg) err
 // ============================================================================
 
 type pastMeetingParticipantStub struct {
-	UID                string `json:"uid"`
-	PastMeetingUID     string `json:"past_meeting_uid"`
-	ArtifactVisibility string `json:"artifact_visibility"`
-	Username           string `json:"username"`
-	Host               bool   `json:"host"`
-	IsInvited          bool   `json:"is_invited"`
-	IsAttended         bool   `json:"is_attended"`
+	UID            string `json:"uid"`
+	PastMeetingUID string `json:"past_meeting_uid"`
+	Username       string `json:"username"`
+	Host           bool   `json:"host"`
+	IsInvited      bool   `json:"is_invited"`
+	IsAttended     bool   `json:"is_attended"`
 }
 
 // pastMeetingParticipantOperation defines the type of operation to perform on a past meeting participant
