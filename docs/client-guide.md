@@ -43,8 +43,10 @@ All messages use the **GenericFGAMessage** envelope:
 
 ### Fields
 
-- **`object_type`** *(required, string)* - Your resource type (e.g., `"committee"`, `"project"`, `"meeting"`)
-- **`operation`** *(required, string)* - Must match the NATS subject operation
+- **`object_type`** *(required, string)* - Your resource type, must be defined in the [OpenFGA authorization model](https://github.com/linuxfoundation/lfx-v2-helm/blob/main/charts/lfx-platform/templates/openfga/model.yaml)
+  - Examples: `"committee"`, `"project"`, `"meeting"`
+- **`operation`** *(required, string)* - Must match the NATS subject operation without the `lfx.fga-sync.` prefix
+  - Example: If sending to `lfx.fga-sync.update_access`, this must be `"update_access"`
 - **`data`** *(required, object)* - Operation-specific payload (see below)
 
 ---
@@ -62,15 +64,15 @@ Updates or creates access control for a resource. This is a full sync operation 
   "object_type": "committee",
   "operation": "update_access",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "public": true,
     "relations": {
       "member": ["user1", "user2"],
       "viewer": ["user3"]
     },
     "references": {
-      "parent": ["parent-committee-456"],
-      "project": ["project-789"]
+      "parent": ["456"],
+      "project": ["789"]
     },
     "exclude_relations": ["participant"]
   }
@@ -79,7 +81,7 @@ Updates or creates access control for a resource. This is a full sync operation 
 
 #### Data Object Fields
 
-- **`uid`** *(required, string)* - Unique identifier for your resource
+- **`uid`** *(required, string)* - Unique identifier for your resource, typically a UUID (though not required to be)
 - **`public`** *(optional, boolean)* - If `true`, adds `user:*` as viewer (public access)
 - **`relations`** *(optional, object)* - Map of relation names to arrays of usernames
   - Key: Relation name (e.g., `"member"`, `"viewer"`, `"editor"`)
@@ -101,7 +103,7 @@ Updates or creates access control for a resource. This is a full sync operation 
   "object_type": "project",
   "operation": "update_access",
   "data": {
-    "uid": "project-123",
+    "uid": "123",
     "public": false,
     "relations": {
       "editor": ["alice", "bob"],
@@ -118,19 +120,20 @@ Updates or creates access control for a resource. This is a full sync operation 
   "object_type": "committee",
   "operation": "update_access",
   "data": {
-    "uid": "subcommittee-456",
+    "uid": "456",
     "public": true,
     "relations": {
       "member": ["user1", "user2"]
     },
     "references": {
-      "parent": ["parent-committee-123"]
+      "parent": ["123"]
     }
   }
 }
 ```
 
-> **Note:** The parent reference uses just the ID `"parent-committee-123"`. The handler automatically prepends `"committee:"` to create the full reference `"committee:parent-committee-123"`.
+> **Note:** The parent reference uses just the ID `"123"`. The handler automatically prepends `"committee:"` to create
+> the full reference `"committee:123"`.
 
 #### With Parent Reference (Full Type:ID Format)
 
@@ -139,19 +142,20 @@ Updates or creates access control for a resource. This is a full sync operation 
   "object_type": "committee",
   "operation": "update_access",
   "data": {
-    "uid": "subcommittee-456",
+    "uid": "456",
     "public": true,
     "relations": {
       "member": ["user1", "user2"]
     },
     "references": {
-      "parent": ["committee:parent-committee-123"]
+      "parent": ["committee:123"]
     }
   }
 }
 ```
 
-> **Note:** This example uses the full `"committee:parent-committee-123"` format. The handler detects the colon and uses the value as-is. Both formats produce the same result.
+> **Note:** This example uses the full `"committee:123"` format. The handler detects the colon and uses the value as-is.
+> Both formats produce the same result.
 
 #### With Excluded Relations
 
@@ -168,7 +172,7 @@ Use `exclude_relations` when some relations are managed by separate member opera
       "organizer": ["alice"]
     },
     "references": {
-      "project": ["project-123"]
+      "project": ["123"]
     },
     "exclude_relations": ["participant", "host"]
   }
@@ -204,7 +208,7 @@ msg := GenericFGAMessage{
     ObjectType: "committee",
     Operation:  "update_access",
     Data: UpdateAccessData{
-        UID:    "committee-123",
+        UID:    "123",
         Public: true,
         Relations: map[string][]string{
             "member": {"alice", "bob"},
@@ -232,7 +236,7 @@ Deletes **all** access control tuples for a resource. Typically used when a reso
   "object_type": "committee",
   "operation": "delete_access",
   "data": {
-    "uid": "committee-123"
+    "uid": "123"
   }
 }
 ```
@@ -250,7 +254,7 @@ Deletes **all** access control tuples for a resource. Typically used when a reso
   "object_type": "committee",
   "operation": "delete_access",
   "data": {
-    "uid": "committee-123"
+    "uid": "123"
   }
 }
 ```
@@ -278,7 +282,7 @@ msg := GenericFGAMessage{
     ObjectType: "project",
     Operation:  "delete_access",
     Data: DeleteAccessData{
-        UID: "project-123",
+        UID: "123",
     },
 }
 
@@ -301,7 +305,7 @@ Adds a user to a resource with one or more relations. Supports **atomic multi-re
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": ["member"],
     "mutually_exclusive_with": ["guest"]
@@ -325,7 +329,7 @@ Adds a user to a resource with one or more relations. Supports **atomic multi-re
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": ["member"]
   }
@@ -387,7 +391,7 @@ msg := GenericFGAMessage{
     ObjectType: "committee",
     Operation:  "member_put",
     Data: MemberData{
-        UID:       "committee-123",
+        UID:       "123",
         Username:  "alice",
         Relations: []string{"member"},
     },
@@ -435,7 +439,7 @@ Removes specific relations or all relations for a user from a resource.
   "object_type": "committee",
   "operation": "member_remove",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": ["member"]
   }
@@ -490,7 +494,7 @@ Use an **empty array** to remove all relations for the user:
   "object_type": "committee",
   "operation": "member_remove",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": []
   }
@@ -513,7 +517,7 @@ msg := GenericFGAMessage{
     ObjectType: "committee",
     Operation:  "member_remove",
     Data: MemberData{
-        UID:       "committee-123",
+        UID:       "123",
         Username:  "alice",
         Relations: []string{"member"},
     },
@@ -524,7 +528,7 @@ msg := GenericFGAMessage{
     ObjectType: "committee",
     Operation:  "member_remove",
     Data: MemberData{
-        UID:       "committee-123",
+        UID:       "123",
         Username:  "alice",
         Relations: []string{}, // Empty array
     },
@@ -547,7 +551,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
   "object_type": "committee",
   "operation": "update_access",
   "data": {
-    "uid": "tech-committee-001",
+    "uid": "001",
     "public": false,
     "relations": {
       "admin": ["alice"],
@@ -567,7 +571,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "tech-committee-001",
+    "uid": "001",
     "username": "dave",
     "relations": ["member"]
   }
@@ -581,7 +585,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "tech-committee-001",
+    "uid": "001",
     "username": "bob",
     "relations": ["admin", "member"]
   }
@@ -595,7 +599,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
   "object_type": "committee",
   "operation": "member_remove",
   "data": {
-    "uid": "tech-committee-001",
+    "uid": "001",
     "username": "charlie",
     "relations": []
   }
@@ -609,7 +613,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
   "object_type": "committee",
   "operation": "delete_access",
   "data": {
-    "uid": "tech-committee-001"
+    "uid": "001"
   }
 }
 ```
@@ -631,8 +635,8 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
       "organizer": ["alice"]
     },
     "references": {
-      "project": ["project-123"],
-      "committee": ["tech-committee-001"]
+      "project": ["123"],
+      "committee": ["001"]
     },
     "exclude_relations": ["participant", "host"]
   }
@@ -815,7 +819,7 @@ To remove all relations for a user, use an empty `relations` array:
 {
   "operation": "member_remove",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": []
   }
@@ -862,7 +866,7 @@ Based on production testing:
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "",
     "relations": ["member"]
   }
@@ -877,7 +881,7 @@ Based on production testing:
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": []
   }
@@ -902,7 +906,7 @@ If you're currently using resource-specific subjects like `lfx.put_member.commit
 // Subject: lfx.put_member.committee
 {
   "username": "alice",
-  "committee_uid": "committee-123"
+  "committee_uid": "123"
 }
 ```
 
@@ -914,7 +918,7 @@ If you're currently using resource-specific subjects like `lfx.put_member.commit
   "object_type": "committee",
   "operation": "member_put",
   "data": {
-    "uid": "committee-123",
+    "uid": "123",
     "username": "alice",
     "relations": ["member"]
   }
