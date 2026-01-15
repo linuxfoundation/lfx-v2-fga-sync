@@ -7,14 +7,23 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
+	"github.com/openfga/go-sdk/client"
 )
 
 // HandlerService is the service that handles the messages from NATS about FGA syncing.
 type HandlerService struct {
 	fgaService FgaService
+}
+
+// buildObjectID constructs a standardized object identifier from type and UID.
+// This ensures consistent object identifier construction across all handlers.
+// Format: "objectType:uid" (e.g., "committee:123", "project:abc-def")
+func buildObjectID(objectType, uid string) string {
+	return fmt.Sprintf("%s:%s", objectType, uid)
 }
 
 // standardAccessStub represents the default structure for access control objects
@@ -25,6 +34,28 @@ type standardAccessStub struct {
 	Relations  map[string][]string `json:"relations"`
 	References map[string][]string `json:"references"`
 }
+
+// memberOperationStub represents a generic member operation message
+type memberOperationStub struct {
+	Username  string `json:"username"`
+	ObjectUID string `json:"object_uid"` // committee_uid, mailing_list_uid, etc.
+}
+
+// memberOperationConfig configures the behavior of member operations
+type memberOperationConfig struct {
+	objectTypePrefix      string   // e.g., "committee:"
+	objectTypeName        string   // e.g., "committee" (for logging)
+	relation              string   // e.g., constants.RelationMember
+	mutuallyExclusiveWith []string // Optional: relations that should be removed when this relation is added
+}
+
+// memberOperation defines the type of operation to perform on a member
+type memberOperation int
+
+const (
+	memberOperationPut memberOperation = iota
+	memberOperationRemove
+)
 
 // INatsMsg is an interface for [nats.Msg] that allows for mocking.
 type INatsMsg interface {
@@ -60,17 +91,24 @@ func (m *NatsMsg) Subject() string {
 }
 
 // processStandardAccessUpdate handles the default access control update logic
-func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *standardAccessStub) error {
+func (h *HandlerService) processStandardAccessUpdate(
+	message INatsMsg,
+	obj *standardAccessStub,
+	excludeRelations ...string,
+) error {
 	ctx := context.Background()
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling "+obj.ObjectType+" access control update")
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		fmt.Sprintf("handling %s access control update", obj.ObjectType),
+	)
 
 	if obj.UID == "" {
-		logger.ErrorContext(ctx, obj.ObjectType+" ID not found")
-		return errors.New(obj.ObjectType + " ID not found")
+		logger.ErrorContext(ctx, fmt.Sprintf("%s ID not found", obj.ObjectType))
+		return fmt.Errorf("%s ID not found", obj.ObjectType)
 	}
 
-	object := fmt.Sprintf("%s:%s", obj.ObjectType, obj.UID)
+	object := buildObjectID(obj.ObjectType, obj.UID)
 
 	// Build a list of tuples to sync.
 	tuples := h.fgaService.NewTupleKeySlice(4)
@@ -89,7 +127,24 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 			refType = obj.ObjectType
 		}
 		for _, value := range valueList {
-			key := fmt.Sprintf("%s:%s", refType, value)
+			// Check if value already contains a type prefix (e.g., "committee:123")
+			var key string
+			if strings.Contains(value, ":") {
+				// Validate type:id format - must have exactly one colon with non-empty parts
+				parts := strings.SplitN(value, ":", 2)
+				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+					logger.ErrorContext(ctx, "invalid reference format: must be 'type:id' with both parts non-empty",
+						"reference", reference,
+						"value", value,
+					)
+					return fmt.Errorf("invalid reference format '%s': must be 'type:id' with both parts non-empty", value)
+				}
+				// Value already has valid type:id format, use as-is
+				key = value
+			} else {
+				// Value is just an ID, prepend the type
+				key = fmt.Sprintf("%s:%s", refType, value)
+			}
 			tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
 		}
 	}
@@ -103,7 +158,7 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 		}
 	}
 
-	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples)
+	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, excludeRelations...)
 	if err != nil {
 		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
 		return err
@@ -123,7 +178,7 @@ func (h *HandlerService) processStandardAccessUpdate(message INatsMsg, obj *stan
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent "+obj.ObjectType+" access control update response")
+		logger.With("object", object).InfoContext(ctx, fmt.Sprintf("sent %s access control update response", obj.ObjectType))
 	}
 
 	return nil
@@ -139,7 +194,7 @@ func (h *HandlerService) processDeleteAllAccessMessage(
 
 	logger.InfoContext(
 		ctx,
-		"handling "+objectTypeName+" access control delete all",
+		fmt.Sprintf("handling %s access control delete all", objectTypeName),
 		"message", string(message.Data()),
 	)
 
@@ -179,8 +234,175 @@ func (h *HandlerService) processDeleteAllAccessMessage(
 			return err
 		}
 
-		logger.With("object", object).InfoContext(ctx, "sent "+objectTypeName+" access control delete all response")
+		logger.With("object", object).InfoContext(
+			ctx,
+			fmt.Sprintf("sent %s access control delete all response", objectTypeName),
+		)
 	}
+
+	return nil
+}
+
+// processMemberOperation handles member put/remove operations generically
+func (h *HandlerService) processMemberOperation(
+	message INatsMsg,
+	member *memberOperationStub,
+	operation memberOperation,
+	config memberOperationConfig,
+) error {
+	ctx := context.Background()
+
+	// Log the operation type
+	operationType := constants.OperationPut
+	if operation == memberOperationRemove {
+		operationType = constants.OperationRemove
+	}
+
+	logger.With("message", string(message.Data())).InfoContext(
+		ctx,
+		fmt.Sprintf("handling %s member %s", config.objectTypeName, operationType),
+	)
+
+	// Validate
+	if member.Username == "" {
+		logger.ErrorContext(ctx, fmt.Sprintf("%s member username not found", config.objectTypeName))
+		return fmt.Errorf("%s member username not found", config.objectTypeName)
+	}
+	if member.ObjectUID == "" {
+		logger.ErrorContext(ctx, fmt.Sprintf("%s UID not found", config.objectTypeName))
+		return fmt.Errorf("%s UID not found", config.objectTypeName)
+	}
+
+	// Build identifiers
+	objectFull := config.objectTypePrefix + member.ObjectUID
+	userPrincipal := constants.ObjectTypeUser + member.Username
+
+	// Execute operation
+	var err error
+	if operation == memberOperationPut {
+		err = h.putMember(ctx, userPrincipal, objectFull, config)
+	} else {
+		err = h.removeMember(ctx, userPrincipal, objectFull, config)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Send reply
+	if message.Reply() != "" {
+		if err = message.Respond([]byte("OK")); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+			return err
+		}
+
+		logger.InfoContext(ctx, fmt.Sprintf("sent %s member %s response", config.objectTypeName, operationType),
+			"object", objectFull,
+			"member", userPrincipal,
+		)
+	}
+
+	return nil
+}
+
+// putMember implements idempotent put operation (generic)
+func (h *HandlerService) putMember(
+	ctx context.Context,
+	userPrincipal, object string,
+	config memberOperationConfig,
+) error {
+	// Read existing tuples
+	existingTuples, err := h.fgaService.ReadObjectTuples(ctx, object)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to read existing tuples",
+			errKey, err,
+			"user", userPrincipal,
+			"object", object,
+		)
+		return err
+	}
+
+	// Build a map of mutually exclusive relations for quick lookup
+	mutuallyExclusiveMap := make(map[string]bool)
+	for _, rel := range config.mutuallyExclusiveWith {
+		mutuallyExclusiveMap[rel] = true
+	}
+
+	// Check if relation already exists and find mutually exclusive relations to remove
+	var hasRelation bool
+	var tuplesToDelete []client.ClientTupleKeyWithoutCondition
+
+	for _, tuple := range existingTuples {
+		if tuple.Key.User == userPrincipal {
+			if tuple.Key.Relation == config.relation {
+				hasRelation = true
+			} else if mutuallyExclusiveMap[tuple.Key.Relation] {
+				// This is a mutually exclusive relation that needs to be removed
+				tuplesToDelete = append(tuplesToDelete, client.ClientTupleKeyWithoutCondition{
+					User:     tuple.Key.User,
+					Relation: tuple.Key.Relation,
+					Object:   tuple.Key.Object,
+				})
+			}
+		}
+	}
+
+	// Prepare write operations
+	var tuplesToWrite []client.ClientTupleKey
+	if !hasRelation {
+		tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, config.relation, object))
+	}
+
+	// Apply changes if needed
+	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
+		if err := h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete); err != nil {
+			logger.ErrorContext(ctx, "failed to put member tuple",
+				errKey, err,
+				"user", userPrincipal,
+				"relation", config.relation,
+				"object", object,
+			)
+			return err
+		}
+
+		logger.With(
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		).InfoContext(ctx, fmt.Sprintf("put member to %s", config.objectTypeName))
+	} else {
+		logger.With(
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		).InfoContext(ctx, "member already has correct relation - no changes needed")
+	}
+
+	return nil
+}
+
+// removeMember removes a member relation (generic)
+func (h *HandlerService) removeMember(
+	ctx context.Context,
+	userPrincipal, object string,
+	config memberOperationConfig,
+) error {
+	err := h.fgaService.DeleteTuple(ctx, userPrincipal, config.relation, object)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to remove member tuple",
+			errKey, err,
+			"user", userPrincipal,
+			"relation", config.relation,
+			"object", object,
+		)
+		return err
+	}
+
+	logger.With(
+		"user", userPrincipal,
+		"relation", config.relation,
+		"object", object,
+	).InfoContext(ctx, fmt.Sprintf("removed member from %s", config.objectTypeName))
 
 	return nil
 }
