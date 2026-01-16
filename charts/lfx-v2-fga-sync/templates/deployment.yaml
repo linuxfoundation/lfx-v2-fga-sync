@@ -47,6 +47,49 @@ spec:
               value: "{{ .Values.application.debug }}"
             - name: USE_CACHE
               value: "{{ .Values.application.useCache }}"
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- if .Values.app.otel.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ .Values.app.otel.serviceName | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.serviceVersion }}
+            - name: OTEL_SERVICE_VERSION
+              value: {{ .Values.app.otel.serviceVersion | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.app.otel.endpoint | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.protocol }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ .Values.app.otel.protocol | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.insecure }}
+            - name: OTEL_EXPORTER_OTLP_INSECURE
+              value: {{ .Values.app.otel.insecure | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.tracesExporter }}
+            - name: OTEL_TRACES_EXPORTER
+              value: {{ .Values.app.otel.tracesExporter | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.tracesSampleRatio }}
+            - name: OTEL_TRACES_SAMPLE_RATIO
+              value: {{ .Values.app.otel.tracesSampleRatio | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.metricsExporter }}
+            - name: OTEL_METRICS_EXPORTER
+              value: {{ .Values.app.otel.metricsExporter | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.logsExporter }}
+            - name: OTEL_LOGS_EXPORTER
+              value: {{ .Values.app.otel.logsExporter | quote }}
+            {{- end }}
+            {{- if .Values.app.otel.propagators }}
+            - name: OTEL_PROPAGATORS
+              value: {{ .Values.app.otel.propagators | quote }}
+            {{- end }}
           ports:
             - containerPort: 8080
               name: web
