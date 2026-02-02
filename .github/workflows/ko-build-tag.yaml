@@ -54,14 +54,19 @@ jobs:
           version: v0.17.1
 
       - name: Build and publish fga-sync image
+        env:
+          VERSION: ${{ steps.prepare.outputs.app_version }}
+          GIT_COMMIT: ${{ github.sha }}
         run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export GOFLAGS="-ldflags=-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT:0:7}"
           ko build github.com/linuxfoundation/lfx-v2-fga-sync \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t ${{ github.ref_name }} \
             -t ${{ steps.prepare.outputs.app_version }} \
             -t latest \
-            --sbom spdx
+            --sbom spdx \
 
   release-helm-chart:
     needs: publish

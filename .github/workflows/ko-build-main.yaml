@@ -27,10 +27,16 @@ jobs:
       - uses: ko-build/setup-ko@v0.8
         with:
           version: v0.17.1
-      - run: |
+      - name: Build and publish fga-sync image
+        env:
+          VERSION: development
+          GIT_COMMIT: ${{ github.sha }}
+        run: |
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export GOFLAGS="-ldflags=-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT:0:7}"
           ko build github.com/linuxfoundation/lfx-v2-fga-sync \
             -B \
             --platform linux/amd64,linux/arm64 \
             -t development \
             -t ${{ github.sha }} \
-            --sbom spdx
+            --sbom spdx \

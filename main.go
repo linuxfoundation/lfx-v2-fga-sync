@@ -34,6 +34,13 @@ const (
 	gracefulShutdownSeconds = 25
 )
 
+// Build-time variables set via ldflags
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 var (
 	logger          *slog.Logger
 	httpServer      *http.Server
@@ -93,15 +100,22 @@ func main() {
 	slog.SetDefault(logger)
 
 	// Set up OpenTelemetry SDK.
-	ctx := context.Background()
+	// Command-line/environment OTEL_SERVICE_VERSION takes precedence over
+	// the build-time Version variable.
 	otelConfig := utils.OTelConfigFromEnv()
-	otelShutdown, err := utils.SetupOTelSDKWithConfig(ctx, otelConfig)
+	if otelConfig.ServiceVersion == "" {
+		otelConfig.ServiceVersion = Version
+	}
+	otelShutdown, err := utils.SetupOTelSDKWithConfig(context.Background(), otelConfig)
 	if err != nil {
 		logger.With(errKey, err).Error("error setting up OpenTelemetry SDK")
 		os.Exit(1)
 	}
+	// Handle shutdown properly so nothing leaks.
 	defer func() {
-		if shutdownErr := otelShutdown(context.Background()); shutdownErr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownSeconds*time.Second)
+		defer cancel()
+		if shutdownErr := otelShutdown(ctx); shutdownErr != nil {
 			logger.With(errKey, shutdownErr).Error("error shutting down OpenTelemetry SDK")
 		}
 	}()
