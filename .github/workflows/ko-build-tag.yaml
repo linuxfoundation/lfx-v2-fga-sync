@@ -58,8 +58,10 @@ jobs:
           VERSION: ${{ steps.prepare.outputs.app_version }}
           GIT_COMMIT: ${{ github.sha }}
         run: |
-          export BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
-          export GIT_COMMIT=${GIT_COMMIT:0:7}
+          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export BUILD_TIME
+          GIT_COMMIT=${GIT_COMMIT:0:7}
+          export GIT_COMMIT
           ko build github.com/linuxfoundation/lfx-v2-fga-sync \
             -B \
             --platform linux/amd64,linux/arm64 \
