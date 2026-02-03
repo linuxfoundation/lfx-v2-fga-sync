@@ -68,7 +68,7 @@ jobs:
             -t ${{ github.ref_name }} \
             -t ${{ steps.prepare.outputs.app_version }} \
             -t latest \
-            --sbom spdx \
+            --sbom spdx
 
   release-helm-chart:
     needs: publish
