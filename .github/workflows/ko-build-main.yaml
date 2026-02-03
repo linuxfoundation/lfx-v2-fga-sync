@@ -32,8 +32,8 @@ jobs:
           VERSION: development
           GIT_COMMIT: ${{ github.sha }}
         run: |
-          BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
-          export GOFLAGS="-ldflags=-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT:0:7}"
+          export BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+          export GIT_COMMIT=${GIT_COMMIT:0:7}
           ko build github.com/linuxfoundation/lfx-v2-fga-sync \
             -B \
             --platform linux/amd64,linux/arm64 \
