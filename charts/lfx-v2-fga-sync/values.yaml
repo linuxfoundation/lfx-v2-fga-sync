@@ -102,7 +102,7 @@ app:
     # (default: "lfx-v2-fga-sync")
     serviceName: ""
     # serviceVersion is the service version for OpenTelemetry resource identification
-    # (default: "1.0.0")
+    # (default: build-time Version variable, typically "dev" for local builds)
     serviceVersion: ""
     # protocol specifies the OTLP protocol: "grpc" or "http"
     # (default: "grpc")

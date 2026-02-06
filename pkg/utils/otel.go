@@ -26,7 +26,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.39.0"
 )
 
 const (
@@ -391,4 +391,3 @@ func newLoggerProvider(ctx context.Context, cfg OTelConfig, res *resource.Resour
 	)
 	return loggerProvider, nil
 }
-
