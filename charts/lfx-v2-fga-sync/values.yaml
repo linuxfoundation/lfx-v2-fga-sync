@@ -84,9 +84,6 @@ application:
     limits:
       memory: "128Mi"
       cpu: "500m"
-
-# app contains additional application configuration
-app:
   # extraEnv allows adding additional environment variables to the container
   # Supports both simple values and Kubernetes field references like status.hostIP
   # Example:
