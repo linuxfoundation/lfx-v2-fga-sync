@@ -79,7 +79,8 @@
     "omitempty",
     "unmarshals",
     "uids",
-    "tracecontext"
+    "tracecontext",
+    "GOTOOLCHAIN"
   ],
   "overrides": [
     {
