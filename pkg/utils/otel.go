@@ -175,12 +175,12 @@ func SetupOTelSDKWithConfig(ctx context.Context, cfg OTelConfig) (shutdown func(
 	// The errors from the calls are joined.
 	// Each registered cleanup will be invoked once.
 	shutdown = func(ctx context.Context) error {
-		var err error
+		var sErr error
 		for _, fn := range shutdownFuncs {
-			err = errors.Join(err, fn(ctx))
+			sErr = errors.Join(sErr, fn(ctx))
 		}
 		shutdownFuncs = nil
-		return err
+		return sErr
 	}
 
 	// handleErr calls shutdown for cleanup and makes sure that all errors are returned.
