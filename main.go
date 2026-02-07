@@ -99,6 +99,16 @@ func main() {
 	logger = slog.New(otelHandler)
 	slog.SetDefault(logger)
 
+	if err := run(*bind, *port); err != nil {
+		logger.With(errKey, err).Error("fatal error")
+		os.Exit(1)
+	}
+}
+
+// run contains the main service logic. It is separated from main() so that
+// deferred cleanup functions (e.g. OpenTelemetry shutdown) run before
+// main() calls os.Exit on error.
+func run(bind, port string) error {
 	// Set up OpenTelemetry SDK.
 	// Command-line/environment OTEL_SERVICE_VERSION takes precedence over
 	// the build-time Version variable.
@@ -108,8 +118,7 @@ func main() {
 	}
 	otelShutdown, err := utils.SetupOTelSDKWithConfig(context.Background(), otelConfig)
 	if err != nil {
-		logger.With(errKey, err).Error("error setting up OpenTelemetry SDK")
-		os.Exit(1)
+		return fmt.Errorf("error setting up OpenTelemetry SDK: %w", err)
 	}
 	// Handle shutdown properly so nothing leaks.
 	defer func() {
@@ -123,8 +132,7 @@ func main() {
 	// Create an OpenFGA client.
 	fgaClient, err := connectFga()
 	if err != nil {
-		logger.With(errKey, err).Error("error creating OpenFGA client")
-		os.Exit(1)
+		return fmt.Errorf("error creating OpenFGA client: %w", err)
 	}
 
 	logger.With("url", os.Getenv("OPENFGA_API_URL")).Info("OpenFGA client created")
@@ -132,7 +140,7 @@ func main() {
 	// Create HTTP handlers for health checks.
 	createHTTPHandlers()
 
-	startHTTPListener(*bind, *port)
+	startHTTPListener(bind, port)
 
 	// Create a wait group which is used to wait while draining (gracefully
 	// closing) a connection.
@@ -190,20 +198,17 @@ func main() {
 		}),
 	)
 	if err != nil {
-		logger.With(errKey, err).Error("error creating NATS client")
-		return
+		return fmt.Errorf("error creating NATS client: %w", err)
 	}
 	logger.With("url", natsURL).Info("NATS client created")
 
 	jetstreamConn, err = jetstream.New(natsConn)
 	if err != nil {
-		logger.With(errKey, err).Error("error creating JetStream client")
-		return
+		return fmt.Errorf("error creating JetStream client: %w", err)
 	}
 	cacheBucket, err := jetstreamConn.KeyValue(context.Background(), cacheBucketName)
 	if err != nil {
-		logger.With(errKey, err).Error("error binding to cache bucket")
-		return
+		return fmt.Errorf("error binding to cache bucket: %w", err)
 	}
 
 	handlerService := HandlerService{
@@ -214,8 +219,7 @@ func main() {
 	}
 
 	if err = createQueueSubscriptions(handlerService); err != nil {
-		logger.With(errKey, err).Error("error creating queue subscriptions")
-		return
+		return fmt.Errorf("error creating queue subscriptions: %w", err)
 	}
 
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
@@ -229,8 +233,7 @@ func main() {
 	if !natsConn.IsClosed() && !natsConn.IsDraining() {
 		logger.Info("draining NATS connections")
 		if err = natsConn.Drain(); err != nil {
-			logger.With(errKey, err).Error("error draining NATS connection")
-			return
+			return fmt.Errorf("error draining NATS connection: %w", err)
 		}
 	}
 
@@ -241,6 +244,8 @@ func main() {
 	if err = httpServer.Close(); err != nil {
 		logger.With(errKey, err).Error("http listener error on close")
 	}
+
+	return nil
 }
 
 func startHTTPListener(bind, port string) {
