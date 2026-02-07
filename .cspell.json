@@ -6,7 +6,11 @@
     "coverage.html",
     ".claude",
     "vendor/",
-    "node_modules/"
+    "node_modules/",
+    "go.mod",
+    "go.sum",
+    "LICENSE",
+    "LICENSE-docs"
   ],
   "words": [
     "golangci",
@@ -74,7 +78,8 @@
     "groupsio",
     "omitempty",
     "unmarshals",
-    "uids"
+    "uids",
+    "tracecontext"
   ],
   "overrides": [
     {
@@ -88,13 +93,45 @@
         "uuid",
         "json",
         "yaml",
-        "yml"
+        "yml",
+        "otel",
+        "otlp",
+        "semconv",
+        "slogotel",
+        "remychantenay",
+        "otlptracehttp",
+        "otlplog",
+        "otlploggrpc",
+        "otlploghttp",
+        "otlptrace",
+        "otlptracehttp",
+        "otlptracegrpc",
+        "otlpmetricshttp",
+        "otlpmetric",
+        "otlpmetricgrpc",
+        "otlpmetrichttp",
+        "otelhttp",
+        "tracecontext",
+        "traceparent",
+        "tracestate"
       ]
     },
     {
       "filename": "**/*.yml",
       "words": [
         "codecov"
+      ]
+    },
+    {
+      "filename": "**/Makefile",
+      "words": [
+          "GOBUILD",
+          "GOCMD",
+          "GOMOD",
+          "GOTEST",
+          "GOGET",
+          "GOPATH",
+          "coverprofile"
       ]
     }
   ]
