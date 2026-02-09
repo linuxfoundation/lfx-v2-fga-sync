@@ -11,6 +11,7 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	. "github.com/openfga/go-sdk/client"
 )
@@ -72,6 +74,9 @@ func connectFga() (IFgaClient, error) {
 		ApiUrl:               fgaURL,
 		StoreId:              fgaStoreID,
 		AuthorizationModelId: fgaAuthModelID,
+		HTTPClient: &http.Client{
+			Transport: otelhttp.NewTransport(http.DefaultTransport),
+		},
 	})
 	if err != nil {
 		return nil, err
