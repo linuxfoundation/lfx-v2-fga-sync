@@ -5,6 +5,7 @@ package utils
 
 import (
 	"context"
+
 	"testing"
 )
 
@@ -226,4 +227,99 @@ func TestOTelConstants(t *testing.T) {
 	if OTelExporterNone != "none" {
 		t.Errorf("expected OTelExporterNone to be 'none', got %q", OTelExporterNone)
 	}
+}
+
+// TestEndpointURL verifies that endpointURL prepends the correct scheme
+// when missing and preserves existing schemes.
+func TestEndpointURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		insecure bool
+		want     string
+	}{
+		{
+			name:     "IP:port insecure",
+			raw:      "127.0.0.1:4317",
+			insecure: true,
+			want:     "http://127.0.0.1:4317",
+		},
+		{
+			name:     "IP:port secure",
+			raw:      "127.0.0.1:4317",
+			insecure: false,
+			want:     "https://127.0.0.1:4317",
+		},
+		{
+			name:     "localhost:port insecure",
+			raw:      "localhost:4317",
+			insecure: true,
+			want:     "http://localhost:4317",
+		},
+		{
+			name:     "hostname without port",
+			raw:      "collector",
+			insecure: true,
+			want:     "http://collector",
+		},
+		{
+			name:     "http URL preserved",
+			raw:      "http://collector.example.com:4318",
+			insecure: false,
+			want:     "http://collector.example.com:4318",
+		},
+		{
+			name:     "https URL preserved",
+			raw:      "https://collector.example.com:4318",
+			insecure: true,
+			want:     "https://collector.example.com:4318",
+		},
+		{
+			name:     "https URL with path preserved",
+			raw:      "https://collector.example.com:4318/v1/traces",
+			insecure: false,
+			want:     "https://collector.example.com:4318/v1/traces",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := endpointURL(tt.raw, tt.insecure)
+			if got != tt.want {
+				t.Errorf("endpointURL(%q, %t) = %q, want %q", tt.raw, tt.insecure, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSetupOTelSDKWithConfig_IPEndpoint verifies that SetupOTelSDKWithConfig
+// normalizes a bare IP:port endpoint to include a scheme, preventing the
+// "first path segment in URL cannot contain colon" error from the SDK.
+func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "127.0.0.1:4317")
+
+	cfg := OTelConfig{
+		ServiceName:       "test-service",
+		ServiceVersion:    "1.0.0",
+		Protocol:          OTelProtocolGRPC,
+		Endpoint:          "127.0.0.1:4317",
+		Insecure:          true,
+		TracesExporter:    OTelExporterOTLP,
+		TracesSampleRatio: 1.0,
+		MetricsExporter:   OTelExporterNone,
+		LogsExporter:      OTelExporterNone,
+		Propagators:       "tracecontext,baggage",
+	}
+
+	ctx := context.Background()
+	shutdown, err := SetupOTelSDKWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if shutdown == nil {
+		t.Fatal("expected non-nil shutdown function")
+	}
+
+	_ = shutdown(ctx)
 }
