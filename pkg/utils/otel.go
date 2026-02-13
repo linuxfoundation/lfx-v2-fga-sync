@@ -188,12 +188,11 @@ func SetupOTelSDKWithConfig(ctx context.Context, cfg OTelConfig) (shutdown func(
 		err = errors.Join(inErr, shutdown(ctx))
 	}
 
-	// Normalize endpoint to include a URL scheme so the SDK can parse it.
-	// The SDK reads OTEL_EXPORTER_OTLP_ENDPOINT internally; updating the
-	// env var prevents it from logging a parse error for bare IP:port values.
+	// Normalize endpoint to include a URL scheme so WithEndpointURL can
+	// parse it. Bare IP:port values like "127.0.0.1:4317" cause url.Parse
+	// to fail with "first path segment in URL cannot contain colon".
 	if cfg.Endpoint != "" {
 		cfg.Endpoint = endpointURL(cfg.Endpoint, cfg.Insecure)
-		os.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", cfg.Endpoint)
 	}
 
 	// Create resource with service information.
