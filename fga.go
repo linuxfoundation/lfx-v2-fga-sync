@@ -28,6 +28,11 @@ import (
 // Note: all OpenFGA SDK calls are kept in the same file due to the namespace
 // pollution which is the recommended way of using this SDK.
 
+const (
+	// trueString is used for cache values representing allowed access
+	trueString = "true"
+)
+
 var (
 	cacheHits       *expvar.Int
 	cacheStaleHits  *expvar.Int
@@ -274,7 +279,7 @@ func (s FgaService) SyncObjectTuples(
 				// access relations. This happens asynchronously so we are not checking
 				// for errors or logging anything.
 				//nolint:errcheck // This happens asynchronously so we are not checking for errors.
-				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, "true")
+				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, trueString)
 			}(cacheKey)
 		}
 	}
