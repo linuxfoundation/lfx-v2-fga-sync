@@ -160,6 +160,67 @@ func TestAccessCheckHandler(t *testing.T) {
 			expectedError:  true,
 			expectedCalled: true,
 		},
+		{
+			name:         "batch check with timeout errors should not cache errors",
+			messageData:  []byte("project:123#writer@user:456\nproject:789#viewer@user:789\nproject:999#admin@user:999"),
+			replySubject: "reply.subject",
+			setupMocks: func(service HandlerService, msg *MockNatsMsg) {
+				// All checks should be in the response, but errors return false
+				msg.On("Respond", mock.MatchedBy(func(data []byte) bool {
+					response := string(data)
+					// Should contain all three check results
+					// Error checks return false, successful check returns true
+					return strings.Contains(response, "project:123#writer@user:456\tfalse") &&
+						strings.Contains(response, "project:789#viewer@user:789\ttrue") &&
+						strings.Contains(response, "project:999#admin@user:999\tfalse")
+				})).Return(nil).Once()
+
+				// Create result map with mixed success and error responses
+				resultMap := make(map[string]openfga.BatchCheckSingleResult, 3)
+
+				// First check: deadline_exceeded error
+				deadlineMsg := "context deadline exceeded"
+				deadlineErr := openfga.INTERNALERRORCODE_DEADLINE_EXCEEDED
+				resultMap["1"] = openfga.BatchCheckSingleResult{
+					Error: &openfga.CheckError{
+						InternalError: &deadlineErr,
+						Message:       &deadlineMsg,
+					},
+				}
+
+				// Second check: successful
+				resultMap["2"] = openfga.BatchCheckSingleResult{
+					Allowed: openfga.PtrBool(true),
+				}
+
+				// Third check: internal_error
+				internalMsg := "internal error"
+				internalErr := openfga.INTERNALERRORCODE_INTERNAL_ERROR
+				resultMap["3"] = openfga.BatchCheckSingleResult{
+					Error: &openfga.CheckError{
+						InternalError: &internalErr,
+						Message:       &internalMsg,
+					},
+				}
+
+				service.fgaService.client.(*MockFgaClient).On("BatchCheck", mock.Anything, mock.Anything).Return(&openfga.BatchCheckResponse{
+					Result: &resultMap,
+				}, nil)
+
+				// Mock cache operations
+				service.fgaService.cacheBucket.(*MockKeyValue).On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
+				service.fgaService.cacheBucket.(*MockKeyValue).On("Get", mock.Anything, mock.AnythingOfType("string")).Return(nil, jetstream.ErrKeyNotFound)
+
+				// IMPORTANT: Only the successful check (correlation_id=2) should be cached
+				// The error responses should NOT trigger cache Put calls
+				service.fgaService.cacheBucket.(*MockKeyValue).On("Put", mock.Anything, mock.AnythingOfType("string"), mock.MatchedBy(func(data []byte) bool {
+					// Only "true" should be cached (from the successful check)
+					return string(data) == "true"
+				})).Return(uint64(0), nil).Once()
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
 	}
 
 	for _, tt := range tests {
