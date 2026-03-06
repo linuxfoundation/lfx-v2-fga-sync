@@ -28,6 +28,11 @@ import (
 // Note: all OpenFGA SDK calls are kept in the same file due to the namespace
 // pollution which is the recommended way of using this SDK.
 
+const (
+	// trueString is used for cache values representing allowed access
+	trueString = "true"
+)
+
 var (
 	cacheHits       *expvar.Int
 	cacheStaleHits  *expvar.Int
@@ -274,7 +279,7 @@ func (s FgaService) SyncObjectTuples(
 				// access relations. This happens asynchronously so we are not checking
 				// for errors or logging anything.
 				//nolint:errcheck // This happens asynchronously so we are not checking for errors.
-				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, "true")
+				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, trueString)
 			}(cacheKey)
 		}
 	}
@@ -535,16 +540,36 @@ func (s FgaService) appendToMessage(
 			continue
 		}
 		relationKey := req.Object + "#" + req.Relation + "@" + req.User
+
+		// Need a bool to handle whether or not a response should be cached
+		// This is needed since it may be an error and not a valid response, but we
+		// still need to return not allowed and not cache it
+		shouldCache := true
+		// Check if the response contains an error (e.g., timeout, deadline exceeded)
+		// and skip caching/responding with error results.
+		if resp.HasError() {
+			checkErr := resp.GetError()
+			logger.With(
+				"correlation_id", correlationID,
+				"relation_key", relationKey,
+				"error_code", checkErr.GetInternalError(),
+				"error_message", checkErr.GetMessage(),
+			).WarnContext(ctx, "batch check returned error for tuple, skipping cache")
+			shouldCache = false
+		}
+
 		allowed := strconv.FormatBool(resp.GetAllowed())
 
 		// Append the result to our response message.
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
 		// Cache the result.
-		cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-		_, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowed))
-		if err != nil {
-			logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+		if shouldCache {
+			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			_, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowed))
+			if err != nil {
+				logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+			}
 		}
 	}
 
