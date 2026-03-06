@@ -11,6 +11,12 @@ image:
   # pullPolicy is the image pull policy
   pullPolicy: "IfNotPresent"
 
+# podAnnotations are additional annotations applied to the pod template.
+# Example:
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port: "8080"
+podAnnotations: {}
+
 # deployment is the configuration for the deployment
 deployment:
   # labels are additional labels to add to the deployment
