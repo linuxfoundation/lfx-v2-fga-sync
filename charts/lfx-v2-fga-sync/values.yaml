@@ -23,6 +23,8 @@ deployment:
   # podLabels are additional labels to add to the pods
   podLabels: {}
 
+# podDisruptionBudget configures a PodDisruptionBudget for the deployment.
+# Only one of minAvailable or maxUnavailable may be set (not both).
 podDisruptionBudget:
   enabled: false
   # minAvailable: 1
