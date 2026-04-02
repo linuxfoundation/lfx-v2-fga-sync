@@ -22,7 +22,7 @@ go run ./scripts/audit/list-tuple-changes [flags]
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-since` | `1h` | How far back to look for changes. Accepts Go duration strings: `30m`, `2h`, `24h`, `7d`, etc. |
+| `-since` | `1h` | How far back to look for changes. Accepts Go duration strings: `30m`, `2h`, `24h`, `168h`, etc. |
 | `-type` | _(all types)_ | Filter results to a specific object type (e.g. `project`, `committee`, `meeting`). |
 | `-all-pages` | `false` | When set, automatically pages through all results instead of stopping after the first page. |
 
@@ -59,3 +59,7 @@ Each line contains:
 - **Timestamp** — local time when the change was recorded
 - **Operation** — `WRITE` (tuple created) or `DELETE` (tuple removed)
 - **Tuple** — in `object#relation@user` format
+
+## API Reference
+
+This script uses the OpenFGA [ReadChanges](https://openfga.dev/api/service#/Relationship%20Tuples/ReadChanges) API endpoint.
