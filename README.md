@@ -184,6 +184,13 @@ Follow this convention for other resources that have permissions in OpenFGA:
 `lfx.update_access.<resource_type>` - Resource permission updates
 `lfx.delete_all_access.<resource_type>` - Resource permission deletion (resource deleted)
 
+## 📚 Documentation
+
+| Document | Description |
+| --- | --- |
+| [docs/client-guide.md](docs/client-guide.md) | How to publish FGA sync messages from your service (message format, subjects, examples) |
+| [docs/fga-catalog.md](docs/fga-catalog.md) | Index of all services publishing FGA sync messages, with links to their FGA contracts |
+
 ## 📊 API Reference
 
 ### Health Endpoints
