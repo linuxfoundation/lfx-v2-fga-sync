@@ -6,10 +6,11 @@ kind: Deployment
 metadata:
   name: {{ .Chart.Name }}
   namespace: {{ .Release.Namespace }}
-  {{- with .Values.deployment.labels }}
   labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    {{- with (omit (.Values.deployment.labels | default dict) "app.kubernetes.io/name") }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   replicas: {{ .Values.application.replicas }}
   selector:
@@ -23,6 +24,7 @@ spec:
       {{- end }}
       labels:
         app: {{ .Chart.Name }}
+        app.kubernetes.io/name: {{ .Chart.Name }}
         {{- with .Values.deployment.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
