@@ -47,6 +47,6 @@ type GenericDeleteData struct {
 type GenericMemberData struct {
 	UID                   string   `json:"uid"`
 	Username              string   `json:"username"`
-	Relations             []string `json:"relations"`                        // relations to add (member_put) or remove (member_remove)
+	Relations             []string `json:"relations"`                         // relations to add (member_put) or remove (member_remove)
 	MutuallyExclusiveWith []string `json:"mutually_exclusive_with,omitempty"` // on member_put: remove these if present
 }
