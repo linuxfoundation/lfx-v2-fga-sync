@@ -175,3 +175,23 @@ const (
 	// The subject is of the form: lfx.fga-sync.queue
 	FgaSyncQueue = "lfx.fga-sync.queue"
 )
+
+// Generic NATS subjects for resource-agnostic FGA operations.
+// These subjects accept a GenericFGAMessage envelope and route based on object_type.
+const (
+	// GenericUpdateAccessSubject is the subject for generic access control updates.
+	// The subject is of the form: lfx.fga-sync.update_access
+	GenericUpdateAccessSubject = "lfx.fga-sync.update_access"
+
+	// GenericDeleteAccessSubject is the subject for generic access control deletions.
+	// The subject is of the form: lfx.fga-sync.delete_access
+	GenericDeleteAccessSubject = "lfx.fga-sync.delete_access"
+
+	// GenericMemberPutSubject is the subject for generic member add operations.
+	// The subject is of the form: lfx.fga-sync.member_put
+	GenericMemberPutSubject = "lfx.fga-sync.member_put"
+
+	// GenericMemberRemoveSubject is the subject for generic member remove operations.
+	// The subject is of the form: lfx.fga-sync.member_remove
+	GenericMemberRemoveSubject = "lfx.fga-sync.member_remove"
+)
