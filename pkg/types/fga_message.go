@@ -32,9 +32,9 @@ func (m *GenericFGAMessage) UnmarshalData(v any) error {
 type GenericAccessData struct {
 	UID              string              `json:"uid"`
 	Public           bool                `json:"public"`
-	Relations        map[string][]string `json:"relations,omitempty"`         // relation_name → [usernames]
-	References       map[string][]string `json:"references,omitempty"`        // relation_name → [object_uids]
-	ExcludeRelations []string            `json:"exclude_relations,omitempty"` // relations managed elsewhere; skipped during sync
+	Relations        map[string][]string `json:"relations"`         // relation_name → [usernames]
+	References       map[string][]string `json:"references"`        // relation_name → [object_uids]
+	ExcludeRelations []string            `json:"exclude_relations"` // relations managed elsewhere
 }
 
 // GenericDeleteData is the Data payload for delete_access operations.
@@ -47,6 +47,6 @@ type GenericDeleteData struct {
 type GenericMemberData struct {
 	UID                   string   `json:"uid"`
 	Username              string   `json:"username"`
-	Relations             []string `json:"relations"`                         // relations to add (member_put) or remove (member_remove)
-	MutuallyExclusiveWith []string `json:"mutually_exclusive_with,omitempty"` // on member_put: remove these if present
+	Relations             []string `json:"relations"`               // relations to add or remove
+	MutuallyExclusiveWith []string `json:"mutually_exclusive_with"` // on member_put: remove these
 }
