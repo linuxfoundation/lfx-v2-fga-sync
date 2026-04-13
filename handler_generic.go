@@ -9,49 +9,9 @@ import (
 	"errors"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
 	"github.com/openfga/go-sdk/client"
 )
-
-// GenericFGAMessage is the universal message format for all FGA operations.
-// This allows clients to send resource-agnostic messages without needing
-// to know about resource-specific NATS subjects or message formats.
-type GenericFGAMessage struct {
-	ObjectType string                 `json:"object_type"` // e.g., "committee", "project", "meeting"
-	Operation  string                 `json:"operation"`   // e.g., "update_access", "member_put"
-	Data       map[string]interface{} `json:"data"`        // Operation-specific payload
-}
-
-// UnmarshalData unmarshals the data field into a specific type
-func (m *GenericFGAMessage) UnmarshalData(v interface{}) error {
-	bytes, err := json.Marshal(m.Data)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(bytes, v)
-}
-
-// GenericAccessData represents the data field for update_access operations
-type GenericAccessData struct {
-	UID              string              `json:"uid"`
-	Public           bool                `json:"public"`
-	Relations        map[string][]string `json:"relations"`         // relation_name → [usernames]
-	References       map[string][]string `json:"references"`        // relation_name → [object_uids]
-	ExcludeRelations []string            `json:"exclude_relations"` // Optional: relations managed elsewhere
-}
-
-// GenericDeleteData represents the data field for delete_access operations
-type GenericDeleteData struct {
-	UID string `json:"uid"`
-}
-
-// GenericMemberData represents the data field for member_put/member_remove operations.
-// Supports multiple relations for a single user, enabling atomic updates.
-type GenericMemberData struct {
-	UID                   string   `json:"uid"`
-	Username              string   `json:"username"`
-	Relations             []string `json:"relations"`               // Multiple relations supported
-	MutuallyExclusiveWith []string `json:"mutually_exclusive_with"` // Optional: auto-remove these
-}
 
 // genericUpdateAccessHandler handles universal update_access operations.
 // This provides a resource-agnostic way for clients to update access control
@@ -76,7 +36,7 @@ func (h *HandlerService) genericUpdateAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
 	// Parse generic message
-	genericMsg := new(GenericFGAMessage)
+	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
 		return err
@@ -93,7 +53,7 @@ func (h *HandlerService) genericUpdateAccessHandler(message INatsMsg) error {
 	}
 
 	// Parse data field
-	data := new(GenericAccessData)
+	data := new(fgatypes.GenericAccessData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse access data")
 		return err
@@ -135,7 +95,7 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 	ctx := context.Background()
 
 	// Parse generic message
-	genericMsg := new(GenericFGAMessage)
+	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
 		return err
@@ -152,7 +112,7 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 	}
 
 	// Parse data field
-	data := new(GenericDeleteData)
+	data := new(fgatypes.GenericDeleteData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse delete data")
 		return err
@@ -278,9 +238,9 @@ func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
 // parseAndValidateMemberPutMessage parses and validates the member_put message
 func (h *HandlerService) parseAndValidateMemberPutMessage(
 	ctx context.Context, message INatsMsg,
-) (*GenericFGAMessage, *GenericMemberData, error) {
+) (*fgatypes.GenericFGAMessage, *fgatypes.GenericMemberData, error) {
 	// Parse generic message
-	genericMsg := new(GenericFGAMessage)
+	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
 		return nil, nil, err
@@ -297,7 +257,7 @@ func (h *HandlerService) parseAndValidateMemberPutMessage(
 	}
 
 	// Parse data field
-	data := new(GenericMemberData)
+	data := new(fgatypes.GenericMemberData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
 		return nil, nil, err
@@ -331,7 +291,7 @@ func (h *HandlerService) parseAndValidateMemberPutMessage(
 func (h *HandlerService) computeMemberPutChanges(
 	ctx context.Context,
 	object, userPrincipal string,
-	data *GenericMemberData,
+	data *fgatypes.GenericMemberData,
 ) ([]client.ClientTupleKey, []client.ClientTupleKeyWithoutCondition, error) {
 	// Build mutually exclusive map for quick lookup
 	mutuallyExclusiveMap := make(map[string]bool)
@@ -468,7 +428,7 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 	ctx := context.Background()
 
 	// Parse generic message
-	genericMsg := new(GenericFGAMessage)
+	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
 		return err
@@ -485,7 +445,7 @@ func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
 	}
 
 	// Parse data field
-	data := new(GenericMemberData)
+	data := new(fgatypes.GenericMemberData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
 		return err
