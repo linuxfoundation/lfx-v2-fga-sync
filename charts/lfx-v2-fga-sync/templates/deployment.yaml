@@ -8,6 +8,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   {{- with .Values.deployment.labels }}
   labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:

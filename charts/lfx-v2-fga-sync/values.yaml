@@ -26,7 +26,6 @@ deployment:
   # on the pod, overriding fga.storeId and fga.modelId
   labels:
     openfga-store: "lfx-core"
-    app.kubernetes.io/name: "lfx-v2-fga-sync"
   # podLabels are additional labels to add to the pods
   podLabels: {}
 
