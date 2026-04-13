@@ -10,8 +10,8 @@ import (
 
 func TestGenericFGAMessage_UnmarshalData_Success(t *testing.T) {
 	accessData := GenericAccessData{
-		UID:     "committee-123",
-		Public:  true,
+		UID:    "committee-123",
+		Public: true,
 		Relations: map[string][]string{
 			"member": {"user-alice"},
 		},
@@ -44,9 +44,9 @@ func TestGenericFGAMessage_UnmarshalData_Success(t *testing.T) {
 
 func TestGenericFGAMessage_UnmarshalData_MemberData(t *testing.T) {
 	memberData := GenericMemberData{
-		UID:      "meeting-456",
-		Username: "user-bob",
-		Relations: []string{"host"},
+		UID:                   "meeting-456",
+		Username:              "user-bob",
+		Relations:             []string{"host"},
 		MutuallyExclusiveWith: []string{"participant"},
 	}
 
