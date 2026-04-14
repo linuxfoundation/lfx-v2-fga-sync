@@ -544,22 +544,22 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 		},
 		// Generic handlers (resource-agnostic)
 		{
-			subject:     "lfx.fga-sync.update_access",
+			subject:     constants.GenericUpdateAccessSubject,
 			handler:     handlerService.genericUpdateAccessHandler,
 			description: "generic update access",
 		},
 		{
-			subject:     "lfx.fga-sync.delete_access",
+			subject:     constants.GenericDeleteAccessSubject,
 			handler:     handlerService.genericDeleteAccessHandler,
 			description: "generic delete access",
 		},
 		{
-			subject:     "lfx.fga-sync.member_put",
+			subject:     constants.GenericMemberPutSubject,
 			handler:     handlerService.genericMemberPutHandler,
 			description: "generic member put",
 		},
 		{
-			subject:     "lfx.fga-sync.member_remove",
+			subject:     constants.GenericMemberRemoveSubject,
 			handler:     handlerService.genericMemberRemoveHandler,
 			description: "generic member remove",
 		},
