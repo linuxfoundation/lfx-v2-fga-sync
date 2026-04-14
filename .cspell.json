@@ -87,6 +87,7 @@
       "filename": "**/*.go",
       "words": [
         "fga",
+        "fgatypes",
         "sync",
         "lfx",
         "ctx",
