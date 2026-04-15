@@ -176,13 +176,19 @@ because otherwise access checks will use the cached access tuples even though th
 The service subscribes to these NATS subjects:
 
 - `lfx.access_check.request` - Access permission checks
-- `lfx.update_access.project` - Project permission updates  
-- `lfx.delete_all_access.project` - Project permission deletion (project deleted)
+- `lfx.fga-sync.update_access` - Resource permission sync (create/update)
+- `lfx.fga-sync.delete_access` - Resource permission cleanup (resource deleted)
+- `lfx.fga-sync.member_put` - Per-user relation add/update
+- `lfx.fga-sync.member_remove` - Per-user relation removal
 
-Follow this convention for other resources that have permissions in OpenFGA:
+> **Legacy subjects** (`lfx.update_access.<resource_type>`, `lfx.delete_all_access.<resource_type>`) remain supported for existing publishers. New integrations should use the generic `lfx.fga-sync.*` subjects above. See [docs/client-guide.md](docs/client-guide.md) for the current message format.
 
-`lfx.update_access.<resource_type>` - Resource permission updates
-`lfx.delete_all_access.<resource_type>` - Resource permission deletion (resource deleted)
+## 📚 Documentation
+
+| Document | Description |
+| --- | --- |
+| [docs/client-guide.md](docs/client-guide.md) | How to publish FGA sync messages from your service (message format, subjects, examples) |
+| [docs/fga-catalog.md](docs/fga-catalog.md) | Index of all services publishing FGA sync messages, with links to their FGA contracts |
 
 ## 📊 API Reference
 
