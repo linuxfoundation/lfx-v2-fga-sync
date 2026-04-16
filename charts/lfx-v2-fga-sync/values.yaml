@@ -11,6 +11,12 @@ image:
   # pullPolicy is the image pull policy
   pullPolicy: "IfNotPresent"
 
+# podAnnotations are additional annotations applied to the pod template.
+# Example:
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port: "8080"
+podAnnotations: {}
+
 # deployment is the configuration for the deployment
 deployment:
   # labels are additional labels to add to the deployment
@@ -22,6 +28,13 @@ deployment:
     openfga-store: "lfx-core"
   # podLabels are additional labels to add to the pods
   podLabels: {}
+
+# podDisruptionBudget configures a PodDisruptionBudget for the deployment.
+# Only one of minAvailable or maxUnavailable may be set (not both).
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  # maxUnavailable: 1
 
 # nats is the configuration for the NATS server
 nats:

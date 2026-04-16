@@ -1,10 +1,66 @@
-# FGA Sync Client Guide - Generic Handlers
+# FGA Sync Client Guide
 
-This guide explains how to use the **generic, resource-agnostic** FGA Sync handlers to manage fine-grained authorization for your resources.
+This guide explains how to use the FGA Sync service's NATS API to manage fine-grained authorization for your resources.
 
-## Overview
+## Request/Reply API
 
-The FGA Sync service provides four universal NATS subjects that work with **any resource type** (projects, committees, meetings, etc.) without requiring resource-specific handlers.
+These subjects use NATS request/reply for synchronous queries.
+
+### Access Check
+
+**Subject:** `lfx.access_check.request`
+
+Checks one or more authorization relationships. Each line is a tuple-string in `object#relation@user` format.
+
+**Request** (plain text, one check per line):
+
+```text
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
+```
+
+**Response** (plain text, one line per check, tab-delimited `{request}\t{true|false}`). Order is not guaranteed — cached results are returned first.
+
+```text
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456	false
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456	true
+```
+
+### Read Tuples
+
+**Subject:** `lfx.access_check.read_tuples`
+
+Returns all direct OpenFGA tuples for a given user and object type. Paginates internally so the caller receives the full result set.
+
+**Request** (JSON):
+
+```json
+{"user": "user:auth0|alice", "object_type": "project"}
+```
+
+**Response (success)** (JSON):
+
+```json
+{"results": ["project:uuid1#writer@user:auth0|alice", "project:uuid2#auditor@user:auth0|alice"]}
+```
+
+If no tuples are found:
+
+```json
+{"results": []}
+```
+
+**Response (error)** (JSON):
+
+```json
+{"error": "failed to read tuples"}
+```
+
+---
+
+## Sync API — Generic Handlers
+
+The FGA Sync service provides four universal NATS subjects that work with **any resource type** (projects, committees, meetings, etc.) without requiring resource-specific handlers. If a reply subject is provided, the service responds with `OK` after processing, allowing callers to implement synchronous acknowledgement.
 
 ### Benefits of Generic Handlers
 

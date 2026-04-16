@@ -15,6 +15,10 @@ const (
 	// The subject is of the form: lfx.access_check.request
 	AccessCheckSubject = "lfx.access_check.request"
 
+	// ReadTuplesSubject is the subject for reading a user's direct tuples by object type.
+	// The subject is of the form: lfx.access_check.read_tuples
+	ReadTuplesSubject = "lfx.access_check.read_tuples"
+
 	// ProjectUpdateAccessSubject is the subject for the project access control updates.
 	// The subject is of the form: lfx.update_access.project
 	ProjectUpdateAccessSubject = "lfx.update_access.project"
@@ -174,4 +178,24 @@ const (
 	// FgaSyncQueue is the subject name for the FGA sync.
 	// The subject is of the form: lfx.fga-sync.queue
 	FgaSyncQueue = "lfx.fga-sync.queue"
+)
+
+// Generic NATS subjects for resource-agnostic FGA operations.
+// These subjects accept a GenericFGAMessage envelope and route based on object_type.
+const (
+	// GenericUpdateAccessSubject is the subject for generic access control updates.
+	// The subject is of the form: lfx.fga-sync.update_access
+	GenericUpdateAccessSubject = "lfx.fga-sync.update_access"
+
+	// GenericDeleteAccessSubject is the subject for generic access control deletions.
+	// The subject is of the form: lfx.fga-sync.delete_access
+	GenericDeleteAccessSubject = "lfx.fga-sync.delete_access"
+
+	// GenericMemberPutSubject is the subject for generic member add operations.
+	// The subject is of the form: lfx.fga-sync.member_put
+	GenericMemberPutSubject = "lfx.fga-sync.member_put"
+
+	// GenericMemberRemoveSubject is the subject for generic member remove operations.
+	// The subject is of the form: lfx.fga-sync.member_remove
+	GenericMemberRemoveSubject = "lfx.fga-sync.member_remove"
 )

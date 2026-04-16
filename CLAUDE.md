@@ -10,7 +10,7 @@ FGA Sync is a high-performance Go microservice that synchronizes authorization d
 
 ### Core Components
 
-- **NATS Message Handlers**: Process access checks, project updates, and project deletions
+- **NATS Message Handlers**: Process access checks, read-tuples queries, and resource permission sync (updates, deletes, member operations)
 - **OpenFGA Client**: Manages authorization relationships and batch operations
 - **JetStream Cache**: High-performance KeyValue store for relationship caching
 - **Health Endpoints**: Kubernetes-ready liveness and readiness probes
@@ -20,7 +20,7 @@ FGA Sync is a high-performance Go microservice that synchronizes authorization d
 1. NATS messages arrive on subjects (e.g., `lfx.access_check.request`)
 2. Queue groups ensure load balancing across service instances
 3. Handlers process messages, interact with cache/OpenFGA, and send replies
-4. Cache invalidation occurs on project updates/deletions
+4. Cache invalidation occurs on resource updates/deletions
 
 ### Key Dependencies
 
@@ -78,6 +78,53 @@ project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
 ```
 
 Multiple relationship checks, one per line. Format: `object#relation@user`
+
+Response is plain text, one line per check, tab-delimited `{request}\t{true|false}`. Order is not guaranteed — cached results are returned first.
+
+### Read Tuples Request (`lfx.access_check.read_tuples`)
+
+Returns all direct OpenFGA tuples for a given user and object type. Paginates internally.
+
+**Request:**
+
+```json
+{"user": "user:auth0|alice", "object_type": "project"}
+```
+
+**Response (success):**
+
+```json
+{"results": ["project:uuid1#writer@user:auth0|alice", "project:uuid2#auditor@user:auth0|alice"]}
+```
+
+**Response (error):**
+
+```json
+{"error": "failed to read tuples"}
+```
+
+### Generic Sync Message Format (`lfx.fga-sync.*`)
+
+New integrations should use the generic subjects. All use the `GenericFGAMessage` envelope:
+
+```json
+{
+  "object_type": "your_resource_type",
+  "operation": "operation_name",
+  "data": { /* operation-specific fields */ }
+}
+```
+
+Subjects: `lfx.fga-sync.update_access`, `lfx.fga-sync.delete_access`, `lfx.fga-sync.member_put`,
+`lfx.fga-sync.member_remove`. See `docs/client-guide.md` for full format details, examples, and best practices.
+
+If a reply subject is provided, sync handlers respond with `OK` after processing, allowing callers to implement
+synchronous acknowledgement.
+
+### Legacy Message Formats
+
+The following resource-specific subjects remain supported for existing publishers but should not be used for new
+integrations. Migrate to the generic `lfx.fga-sync.*` subjects above.
 
 ### Project Update Message (`lfx.update_access.project`)
 
@@ -399,16 +446,15 @@ go test -bench=. ./...
 Each message type has a dedicated handler function:
 
 - `accessCheckHandler()` - Processes authorization queries with caching
-- `projectUpdateHandler()` - Manages project permission synchronization
-- `projectDeleteHandler()` - Handles cleanup of project permissions
-- `committeeUpdateAccessHandler()` - Manages committee permission synchronization
-- `committeeDeleteAllAccessHandler()` - Handles cleanup of committee permissions
-- `committeeMemberPutHandler()` - Adds committee members
-- `committeeMemberRemoveHandler()` - Removes committee members
-- `meetingUpdateAccessHandler()` - Manages meeting permission synchronization
-- `meetingDeleteAllAccessHandler()` - Handles cleanup of meeting permissions
-- `meetingRegistrantPutHandler()` - Adds meeting registrants (participant/host)
-- `meetingRegistrantRemoveHandler()` - Removes meeting registrants
+- `readTuplesHandler()` - Returns all direct OpenFGA tuples for a user + object type
+- `genericUpdateAccessHandler()` - Generic resource permission sync (any object type)
+- `genericDeleteAccessHandler()` - Generic resource permission cleanup
+- `genericMemberPutHandler()` - Generic per-user relation add with multi-relation and mutual exclusion support
+- `genericMemberRemoveHandler()` - Generic per-user relation removal
+
+Legacy resource-specific handlers also exist (e.g. `projectUpdateHandler`, `committeeUpdateAccessHandler`,
+`meetingUpdateAccessHandler`) but new integrations should use the generic handlers above via the
+`lfx.fga-sync.*` subjects.
 
 ### Service Abstraction
 
