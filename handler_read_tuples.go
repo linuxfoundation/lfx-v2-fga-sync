@@ -32,22 +32,32 @@ func (h *HandlerService) readTuplesHandler(message INatsMsg) error {
 	}
 
 	if req.User == "" || req.ObjectType == "" {
-		logger.WarnContext(ctx, "read tuples request missing required fields", "user", req.User, "object_type", req.ObjectType)
+		logger.With(
+			"user", req.User,
+			"object_type", req.ObjectType,
+		).WarnContext(ctx, "read tuples request missing required fields")
 		return h.respondReadTuplesError(ctx, message, "user and object_type are required")
 	}
 
 	// Validate that object_type is a clean type name (no colons).
 	if strings.Contains(req.ObjectType, ":") {
-		logger.WarnContext(ctx, "read tuples request contains invalid object_type", "object_type", req.ObjectType)
+		logger.With("object_type", req.ObjectType).WarnContext(ctx, "read tuples request contains invalid object_type")
 		return h.respondReadTuplesError(ctx, message, "object_type must not contain ':'")
 	}
 
-	logger.With("user", req.User, "object_type", req.ObjectType).InfoContext(ctx, "handling read tuples request")
+	logger.With(
+		"user", req.User,
+		"object_type", req.ObjectType,
+	).InfoContext(ctx, "handling read tuples request")
 
 	// Query OpenFGA for all direct tuples matching the user + object type.
 	tuples, err := h.fgaService.ReadUserTuples(ctx, req.User, req.ObjectType)
 	if err != nil {
-		logger.With(errKey, err, "user", req.User, "object_type", req.ObjectType).ErrorContext(ctx, "failed to read user tuples")
+		logger.With(
+			errKey, err,
+			"user", req.User,
+			"object_type", req.ObjectType,
+		).ErrorContext(ctx, "failed to read user tuples")
 		return h.respondReadTuplesError(ctx, message, "failed to read tuples")
 	}
 
@@ -72,7 +82,11 @@ func (h *HandlerService) readTuplesHandler(message INatsMsg) error {
 			logger.With(errKey, errRespond).WarnContext(ctx, "failed to send read tuples reply")
 			return errRespond
 		}
-		logger.With("user", req.User, "object_type", req.ObjectType, "count", len(results)).InfoContext(ctx, "sent read tuples response")
+		logger.With(
+			"user", req.User,
+			"object_type", req.ObjectType,
+			"count", len(results),
+		).InfoContext(ctx, "sent read tuples response")
 	}
 
 	return nil

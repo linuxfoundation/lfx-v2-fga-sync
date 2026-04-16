@@ -228,7 +228,7 @@ func TestReadTuplesHandler(t *testing.T) {
 		{
 			name:         "missing user field returns error response",
 			messageData:  []byte(`{"object_type":"project"}`),
-			replySubject: "reply.nouser",
+			replySubject: "reply.no-user",
 			mockSetup: func(_ *MockFgaClient, msg *MockNatsMsg) {
 				msg.On("Respond", mock.MatchedBy(func(data []byte) bool {
 					var resp types.ReadTuplesResponse
