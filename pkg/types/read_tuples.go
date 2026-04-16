@@ -15,6 +15,6 @@ type ReadTuplesRequest struct {
 // lfx.access_check.read_tuples subject. Results are tuple-strings in
 // the canonical object#relation@user format. Error is set on failure.
 type ReadTuplesResponse struct {
-	Results []string `json:"results,omitempty"`
+	Results []string `json:"results"`
 	Error   string   `json:"error,omitempty"`
 }

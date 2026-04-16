@@ -171,7 +171,7 @@ func TestReadTuplesHandler(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name:         "empty results returned as empty slice",
+			name:         "empty results returned as empty array",
 			messageData:  []byte(`{"user":"user:auth0|nobody","object_type":"project"}`),
 			replySubject: "reply.456",
 			mockSetup: func(m *MockFgaClient, msg *MockNatsMsg) {
@@ -184,13 +184,14 @@ func TestReadTuplesHandler(t *testing.T) {
 					if err := json.Unmarshal(data, &resp); err != nil {
 						return false
 					}
-					return len(resp.Results) == 0 && resp.Error == ""
+					// Results should be present as empty array, not nil.
+					return resp.Results != nil && len(resp.Results) == 0 && resp.Error == ""
 				})).Return(nil).Once()
 			},
 			expectError: false,
 		},
 		{
-			name:         "OpenFGA error returns JSON error response",
+			name:         "OpenFGA error returns generic JSON error",
 			messageData:  []byte(`{"user":"user:auth0|err","object_type":"project"}`),
 			replySubject: "reply.err",
 			mockSetup: func(m *MockFgaClient, msg *MockNatsMsg) {
@@ -202,10 +203,11 @@ func TestReadTuplesHandler(t *testing.T) {
 					if err := json.Unmarshal(data, &resp); err != nil {
 						return false
 					}
-					return resp.Error != "" && resp.Results == nil
+					// Error message should not contain internal details.
+					return resp.Error == "failed to read tuples"
 				})).Return(nil).Once()
 			},
-			expectError: false, // handler sends JSON error, does not return Go error
+			expectError: true, // Handler now returns error for subscription-layer logging.
 		},
 		{
 			name:         "invalid JSON payload returns error response",
@@ -217,10 +219,11 @@ func TestReadTuplesHandler(t *testing.T) {
 					if err := json.Unmarshal(data, &resp); err != nil {
 						return false
 					}
-					return resp.Error != ""
+					// Should not leak unmarshal error details.
+					return resp.Error == "invalid request payload"
 				})).Return(nil).Once()
 			},
-			expectError: false,
+			expectError: true,
 		},
 		{
 			name:         "missing user field returns error response",
@@ -235,7 +238,22 @@ func TestReadTuplesHandler(t *testing.T) {
 					return resp.Error != ""
 				})).Return(nil).Once()
 			},
-			expectError: false,
+			expectError: true,
+		},
+		{
+			name:         "object_type with colon is rejected",
+			messageData:  []byte(`{"user":"user:auth0|alice","object_type":"project:"}`),
+			replySubject: "reply.colon",
+			mockSetup: func(_ *MockFgaClient, msg *MockNatsMsg) {
+				msg.On("Respond", mock.MatchedBy(func(data []byte) bool {
+					var resp types.ReadTuplesResponse
+					if err := json.Unmarshal(data, &resp); err != nil {
+						return false
+					}
+					return resp.Error == "object_type must not contain ':'"
+				})).Return(nil).Once()
+			},
+			expectError: true,
 		},
 		{
 			name:         "no reply subject — no Respond call",

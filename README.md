@@ -210,17 +210,62 @@ GET /readyz
 
 Returns `200 OK` if the service is ready to handle requests (NATS connected).
 
-### Message Formats
+### NATS API
 
-#### Access Check Request
+The service exposes request/reply subjects that other services call over NATS.
 
-`lfx.access_check.request`
+| Subject | Description |
+|---------|-------------|
+| `lfx.access_check.request` | Check one or more authorization relationships |
+| `lfx.access_check.read_tuples` | Return all direct OpenFGA tuples for a user + object type |
 
-Format: `object#relation@user`
+#### Access Check
+
+**Subject:** `lfx.access_check.request`
+
+Checks one or more authorization relationships. Each line is a tuple-string in `object#relation@user` format.
+
+**Request** (plain text, one check per line):
 
 ```text
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456
 project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
 ```
+
+**Response** (plain text, one line per check, tab-delimited `{request}\t{true|false}`). Order is not guaranteed — cached results are returned first.
+
+```text
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456	false
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456	true
+```
+
+#### Read Tuples
+
+**Subject:** `lfx.access_check.read_tuples`
+
+Returns all direct OpenFGA tuples for a given user and object type. Paginates internally so the caller receives the full result set.
+
+**Request** (JSON):
+
+```json
+{"user": "user:auth0|alice", "object_type": "project"}
+```
+
+**Response (success)** (JSON):
+
+```json
+{"results": ["project:uuid1#writer@user:auth0|alice", "project:uuid2#auditor@user:auth0|alice"]}
+```
+
+**Response (error)** (JSON):
+
+```json
+{"error": "failed to read tuples"}
+```
+
+### Fire-and-Forget Messages
+
+These subjects are published without expecting a reply. The service processes them asynchronously.
 
 #### Resource Update Message
 

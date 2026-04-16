@@ -79,6 +79,30 @@ project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
 
 Multiple relationship checks, one per line. Format: `object#relation@user`
 
+Response is plain text, one line per check, tab-delimited `{request}\t{true|false}`. Order is not guaranteed — cached results are returned first.
+
+### Read Tuples Request (`lfx.access_check.read_tuples`)
+
+Returns all direct OpenFGA tuples for a given user and object type. Paginates internally.
+
+**Request:**
+
+```json
+{"user": "user:auth0|alice", "object_type": "project"}
+```
+
+**Response (success):**
+
+```json
+{"results": ["project:uuid1#writer@user:auth0|alice", "project:uuid2#auditor@user:auth0|alice"]}
+```
+
+**Response (error):**
+
+```json
+{"error": "failed to read tuples"}
+```
+
 ### Project Update Message (`lfx.update_access.project`)
 
 ```json
