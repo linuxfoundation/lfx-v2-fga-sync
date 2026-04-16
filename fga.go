@@ -133,6 +133,31 @@ func (s FgaService) ReadObjectTuples(ctx context.Context, object string) ([]open
 	return tuples, nil
 }
 
+// ReadUserTuples fetches all direct relationships for a given user across all
+// objects of the specified type. It paginates internally via ContinuationToken.
+func (s FgaService) ReadUserTuples(ctx context.Context, user, objectType string) ([]openfga.Tuple, error) {
+	objectTypeColon := objectType + ":"
+	req := ClientReadRequest{
+		User:   openfga.PtrString(user),
+		Object: openfga.PtrString(objectTypeColon),
+	}
+	options := ClientReadOptions{}
+	var tuples []openfga.Tuple
+	for {
+		resp, err := s.client.Read(ctx, req, options)
+		if err != nil {
+			return nil, err
+		}
+		tuples = append(tuples, resp.Tuples...)
+		if resp.ContinuationToken == "" {
+			break
+		}
+		options.ContinuationToken = openfga.PtrString(resp.ContinuationToken)
+	}
+
+	return tuples, nil
+}
+
 // ListObjectsByUserAndRelation uses the List Objects API to find all objects of a specific type
 // that have a given relation to a user. This is useful for finding all artifacts that relate to a past meeting.
 func (s FgaService) ListObjectsByUserAndRelation(

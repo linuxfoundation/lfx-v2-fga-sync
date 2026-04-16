@@ -353,6 +353,11 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			description: "access check",
 		},
 		{
+			subject:     constants.ReadTuplesSubject,
+			handler:     handlerService.readTuplesHandler,
+			description: "read tuples",
+		},
+		{
 			subject:     constants.ProjectUpdateAccessSubject,
 			handler:     handlerService.projectUpdateAccessHandler,
 			description: "project update access",
