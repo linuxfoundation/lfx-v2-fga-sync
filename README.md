@@ -171,23 +171,11 @@ Note: if you are developing locally and are writing to the OpenFGA store outside
 (e.g. granting certain access to a test user manually) then you should set `USE_CACHE=false`,
 because otherwise access checks will use the cached access tuples even though they are out of date.
 
-### NATS Subjects
-
-The service subscribes to these NATS subjects:
-
-- `lfx.access_check.request` - Access permission checks
-- `lfx.fga-sync.update_access` - Resource permission sync (create/update)
-- `lfx.fga-sync.delete_access` - Resource permission cleanup (resource deleted)
-- `lfx.fga-sync.member_put` - Per-user relation add/update
-- `lfx.fga-sync.member_remove` - Per-user relation removal
-
-> **Legacy subjects** (`lfx.update_access.<resource_type>`, `lfx.delete_all_access.<resource_type>`) remain supported for existing publishers. New integrations should use the generic `lfx.fga-sync.*` subjects above. See [docs/client-guide.md](docs/client-guide.md) for the current message format.
-
 ## 📚 Documentation
 
 | Document | Description |
 | --- | --- |
-| [docs/client-guide.md](docs/client-guide.md) | How to publish FGA sync messages from your service (message format, subjects, examples) |
+| [docs/client-guide.md](docs/client-guide.md) | NATS API reference — request/reply queries, sync message formats, and integration examples |
 | [docs/fga-catalog.md](docs/fga-catalog.md) | Index of all services publishing FGA sync messages, with links to their FGA contracts |
 
 ## 📊 API Reference
@@ -212,89 +200,25 @@ Returns `200 OK` if the service is ready to handle requests (NATS connected).
 
 ### NATS API
 
-The service exposes request/reply subjects that other services call over NATS.
+The service subscribes to the following NATS subjects. See [docs/client-guide.md](docs/client-guide.md) for message formats, examples, and integration guidance.
+
+#### Request/Reply Subjects
 
 | Subject | Description |
 |---------|-------------|
 | `lfx.access_check.request` | Check one or more authorization relationships |
 | `lfx.access_check.read_tuples` | Return all direct OpenFGA tuples for a user + object type |
 
-#### Access Check
+#### Sync Subjects
 
-**Subject:** `lfx.access_check.request`
+| Subject | Description |
+|---------|-------------|
+| `lfx.fga-sync.update_access` | Create/update access control for a resource |
+| `lfx.fga-sync.delete_access` | Delete all access control for a resource |
+| `lfx.fga-sync.member_put` | Add member(s) with one or more relations |
+| `lfx.fga-sync.member_remove` | Remove member relations |
 
-Checks one or more authorization relationships. Each line is a tuple-string in `object#relation@user` format.
-
-**Request** (plain text, one check per line):
-
-```text
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
-```
-
-**Response** (plain text, one line per check, tab-delimited `{request}\t{true|false}`). Order is not guaranteed — cached results are returned first.
-
-```text
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456	false
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456	true
-```
-
-#### Read Tuples
-
-**Subject:** `lfx.access_check.read_tuples`
-
-Returns all direct OpenFGA tuples for a given user and object type. Paginates internally so the caller receives the full result set.
-
-**Request** (JSON):
-
-```json
-{"user": "user:auth0|alice", "object_type": "project"}
-```
-
-**Response (success)** (JSON):
-
-```json
-{"results": ["project:uuid1#writer@user:auth0|alice", "project:uuid2#auditor@user:auth0|alice"]}
-```
-
-**Response (error)** (JSON):
-
-```json
-{"error": "failed to read tuples"}
-```
-
-### Sync Messages
-
-These subjects handle resource permission synchronization. If a reply subject is provided, the service responds with `OK` after processing, allowing callers to implement synchronous acknowledgement.
-
-#### Resource Update Message
-
-`lfx.update_access.<resource_type>`
-
-Format: this is dependent on the resource since each resource can have its own schema and relations.
-
-Below is an example of the project message schema.
-
-```json
-{
-  "uid": "7cad5a8d-19d0-41a4-81a6-043453daf9ee",
-  "public": true,
-  "parent_uid": "7cad5a8d-19d0-41a4-81a6-043453daf9ef7cad5a8d-19d0-41a4-81a6-043453daf9ee", 
-  "writers": ["user1", "user2"],
-  "auditors": ["auditor1"],
-  "meeting_coordinators": ["coordinator1", "coordinator2"]
-}
-```
-
-#### Resource Delete Message
-
-`lfx.delete_all_access.<resource_type>`
-
-Format: `<resource_uid>` i.e. the resource UID that was deleted so that all access on the resource can be cleaned up.
-
-```text
-7cad5a8d-19d0-41a4-81a6-043453daf9ee
-```
+> **Legacy subjects** (`lfx.update_access.<resource_type>`, `lfx.delete_all_access.<resource_type>`, etc.) remain supported for existing publishers. New integrations should use the generic `lfx.fga-sync.*` subjects above.
 
 ## 🧪 Development
 
