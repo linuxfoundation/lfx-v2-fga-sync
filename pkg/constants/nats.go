@@ -15,6 +15,10 @@ const (
 	// The subject is of the form: lfx.access_check.request
 	AccessCheckSubject = "lfx.access_check.request"
 
+	// ReadTuplesSubject is the subject for reading a user's direct tuples by object type.
+	// The subject is of the form: lfx.access_check.read_tuples
+	ReadTuplesSubject = "lfx.access_check.read_tuples"
+
 	// ProjectUpdateAccessSubject is the subject for the project access control updates.
 	// The subject is of the form: lfx.update_access.project
 	ProjectUpdateAccessSubject = "lfx.update_access.project"
