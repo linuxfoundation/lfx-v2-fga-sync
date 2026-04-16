@@ -62,7 +62,7 @@ func init() {
 		cacheBucketName = "fga-sync-cache"
 	}
 	useCacheStr := os.Getenv("USE_CACHE")
-	if useCacheStr == "true" {
+	if useCacheStr == trueString {
 		useCache = true
 	}
 }

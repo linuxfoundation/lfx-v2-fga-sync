@@ -115,7 +115,8 @@
         "otelhttp",
         "tracecontext",
         "traceparent",
-        "tracestate"
+        "tracestate",
+        "INTERNALERRORCODE"
       ]
     },
     {
