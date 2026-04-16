@@ -80,18 +80,17 @@ func (h *HandlerService) readTuplesHandler(message INatsMsg) error {
 
 // respondReadTuplesError sends a JSON error response over NATS and returns a
 // formatted error so the subscription loop can log it consistently with other
-// handlers.
-func (h *HandlerService) respondReadTuplesError(ctx context.Context, message INatsMsg, errMsg string) error {
+// handlers. This helper does not log — callers are responsible for logging
+// before calling it.
+func (h *HandlerService) respondReadTuplesError(_ context.Context, message INatsMsg, errMsg string) error {
 	if message.Reply() != "" {
 		resp := types.ReadTuplesResponse{Error: errMsg}
 		data, err := json.Marshal(resp)
 		if err != nil {
-			logger.With(errKey, err).ErrorContext(ctx, "failed to marshal error response")
-			return err
+			return fmt.Errorf("read tuples: %s (marshal error response: %w)", errMsg, err)
 		}
 		if errRespond := message.Respond(data); errRespond != nil {
-			logger.With(errKey, errRespond).WarnContext(ctx, "failed to send error reply")
-			return errRespond
+			return fmt.Errorf("read tuples: %s (send error reply: %w)", errMsg, errRespond)
 		}
 	}
 	return fmt.Errorf("read tuples: %s", errMsg)

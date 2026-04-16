@@ -263,9 +263,9 @@ Returns all direct OpenFGA tuples for a given user and object type. Paginates in
 {"error": "failed to read tuples"}
 ```
 
-### Fire-and-Forget Messages
+### Sync Messages
 
-These subjects are published without expecting a reply. The service processes them asynchronously.
+These subjects handle resource permission synchronization. If a reply subject is provided, the service responds with `OK` after processing, allowing callers to implement synchronous acknowledgement.
 
 #### Resource Update Message
 
