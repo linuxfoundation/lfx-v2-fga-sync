@@ -426,20 +426,49 @@ func (s FgaService) WriteAndDeleteTuples(
 }
 
 // writeAndDeleteTuplesBatch performs a single write/delete operation to OpenFGA.
+// If OpenFGA returns a validation_error for an invalid tuple, that tuple is
+// removed and the batch is retried with the remaining tuples.
 // This is an internal helper function that should not be called directly.
 func (s FgaService) writeAndDeleteTuplesBatch(
 	ctx context.Context,
 	writes []ClientTupleKey,
 	deletes []ClientTupleKeyWithoutCondition,
 ) error {
-	req := ClientWriteRequest{
-		Writes:  writes,
-		Deletes: deletes,
-	}
+	for {
+		req := ClientWriteRequest{
+			Writes:  writes,
+			Deletes: deletes,
+		}
 
-	_, err := s.client.Write(ctx, req)
-	if err != nil {
-		return err
+		_, err := s.client.Write(ctx, req)
+		if err != nil {
+			tupleStr, ok := extractInvalidTuple(err)
+			if !ok {
+				return err
+			}
+
+			removed := false
+			writes, removed = removeInvalidWriteTuple(writes, tupleStr)
+			if !removed {
+				deletes, removed = removeInvalidDeleteTuple(deletes, tupleStr)
+			}
+			if !removed {
+				return err
+			}
+
+			logger.With(
+				"skipped_tuple", tupleStr,
+				"remaining_writes", len(writes),
+				"remaining_deletes", len(deletes),
+			).WarnContext(ctx, "skipping invalid tuple and retrying batch write")
+
+			if len(writes) == 0 && len(deletes) == 0 {
+				return nil
+			}
+			continue
+		}
+
+		break
 	}
 
 	// Invalidate cache after write
@@ -456,6 +485,56 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 	).InfoContext(ctx, "wrote and deleted tuples")
 
 	return nil
+}
+
+// extractInvalidTuple extracts the tuple string from an OpenFGA validation error.
+// Returns the tuple string (e.g. "object:id#relation@user:id") and true if the
+// error is a validation_error containing an invalid tuple message.
+func extractInvalidTuple(err error) (string, bool) {
+	var validationErr openfga.FgaApiValidationError
+	if !errors.As(err, &validationErr) {
+		return "", false
+	}
+	msg := validationErr.Error()
+	const prefix = "Invalid tuple '"
+	start := strings.Index(msg, prefix)
+	if start == -1 {
+		return "", false
+	}
+	start += len(prefix)
+	end := strings.Index(msg[start:], "'")
+	if end == -1 {
+		return "", false
+	}
+	return msg[start : start+end], true
+}
+
+// removeInvalidWriteTuple returns a new slice with the first write tuple matching
+// tupleStr removed. Returns the original slice and false if no match is found.
+func removeInvalidWriteTuple(writes []ClientTupleKey, tupleStr string) ([]ClientTupleKey, bool) {
+	for i, t := range writes {
+		if t.Object+"#"+t.Relation+"@"+t.User == tupleStr {
+			result := make([]ClientTupleKey, 0, len(writes)-1)
+			result = append(result, writes[:i]...)
+			result = append(result, writes[i+1:]...)
+			return result, true
+		}
+	}
+	return writes, false
+}
+
+// removeInvalidDeleteTuple returns a new slice with the first delete tuple matching
+// tupleStr removed. Returns the original slice and false if no match is found.
+func removeInvalidDeleteTuple(deletes []ClientTupleKeyWithoutCondition, tupleStr string) ([]ClientTupleKeyWithoutCondition, bool) {
+	for i, t := range deletes {
+		if t.Object+"#"+t.Relation+"@"+t.User == tupleStr {
+			result := make([]ClientTupleKeyWithoutCondition, 0, len(deletes)-1)
+			result = append(result, deletes[:i]...)
+			result = append(result, deletes[i+1:]...)
+			return result, true
+		}
+	}
+	return deletes, false
 }
 
 // WriteTuples writes the given tuples to OpenFGA without reading or comparing existing tuples.

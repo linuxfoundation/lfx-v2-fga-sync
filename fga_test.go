@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base32"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -1412,6 +1413,154 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			}
 
 			// Verify all expectations were met
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+// makeValidationError creates an openfga.FgaApiValidationError containing the given message.
+func makeValidationError(message string) openfga.FgaApiValidationError {
+	req, _ := http.NewRequest("POST", "http://localhost:8080", nil) //nolint:noctx
+	resp := &http.Response{
+		StatusCode: 422,
+		Header:     http.Header{},
+		Request:    req,
+	}
+	body := []byte(`{"code":"validation_error","message":"` + message + `"}`)
+	return openfga.NewFgaApiValidationError("Write", nil, resp, body, "store-id")
+}
+
+func TestWriteAndDeleteTuplesBatch(t *testing.T) {
+	tests := []struct {
+		name        string
+		writes      []ClientTupleKey
+		deletes     []ClientTupleKeyWithoutCondition
+		mockSetup   func(*MockFgaClient)
+		expectError bool
+		description string
+	}{
+		{
+			name: "invalid write tuple skipped and retry succeeds",
+			writes: []ClientTupleKey{
+				{Object: "project:5e88f157", Relation: "executive_director", User: "user:alice"},
+				{Object: "project:5e88f157", Relation: "viewer", User: "user:*"},
+			},
+			deletes: nil,
+			mockSetup: func(m *MockFgaClient) {
+				// First call fails with invalid tuple error for executive_director
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 2
+				})).Return((*ClientWriteResponse)(nil),
+					makeValidationError("Invalid tuple 'project:5e88f157#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
+				).Once()
+				// Retry with only the valid tuple succeeds
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 1 && req.Writes[0].Relation == "viewer"
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "invalid write tuple should be removed and batch retried",
+		},
+		{
+			name:   "invalid delete tuple skipped and retry succeeds",
+			writes: nil,
+			deletes: []ClientTupleKeyWithoutCondition{
+				{Object: "vote_response:abc", Relation: "project", User: "project:123"},
+				{Object: "vote_response:abc", Relation: "viewer", User: "user:bob"},
+			},
+			mockSetup: func(m *MockFgaClient) {
+				// First call fails with invalid tuple error
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Deletes) == 2
+				})).Return((*ClientWriteResponse)(nil),
+					makeValidationError("Invalid tuple 'vote_response:abc#project@project:123'. Reason: relation 'vote_response#project' not found"),
+				).Once()
+				// Retry with only the valid delete tuple succeeds
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Deletes) == 1 && req.Deletes[0].Relation == "viewer"
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "invalid delete tuple should be removed and batch retried",
+		},
+		{
+			name: "all write tuples invalid returns nil",
+			writes: []ClientTupleKey{
+				{Object: "project:123", Relation: "executive_director", User: "user:alice"},
+			},
+			deletes: nil,
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Write", mock.Anything, mock.Anything).Return((*ClientWriteResponse)(nil),
+					makeValidationError("Invalid tuple 'project:123#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
+				).Once()
+			},
+			expectError: false,
+			description: "when all tuples are invalid the batch should succeed with no writes",
+		},
+		{
+			name: "non-validation error returned as-is",
+			writes: []ClientTupleKey{
+				{Object: "project:123", Relation: "viewer", User: "user:alice"},
+			},
+			deletes: nil,
+			mockSetup: func(m *MockFgaClient) {
+				m.On("Write", mock.Anything, mock.Anything).
+					Return((*ClientWriteResponse)(nil), errors.New("network error")).Once()
+			},
+			expectError: true,
+			description: "non-validation errors should be returned unchanged",
+		},
+		{
+			name: "multiple invalid tuples removed one by one",
+			writes: []ClientTupleKey{
+				{Object: "project:abc", Relation: "executive_director", User: "user:alice"},
+				{Object: "project:abc", Relation: "technical_advisor", User: "user:bob"},
+				{Object: "project:abc", Relation: "viewer", User: "user:*"},
+			},
+			deletes: nil,
+			mockSetup: func(m *MockFgaClient) {
+				// First call: 3 writes, fail on executive_director
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 3
+				})).Return((*ClientWriteResponse)(nil),
+					makeValidationError("Invalid tuple 'project:abc#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
+				).Once()
+				// Second call: 2 writes, fail on technical_advisor
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 2
+				})).Return((*ClientWriteResponse)(nil),
+					makeValidationError("Invalid tuple 'project:abc#technical_advisor@user:bob'. Reason: relation 'project#technical_advisor' not found"),
+				).Once()
+				// Third call: 1 write (viewer), succeeds
+				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == 1 && req.Writes[0].Relation == "viewer"
+				})).Return(&ClientWriteResponse{}, nil).Once()
+			},
+			expectError: false,
+			description: "multiple invalid tuples should each be removed and batch retried",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(MockFgaClient)
+			mockCache := NewMockKeyValue()
+			tt.mockSetup(mockClient)
+
+			service := FgaService{
+				client:      mockClient,
+				cacheBucket: mockCache,
+			}
+
+			err := service.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
+
+			if tt.expectError && err == nil {
+				t.Errorf("%s: expected error but got nil", tt.description)
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+
 			mockClient.AssertExpectations(t)
 		})
 	}
