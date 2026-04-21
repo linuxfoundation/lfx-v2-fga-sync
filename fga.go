@@ -495,18 +495,16 @@ func extractInvalidTuple(err error) (string, bool) {
 	if !errors.As(err, &validationErr) {
 		return "", false
 	}
-	msg := validationErr.Error()
 	const prefix = "Invalid tuple '"
-	start := strings.Index(msg, prefix)
-	if start == -1 {
+	_, afterPrefix, found := bytes.Cut([]byte(validationErr.Error()), []byte(prefix))
+	if !found {
 		return "", false
 	}
-	start += len(prefix)
-	end := strings.Index(msg[start:], "'")
-	if end == -1 {
+	tuple, _, found := bytes.Cut(afterPrefix, []byte("'"))
+	if !found {
 		return "", false
 	}
-	return msg[start : start+end], true
+	return string(tuple), true
 }
 
 // removeInvalidWriteTuple returns a new slice with the first write tuple matching
