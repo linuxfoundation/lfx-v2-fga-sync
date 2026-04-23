@@ -11,6 +11,8 @@ metadata:
   annotations:
     "helm.sh/resource-policy": keep
   {{- end }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
 spec:
   bucket: {{ .Values.nats.cacheFgaKvBucket.name }}
   history: {{ .Values.nats.cacheFgaKvBucket.history }}
