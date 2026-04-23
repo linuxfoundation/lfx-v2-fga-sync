@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,7 +54,7 @@ var (
 )
 
 // fetchToken retrieves a new client_credentials token from the OAuth token endpoint.
-func fetchToken() (*token, error) {
+func fetchToken(ctx context.Context) (*token, error) {
 	audience := ldapRestProxy
 	body := url.Values{
 		"grant_type":    {"client_credentials"},
@@ -61,7 +62,12 @@ func fetchToken() (*token, error) {
 		"client_secret": {clientSecret},
 		"audience":      {audience},
 	}
-	resp, err := httpClient.PostForm(oauthTokenEndpoint, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauthTokenEndpoint, strings.NewReader(body.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
@@ -79,9 +85,9 @@ func fetchToken() (*token, error) {
 }
 
 // ldapBearerToken returns a valid bearer token for the LDAP REST proxy.
-func ldapBearerToken() (string, error) {
+func ldapBearerToken(ctx context.Context) (string, error) {
 	if currentToken == nil || time.Now().After(currentToken.expiresAt) {
-		t, err := fetchToken()
+		t, err := fetchToken(ctx)
 		if err != nil {
 			return "", err
 		}
@@ -92,13 +98,13 @@ func ldapBearerToken() (string, error) {
 
 // ldapGroupMembers returns a map of lowercase username → original username for
 // all members of the given LDAP group.
-func ldapGroupMembers(group string) (map[string]string, error) {
-	bearer, err := ldapBearerToken()
+func ldapGroupMembers(ctx context.Context, group string) (map[string]string, error) {
+	bearer, err := ldapBearerToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 	reqURL := strings.TrimRight(ldapRestProxy, "/") + "/groups/" + url.PathEscape(group)
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -150,7 +156,7 @@ type fgaReadResponse struct {
 
 // fgaTeamMembers returns a map of lowercase username → original username for
 // all "user:" subjects with the "member" relation to the given team object.
-func fgaTeamMembers(teamObject string) (map[string]string, error) {
+func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, error) {
 	if openfgaStoreID == "" {
 		return nil, fmt.Errorf("OPENFGA_STORE_ID is required")
 	}
@@ -176,7 +182,7 @@ func fgaTeamMembers(teamObject string) (map[string]string, error) {
 			return nil, fmt.Errorf("marshal request: %w", err)
 		}
 
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 		if err != nil {
 			return nil, fmt.Errorf("build request: %w", err)
 		}
@@ -227,7 +233,7 @@ type fgaTupleKeys struct {
 }
 
 // fgaWrite writes or deletes tuples in OpenFGA.
-func fgaWrite(writes, deletes []fgaTupleKey) error {
+func fgaWrite(ctx context.Context, writes, deletes []fgaTupleKey) error {
 	endpoint := fmt.Sprintf("%s/stores/%s/write", strings.TrimRight(openfgaURL, "/"), openfgaStoreID)
 
 	// OpenFGA write API accepts at most 100 tuples per request; batch if needed.
@@ -248,7 +254,7 @@ func fgaWrite(writes, deletes []fgaTupleKey) error {
 			if err != nil {
 				return fmt.Errorf("marshal request: %w", err)
 			}
-			req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 			if err != nil {
 				return fmt.Errorf("build request: %w", err)
 			}
@@ -295,22 +301,22 @@ func usernameToSub(username string) (string, error) {
 
 // syncGroup syncs the members of an LDAP group to the corresponding OpenFGA
 // team object, adding and removing tuples as needed.
-func syncGroup(ldapGroup, fgaTeamObject string) error {
-	slog.Debug("fetching members from LDAP", "group", ldapGroup)
-	ldapMembers, err := ldapGroupMembers(ldapGroup)
+func syncGroup(ctx context.Context, ldapGroup, fgaTeamObject string) error {
+	slog.DebugContext(ctx, "fetching members from LDAP", "group", ldapGroup)
+	ldapMembers, err := ldapGroupMembers(ctx, ldapGroup)
 	if err != nil {
 		return fmt.Errorf("LDAP error for %s: %w", ldapGroup, err)
 	}
-	slog.Debug("fetched LDAP group members",
+	slog.DebugContext(ctx, "fetched LDAP group members",
 		"group", ldapGroup,
 		"count", len(ldapMembers))
 
-	slog.Debug("fetching members from OpenFGA", "object", fgaTeamObject)
-	fgaMembers, err := fgaTeamMembers(fgaTeamObject)
+	slog.DebugContext(ctx, "fetching members from OpenFGA", "object", fgaTeamObject)
+	fgaMembers, err := fgaTeamMembers(ctx, fgaTeamObject)
 	if err != nil {
 		return fmt.Errorf("OpenFGA error for %s: %w", fgaTeamObject, err)
 	}
-	slog.Debug("fetched OpenFGA team members",
+	slog.DebugContext(ctx, "fetched OpenFGA team members",
 		"object", fgaTeamObject,
 		"count", len(fgaMembers))
 
@@ -320,7 +326,7 @@ func syncGroup(ldapGroup, fgaTeamObject string) error {
 		if _, ok := fgaMembers[lower]; !ok {
 			sub, err := usernameToSub(original)
 			if err != nil {
-				slog.Warn("skipping user", "username", original, "reason", err.Error())
+				slog.WarnContext(ctx, "skipping user", "username", original, "reason", err.Error())
 				continue
 			}
 			toAdd = append(toAdd, fgaTupleKey{
@@ -341,29 +347,29 @@ func syncGroup(ldapGroup, fgaTeamObject string) error {
 	}
 
 	if len(toAdd) == 0 && len(toRemove) == 0 {
-		slog.Debug("already in sync", "object", fgaTeamObject)
+		slog.DebugContext(ctx, "already in sync", "object", fgaTeamObject)
 		return nil
 	}
 
 	for _, t := range toAdd {
-		slog.Info("adding member", "user", t.User, "object", fgaTeamObject)
+		slog.InfoContext(ctx, "adding member", "user", t.User, "object", fgaTeamObject)
 	}
 	for _, t := range toRemove {
-		slog.Info("removing member", "user", t.User, "object", fgaTeamObject)
+		slog.InfoContext(ctx, "removing member", "user", t.User, "object", fgaTeamObject)
 	}
 
 	if dryRun {
-		slog.Info("dry run; skipping write",
+		slog.InfoContext(ctx, "dry run; skipping write",
 			"object", fgaTeamObject,
 			"would_add", len(toAdd),
 			"would_remove", len(toRemove))
 		return nil
 	}
 
-	if err := fgaWrite(toAdd, toRemove); err != nil {
+	if err := fgaWrite(ctx, toAdd, toRemove); err != nil {
 		return fmt.Errorf("write error for %s: %w", fgaTeamObject, err)
 	}
-	slog.Info("sync complete",
+	slog.InfoContext(ctx, "sync complete",
 		"object", fgaTeamObject,
 		"added", len(toAdd),
 		"removed", len(toRemove))
@@ -402,6 +408,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
 	// groups maps LDAP group names to OpenFGA team object names.
 	groups := [][2]string{
 		{"lf-staff", "team:lf-staff"},
@@ -410,8 +419,8 @@ func main() {
 
 	var failed bool
 	for _, g := range groups {
-		if err := syncGroup(g[0], g[1]); err != nil {
-			slog.Error("sync failed", "group", g[0], "error", err.Error())
+		if err := syncGroup(ctx, g[0], g[1]); err != nil {
+			slog.ErrorContext(ctx, "sync failed", "group", g[0], "error", err.Error())
 			failed = true
 		}
 	}
