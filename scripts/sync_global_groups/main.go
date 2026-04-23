@@ -80,7 +80,11 @@ func fetchToken(ctx context.Context) (*token, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
 		return nil, fmt.Errorf("decode token: %w", err)
 	}
-	t.expiresAt = time.Now().Add(time.Duration(t.ExpiresIn-30) * time.Second)
+	refreshSkew := 30.0
+	if t.ExpiresIn <= refreshSkew {
+		refreshSkew = t.ExpiresIn / 2
+	}
+	t.expiresAt = time.Now().Add(time.Duration((t.ExpiresIn - refreshSkew) * float64(time.Second)))
 	return &t, nil
 }
 
