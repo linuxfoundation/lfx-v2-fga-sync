@@ -207,8 +207,11 @@ func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, 
 		for _, t := range fgaResp.Tuples {
 			user := t.Key.User
 			// Only consider "user:" subjects; ignore wildcards or other types.
+			// Strip the "user:" prefix, then strip the "auth0|" prefix added by
+			// usernameToSub so the key matches the raw LDAP username for diffing.
 			if after, ok := strings.CutPrefix(user, "user:"); ok {
-				result[strings.ToLower(after)] = after
+				username, _ := strings.CutPrefix(after, "auth0|")
+				result[strings.ToLower(username)] = after
 			}
 		}
 
@@ -320,7 +323,8 @@ func syncGroup(ctx context.Context, ldapGroup, fgaTeamObject string) error {
 		"object", fgaTeamObject,
 		"count", len(fgaMembers))
 
-	var toAdd, toRemove []fgaTupleKey
+	toAdd := make([]fgaTupleKey, 0, len(ldapMembers))
+	toRemove := make([]fgaTupleKey, 0, len(fgaMembers))
 
 	for lower, original := range ldapMembers {
 		if _, ok := fgaMembers[lower]; !ok {
