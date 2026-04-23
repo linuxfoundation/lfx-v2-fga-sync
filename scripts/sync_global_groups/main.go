@@ -197,11 +197,14 @@ func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, 
 		if err != nil {
 			return nil, fmt.Errorf("OpenFGA request: %w", err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read OpenFGA response body: %w", err)
+		}
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("OpenFGA returned %d", resp.StatusCode)
+			return nil, fmt.Errorf("OpenFGA returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 		var fgaResp fgaReadResponse
 		if err := json.Unmarshal(body, &fgaResp); err != nil {
@@ -269,10 +272,18 @@ func fgaWrite(ctx context.Context, writes, deletes []fgaTupleKey) error {
 			if err != nil {
 				return fmt.Errorf("OpenFGA write request: %w", err)
 			}
-			_, _ = io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			if err != nil {
+				return fmt.Errorf("read OpenFGA write response body: %w", err)
+			}
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("OpenFGA write returned %d", resp.StatusCode)
+				const maxBody = 1024
+				bodyText := strings.TrimSpace(string(body))
+				if len(bodyText) > maxBody {
+					bodyText = bodyText[:maxBody] + "...(truncated)"
+				}
+				return fmt.Errorf("OpenFGA write returned %d: %s", resp.StatusCode, bodyText)
 			}
 		}
 		return nil
