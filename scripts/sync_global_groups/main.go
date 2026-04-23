@@ -71,13 +71,13 @@ func fetchToken(ctx context.Context) (*token, error) {
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("token request returned %d: %s", resp.StatusCode, data)
+		return nil, fmt.Errorf("token request returned %d", resp.StatusCode)
 	}
 	var t token
-	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("decode token: %w", err)
 	}
 	refreshSkew := 30.0
@@ -158,8 +158,9 @@ type fgaReadResponse struct {
 	ContinuationToken string `json:"continuation_token"`
 }
 
-// fgaTeamMembers returns a map of lowercase username → original username for
-// all "user:" subjects with the "member" relation to the given team object.
+// fgaTeamMembers returns a map of lowercase username → OpenFGA subject without
+// the "user:" prefix (e.g. "auth0|username") for all "user:auth0|..." subjects
+// with the "member" relation to the given team object.
 func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, error) {
 	if openfgaStoreID == "" {
 		return nil, fmt.Errorf("OPENFGA_STORE_ID is required")
@@ -200,9 +201,8 @@ func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, 
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("OpenFGA returned %d: %s", resp.StatusCode, body)
+			return nil, fmt.Errorf("OpenFGA returned %d", resp.StatusCode)
 		}
-
 		var fgaResp fgaReadResponse
 		if err := json.Unmarshal(body, &fgaResp); err != nil {
 			return nil, fmt.Errorf("decode OpenFGA response: %w", err)
@@ -210,12 +210,11 @@ func fgaTeamMembers(ctx context.Context, teamObject string) (map[string]string, 
 
 		for _, t := range fgaResp.Tuples {
 			user := t.Key.User
-			// Only consider "user:" subjects; ignore wildcards or other types.
-			// Strip the "user:" prefix, then strip the "auth0|" prefix added by
-			// usernameToSub so the key matches the raw LDAP username for diffing.
-			if after, ok := strings.CutPrefix(user, "user:"); ok {
-				username, _ := strings.CutPrefix(after, "auth0|")
-				result[strings.ToLower(username)] = after
+			// Only consider "user:auth0|..." subjects — the format written by
+			// usernameToSub. Ignore wildcards, other subject types, and users
+			// from other identity providers so they are not unintentionally removed.
+			if after, ok := strings.CutPrefix(user, "user:auth0|"); ok {
+				result[strings.ToLower(after)] = "auth0|" + after
 			}
 		}
 
@@ -270,10 +269,10 @@ func fgaWrite(ctx context.Context, writes, deletes []fgaTupleKey) error {
 			if err != nil {
 				return fmt.Errorf("OpenFGA write request: %w", err)
 			}
-			body, _ := io.ReadAll(resp.Body)
+			_, _ = io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
-				return fmt.Errorf("OpenFGA write returned %d: %s", resp.StatusCode, body)
+				return fmt.Errorf("OpenFGA write returned %d", resp.StatusCode)
 			}
 		}
 		return nil
