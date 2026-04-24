@@ -311,7 +311,7 @@ var usernameRegexp = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,58}[A-Za-z
 // the caller should skip the user.
 func usernameToSub(username string) (string, error) {
 	if !usernameRegexp.MatchString(username) {
-		return "", fmt.Errorf("username %q does not match expected pattern; skipping", username)
+		return "", fmt.Errorf("username %q does not match expected pattern", username)
 	}
 	return "auth0|" + username, nil
 }
