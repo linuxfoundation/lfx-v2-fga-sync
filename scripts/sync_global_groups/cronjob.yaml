@@ -25,6 +25,8 @@ spec:
       backoffLimit: 0
       template:
         metadata:
+          labels:
+            tags.datadoghq.com/service: lfx-v2-fga-sync
           annotations:
             ad.datadoghq.com/sync.logs: '[{"service": "lfx-v2-fga-sync", "source": "go"}]'
         spec:
