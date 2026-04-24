@@ -29,7 +29,7 @@ var (
 	openfgaURL         = os.Getenv("OPENFGA_API_URL")
 	openfgaStoreID     = os.Getenv("OPENFGA_STORE_ID")
 	debug              = isTruthy(os.Getenv("DEBUG"))
-	dryRun             = isTruthy(os.Getenv("DRYRUN"))
+	dryRun             = isTruthy(os.Getenv("DRY_RUN"))
 )
 
 // isTruthy returns true if the value is a common truthy string.
@@ -71,8 +71,11 @@ func fetchToken(ctx context.Context) (*token, error) {
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
-	data, _ := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read token response body: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("token request returned %d", resp.StatusCode)
 	}
@@ -108,7 +111,7 @@ func ldapGroupMembers(ctx context.Context, group string) (map[string]string, err
 		return nil, err
 	}
 	reqURL := strings.TrimRight(ldapRestProxy, "/") + "/groups/" + url.PathEscape(group)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -120,7 +123,10 @@ func ldapGroupMembers(ctx context.Context, group string) (map[string]string, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("LDAP returned %d (could not read body: %w)", resp.StatusCode, err)
+		}
 		return nil, fmt.Errorf("LDAP returned %d: %s", resp.StatusCode, data)
 	}
 
@@ -443,6 +449,7 @@ func main() {
 		}
 	}
 	if failed {
+		cancel()
 		os.Exit(1)
 	}
 }

@@ -80,7 +80,8 @@
     "unmarshals",
     "uids",
     "tracecontext",
-    "GOTOOLCHAIN"
+    "GOTOOLCHAIN",
+    "datadoghq"
   ],
   "overrides": [
     {
