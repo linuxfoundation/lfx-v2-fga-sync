@@ -523,7 +523,10 @@ func removeInvalidWriteTuple(writes []ClientTupleKey, tupleStr string) ([]Client
 
 // removeInvalidDeleteTuple returns a new slice with the first delete tuple matching
 // tupleStr removed. Returns the original slice and false if no match is found.
-func removeInvalidDeleteTuple(deletes []ClientTupleKeyWithoutCondition, tupleStr string) ([]ClientTupleKeyWithoutCondition, bool) {
+func removeInvalidDeleteTuple(
+	deletes []ClientTupleKeyWithoutCondition,
+	tupleStr string,
+) ([]ClientTupleKeyWithoutCondition, bool) {
 	for i, t := range deletes {
 		if t.Object+"#"+t.Relation+"@"+t.User == tupleStr {
 			result := make([]ClientTupleKeyWithoutCondition, 0, len(deletes)-1)
