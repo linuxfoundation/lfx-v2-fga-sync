@@ -116,7 +116,8 @@
         "tracecontext",
         "traceparent",
         "tracestate",
-        "INTERNALERRORCODE"
+        "INTERNALERRORCODE",
+        "noctx"
       ]
     },
     {
