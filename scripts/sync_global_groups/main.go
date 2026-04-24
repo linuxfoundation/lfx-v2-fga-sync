@@ -433,7 +433,6 @@ func main() {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
 
 	// groups maps LDAP group names to OpenFGA team object names.
 	groups := [][2]string{
@@ -448,8 +447,8 @@ func main() {
 			failed = true
 		}
 	}
+	cancel()
 	if failed {
-		cancel()
 		os.Exit(1)
 	}
 }
