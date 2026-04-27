@@ -259,7 +259,12 @@ func startHTTPListener(bind, port string) {
 		addr = bind + ":" + port
 	}
 	// Wrap the handler with OpenTelemetry instrumentation
-	handler := otelhttp.NewHandler(http.DefaultServeMux, "fga-sync")
+	handler := otelhttp.NewHandler(http.DefaultServeMux, "fga-sync",
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			p := r.URL.Path
+			return p != "/livez" && p != "/readyz"
+		}),
+	)
 
 	httpServer = &http.Server{
 		Addr:              addr,
