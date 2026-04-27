@@ -262,7 +262,7 @@ func startHTTPListener(bind, port string) {
 	handler := otelhttp.NewHandler(http.DefaultServeMux, "fga-sync",
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			p := r.URL.Path
-			return p != "/healthz" && p != "/livez" && p != "/readyz"
+			return p != "/livez" && p != "/readyz"
 		}),
 	)
 
