@@ -23,8 +23,8 @@ project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
 cached results are returned first.
 
 ```text
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456  false
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456  true
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456\tfalse
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456\ttrue
 ```
 
 ### Read Tuples
