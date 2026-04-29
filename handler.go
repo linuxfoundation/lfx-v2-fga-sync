@@ -159,4 +159,3 @@ func (h *HandlerService) processStandardAccessUpdate(
 
 	return nil
 }
-

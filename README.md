@@ -200,7 +200,8 @@ Returns `200 OK` if the service is ready to handle requests (NATS connected).
 
 ### NATS API
 
-The service subscribes to the following NATS subjects. See [docs/client-guide.md](docs/client-guide.md) for message formats, examples, and integration guidance.
+The service subscribes to the following NATS subjects. See [docs/client-guide.md](docs/client-guide.md) for message
+formats, examples, and integration guidance.
 
 #### Request/Reply Subjects
 
@@ -217,8 +218,6 @@ The service subscribes to the following NATS subjects. See [docs/client-guide.md
 | `lfx.fga-sync.delete_access` | Delete all access control for a resource |
 | `lfx.fga-sync.member_put` | Add member(s) with one or more relations |
 | `lfx.fga-sync.member_remove` | Remove member relations |
-
-> **Legacy subjects** (`lfx.update_access.<resource_type>`, `lfx.delete_all_access.<resource_type>`, etc.) remain supported for existing publishers. New integrations should use the generic `lfx.fga-sync.*` subjects above.
 
 ## 🧪 Development
 
