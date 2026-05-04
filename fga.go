@@ -264,6 +264,17 @@ func (s FgaService) SyncObjectTuples(
 				).DebugContext(ctx, "skipping deletion of excluded relation")
 				continue
 			}
+			// Preserve team userset tuples (e.g. team:lf-staff#member) — these are
+			// managed by a separate workflow and must not be clobbered by resource
+			// service sync operations.
+			if strings.HasPrefix(tuple.Key.User, "team:") {
+				logger.With(
+					"user", tuple.Key.User,
+					"relation", tuple.Key.Relation,
+					"object", object,
+				).DebugContext(ctx, "skipping deletion of team userset tuple")
+				continue
+			}
 			logger.With(
 				"user", tuple.Key.User,
 				"relation", tuple.Key.Relation,

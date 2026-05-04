@@ -1418,6 +1418,113 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 	}
 }
 
+// TestSyncObjectTuples_PreserveTeamUsersets tests that team userset tuples are never deleted
+// during a sync operation, regardless of the desired relations list.
+func TestSyncObjectTuples_PreserveTeamUsersets(t *testing.T) {
+	tests := []struct {
+		name             string
+		object           string
+		desiredRelations []ClientTupleKey
+		existingTuples   []openfga.Tuple
+		expectedWrites   int
+		expectedDeletes  int
+		description      string
+	}{
+		{
+			name:   "team userset tuples preserved during full project sync",
+			object: "project:proj-1",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:writer1", Relation: "writer", Object: "project:proj-1"},
+				{User: "user:auditor1", Relation: "auditor", Object: "project:proj-1"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "user:auditor1", Relation: "auditor", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "auditor", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:otherteam#member", Relation: "owner", Object: "project:proj-1"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 0,
+			description:     "should preserve team:myteam#member and team:otherteam#member tuples",
+		},
+		{
+			name:   "team userset preserved while unrelated user tuple is deleted",
+			object: "project:proj-2",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:new-writer", Relation: "writer", Object: "project:proj-2"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:old-writer", Relation: "writer", Object: "project:proj-2"}},
+				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "owner", Object: "project:proj-2"}},
+			},
+			expectedWrites:  1, // new-writer needs to be added
+			expectedDeletes: 1, // old-writer should be deleted; team tuple preserved
+			description:     "should delete stale user tuple but preserve team userset",
+		},
+		{
+			name:   "multiple team usersets across multiple relations all preserved",
+			object: "project:proj-3",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "project:proj-3"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:anotherteam#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:teamalpha#member", Relation: "owner", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:teambeta#member", Relation: "owner", Object: "project:proj-3"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 0,
+			description:     "should preserve all team userset tuples regardless of relation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(MockFgaClient)
+			mockClient.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+				return req.Object != nil && *req.Object == tt.object
+			}), mock.Anything).Return(&ClientReadResponse{
+				Tuples: tt.existingTuples,
+			}, nil).Once()
+
+			if tt.expectedWrites > 0 || tt.expectedDeletes > 0 {
+				mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					return len(req.Writes) == tt.expectedWrites && len(req.Deletes) == tt.expectedDeletes
+				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
+			}
+
+			mockCache := new(MockNatsKeyValue)
+			mockCache.On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+
+			service := FgaService{
+				client:      mockClient,
+				cacheBucket: mockCache,
+			}
+			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations)
+
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+			if len(writes) != tt.expectedWrites {
+				t.Errorf("%s: expected %d writes, got %d", tt.description, tt.expectedWrites, len(writes))
+			}
+			if len(deletes) != tt.expectedDeletes {
+				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
+			}
+			// Verify no team userset tuples appear in deletes.
+			for _, del := range deletes {
+				if strings.HasPrefix(del.User, "team:") {
+					t.Errorf("%s: team userset tuple '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
+				}
+			}
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
 // makeValidationError creates an openfga.FgaApiValidationError containing the given message.
 func makeValidationError(message string) openfga.FgaApiValidationError {
 	req, _ := http.NewRequest("POST", "http://localhost:8080", nil) //nolint:noctx
