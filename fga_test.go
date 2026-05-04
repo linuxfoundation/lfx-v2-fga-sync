@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -1413,6 +1414,138 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			}
 
 			// Verify all expectations were met
+			mockClient.AssertExpectations(t)
+		})
+	}
+}
+
+// TestSyncObjectTuples_PreserveTeamGrants tests that team member grant tuples are never deleted
+// during a sync operation, regardless of the desired relations list.
+func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
+	tests := []struct {
+		name             string
+		object           string
+		desiredRelations []ClientTupleKey
+		existingTuples   []openfga.Tuple
+		expectedWrites   int
+		expectedDeletes  int
+		description      string
+	}{
+		{
+			name:   "team member grants preserved during full project sync",
+			object: "project:proj-1",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:writer1", Relation: "writer", Object: "project:proj-1"},
+				{User: "user:auditor1", Relation: "auditor", Object: "project:proj-1"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "user:auditor1", Relation: "auditor", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "auditor", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:other-team#member", Relation: "owner", Object: "project:proj-1"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 0,
+			description:     "should preserve team:my-team#member and team:other-team#member tuples",
+		},
+		{
+			name:   "team member grant preserved while stale user tuple is deleted",
+			object: "project:proj-2",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:new-writer", Relation: "writer", Object: "project:proj-2"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:old-writer", Relation: "writer", Object: "project:proj-2"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "owner", Object: "project:proj-2"}},
+			},
+			expectedWrites:  1, // new-writer needs to be added
+			expectedDeletes: 1, // old-writer should be deleted; team grant preserved
+			description:     "should delete stale user tuple but preserve team member grant",
+		},
+		{
+			name:   "multiple team member grants across multiple relations all preserved",
+			object: "project:proj-3",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:*", Relation: "viewer", Object: "project:proj-3"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:another-team#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:team-alpha#member", Relation: "owner", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:team-beta#member", Relation: "owner", Object: "project:proj-3"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 0,
+			description:     "should preserve all team member grant tuples regardless of relation",
+		},
+		{
+			// delete-all path: SyncObjectTuples(ctx, object, nil) is called by genericDeleteAccessHandler.
+			// Team member grants are intentionally preserved even on delete-all because teams are managed
+			// externally to the attribute sync/indexing flow.
+			name:             "delete-all path preserves team member grants while removing user tuples",
+			object:           "project:proj-4",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "project:proj-4"}},
+				{Key: openfga.TupleKey{User: "user:auditor1", Relation: "auditor", Object: "project:proj-4"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "owner", Object: "project:proj-4"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 2, // user tuples deleted; team member grant preserved
+			description:     "delete-all should remove user tuples but preserve team member grants",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockClient := new(MockFgaClient)
+			mockClient.On("Read", mock.Anything, mock.MatchedBy(func(req ClientReadRequest) bool {
+				return req.Object != nil && *req.Object == tt.object
+			}), mock.Anything).Return(&ClientReadResponse{
+				Tuples: tt.existingTuples,
+			}, nil).Once()
+
+			if tt.expectedWrites > 0 || tt.expectedDeletes > 0 {
+				mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+					if len(req.Writes) != tt.expectedWrites || len(req.Deletes) != tt.expectedDeletes {
+						return false
+					}
+					// Assert no team member grants appear in deletes.
+					for _, del := range req.Deletes {
+						if strings.HasPrefix(del.User, "team:") {
+							return false
+						}
+					}
+					return true
+				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
+			}
+
+			mockCache := new(MockNatsKeyValue)
+			mockCache.On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
+
+			service := FgaService{
+				client:      mockClient,
+				cacheBucket: mockCache,
+			}
+			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations)
+
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.description, err)
+			}
+			if len(writes) != tt.expectedWrites {
+				t.Errorf("%s: expected %d writes, got %d", tt.description, tt.expectedWrites, len(writes))
+			}
+			if len(deletes) != tt.expectedDeletes {
+				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
+			}
+			// Verify no team member grant tuples appear in deletes.
+			for _, del := range deletes {
+				if strings.HasPrefix(del.User, "team:") {
+					t.Errorf("%s: team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
+				}
+			}
 			mockClient.AssertExpectations(t)
 		})
 	}

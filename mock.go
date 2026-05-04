@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -119,7 +120,7 @@ func NewMockKeyValue() *MockKeyValue {
 }
 
 // Get implements the jetstream.KeyValue interface
-func (m *MockKeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+func (m *MockKeyValue) Get(_ context.Context, key string) (jetstream.KeyValueEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -140,7 +141,7 @@ func (m *MockKeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueE
 }
 
 // Put implements the jetstream.KeyValue interface
-func (m *MockKeyValue) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+func (m *MockKeyValue) Put(_ context.Context, key string, value []byte) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -179,10 +180,23 @@ type MockKeyValueEntry struct {
 	revision uint64
 }
 
-func (m *MockKeyValueEntry) Bucket() string                  { return "test-bucket" }
-func (m *MockKeyValueEntry) Key() string                     { return m.key }
-func (m *MockKeyValueEntry) Value() []byte                   { return m.value }
-func (m *MockKeyValueEntry) Created() time.Time              { return m.created }
-func (m *MockKeyValueEntry) Revision() uint64                { return m.revision }
-func (m *MockKeyValueEntry) Delta() uint64                   { return 0 }
+// Bucket returns the bucket name for this entry.
+func (m *MockKeyValueEntry) Bucket() string { return "test-bucket" }
+
+// Key returns the key for this entry.
+func (m *MockKeyValueEntry) Key() string { return m.key }
+
+// Value returns the value for this entry.
+func (m *MockKeyValueEntry) Value() []byte { return m.value }
+
+// Created returns the creation time for this entry.
+func (m *MockKeyValueEntry) Created() time.Time { return m.created }
+
+// Revision returns the revision number for this entry.
+func (m *MockKeyValueEntry) Revision() uint64 { return m.revision }
+
+// Delta returns the delta for this entry.
+func (m *MockKeyValueEntry) Delta() uint64 { return 0 }
+
+// Operation returns the operation type for this entry.
 func (m *MockKeyValueEntry) Operation() jetstream.KeyValueOp { return jetstream.KeyValuePut }

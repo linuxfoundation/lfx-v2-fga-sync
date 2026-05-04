@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// Package constants defines shared NATS and OpenFGA constants for the fga-sync service.
 package constants
 
 // NATS Key-Value store bucket names.
