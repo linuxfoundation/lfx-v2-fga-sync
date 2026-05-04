@@ -1418,9 +1418,9 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 	}
 }
 
-// TestSyncObjectTuples_PreserveTeamUsersets tests that team userset tuples are never deleted
+// TestSyncObjectTuples_PreserveTeamGrants tests that team member grant tuples are never deleted
 // during a sync operation, regardless of the desired relations list.
-func TestSyncObjectTuples_PreserveTeamUsersets(t *testing.T) {
+func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 	tests := []struct {
 		name             string
 		object           string
@@ -1431,7 +1431,7 @@ func TestSyncObjectTuples_PreserveTeamUsersets(t *testing.T) {
 		description      string
 	}{
 		{
-			name:   "team userset tuples preserved during full project sync",
+			name:   "team member grants preserved during full project sync",
 			object: "project:proj-1",
 			desiredRelations: []ClientTupleKey{
 				{User: "user:writer1", Relation: "writer", Object: "project:proj-1"},
@@ -1440,43 +1440,43 @@ func TestSyncObjectTuples_PreserveTeamUsersets(t *testing.T) {
 			existingTuples: []openfga.Tuple{
 				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "project:proj-1"}},
 				{Key: openfga.TupleKey{User: "user:auditor1", Relation: "auditor", Object: "project:proj-1"}},
-				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "auditor", Object: "project:proj-1"}},
-				{Key: openfga.TupleKey{User: "team:otherteam#member", Relation: "owner", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "auditor", Object: "project:proj-1"}},
+				{Key: openfga.TupleKey{User: "team:other-team#member", Relation: "owner", Object: "project:proj-1"}},
 			},
 			expectedWrites:  0,
 			expectedDeletes: 0,
-			description:     "should preserve team:myteam#member and team:otherteam#member tuples",
+			description:     "should preserve team:my-team#member and team:other-team#member tuples",
 		},
 		{
-			name:   "team userset preserved while unrelated user tuple is deleted",
+			name:   "team member grant preserved while stale user tuple is deleted",
 			object: "project:proj-2",
 			desiredRelations: []ClientTupleKey{
 				{User: "user:new-writer", Relation: "writer", Object: "project:proj-2"},
 			},
 			existingTuples: []openfga.Tuple{
 				{Key: openfga.TupleKey{User: "user:old-writer", Relation: "writer", Object: "project:proj-2"}},
-				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "owner", Object: "project:proj-2"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "owner", Object: "project:proj-2"}},
 			},
 			expectedWrites:  1, // new-writer needs to be added
-			expectedDeletes: 1, // old-writer should be deleted; team tuple preserved
-			description:     "should delete stale user tuple but preserve team userset",
+			expectedDeletes: 1, // old-writer should be deleted; team grant preserved
+			description:     "should delete stale user tuple but preserve team member grant",
 		},
 		{
-			name:   "multiple team usersets across multiple relations all preserved",
+			name:   "multiple team member grants across multiple relations all preserved",
 			object: "project:proj-3",
 			desiredRelations: []ClientTupleKey{
 				{User: "user:*", Relation: "viewer", Object: "project:proj-3"},
 			},
 			existingTuples: []openfga.Tuple{
 				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "project:proj-3"}},
-				{Key: openfga.TupleKey{User: "team:myteam#member", Relation: "auditor", Object: "project:proj-3"}},
-				{Key: openfga.TupleKey{User: "team:anotherteam#member", Relation: "auditor", Object: "project:proj-3"}},
-				{Key: openfga.TupleKey{User: "team:teamalpha#member", Relation: "owner", Object: "project:proj-3"}},
-				{Key: openfga.TupleKey{User: "team:teambeta#member", Relation: "owner", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:another-team#member", Relation: "auditor", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:team-alpha#member", Relation: "owner", Object: "project:proj-3"}},
+				{Key: openfga.TupleKey{User: "team:team-beta#member", Relation: "owner", Object: "project:proj-3"}},
 			},
 			expectedWrites:  0,
 			expectedDeletes: 0,
-			description:     "should preserve all team userset tuples regardless of relation",
+			description:     "should preserve all team member grant tuples regardless of relation",
 		},
 	}
 
@@ -1514,10 +1514,10 @@ func TestSyncObjectTuples_PreserveTeamUsersets(t *testing.T) {
 			if len(deletes) != tt.expectedDeletes {
 				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
 			}
-			// Verify no team userset tuples appear in deletes.
+			// Verify no team member grant tuples appear in deletes.
 			for _, del := range deletes {
 				if strings.HasPrefix(del.User, "team:") {
-					t.Errorf("%s: team userset tuple '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
+					t.Errorf("%s: team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
 				}
 			}
 			mockClient.AssertExpectations(t)
