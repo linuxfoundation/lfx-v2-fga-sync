@@ -1478,6 +1478,22 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			expectedDeletes: 0,
 			description:     "should preserve all team member grant tuples regardless of relation",
 		},
+		{
+			// delete-all path: SyncObjectTuples(ctx, object, nil) is called by genericDeleteAccessHandler.
+			// Team member grants are intentionally preserved even on delete-all because teams are managed
+			// externally to the attribute sync/indexing flow.
+			name:             "delete-all path preserves team member grants while removing user tuples",
+			object:           "project:proj-4",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "project:proj-4"}},
+				{Key: openfga.TupleKey{User: "user:auditor1", Relation: "auditor", Object: "project:proj-4"}},
+				{Key: openfga.TupleKey{User: "team:my-team#member", Relation: "owner", Object: "project:proj-4"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 2, // user tuples deleted; team member grant preserved
+			description:     "delete-all should remove user tuples but preserve team member grants",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1491,7 +1507,16 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 
 			if tt.expectedWrites > 0 || tt.expectedDeletes > 0 {
 				mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
-					return len(req.Writes) == tt.expectedWrites && len(req.Deletes) == tt.expectedDeletes
+					if len(req.Writes) != tt.expectedWrites || len(req.Deletes) != tt.expectedDeletes {
+						return false
+					}
+					// Assert no team member grants appear in deletes.
+					for _, del := range req.Deletes {
+						if strings.HasPrefix(del.User, "team:") {
+							return false
+						}
+					}
+					return true
 				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
 			}
 
