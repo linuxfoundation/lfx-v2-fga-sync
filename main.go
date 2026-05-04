@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The fga-sync service.
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -157,7 +157,7 @@ func run(bind, port string) error {
 	natsConn, err = nats.Connect(
 		natsURL,
 		nats.DrainTimeout(gracefulShutdownSeconds*time.Second),
-		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			if err != nil {
 				logger.With(errKey, err).Warn("NATS disconnected with error")
 			} else {

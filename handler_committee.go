@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The fga-sync service.
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
