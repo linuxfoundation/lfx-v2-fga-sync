@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The fga-sync service.
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -970,7 +970,7 @@ func (h *HandlerService) v1RemovePastMeetingParticipant(
 	ctx context.Context,
 	userPrincipal,
 	pastMeetingObject string,
-	participant *v1PastMeetingParticipantStub,
+	_ *v1PastMeetingParticipantStub,
 ) error {
 	err := h.fgaService.DeleteTuplesByUserAndObject(ctx, userPrincipal, pastMeetingObject)
 	if err != nil {

@@ -37,7 +37,6 @@ DISABLE_LINTERS:
   - REPOSITORY_TRIVY # Need to look into this since it is failing for unknown reasons
 
 # Go-specific settings
-GO_REVIVE_FILTER_REGEX_EXCLUDE: "(that stutters; consider calling this|should not use dot imports)"
 GO_SEC_ARGUMENTS: -fmt sarif -out gosec.sarif -quiet
 
 # YAML settings

@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// Package utils provides shared utilities for OpenTelemetry and other helpers.
 package utils
 
 import (
