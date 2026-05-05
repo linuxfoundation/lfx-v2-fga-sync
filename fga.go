@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The fga-sync service.
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -207,6 +207,7 @@ func (s FgaService) getRelationsMap(object string, relations []ClientTupleKey) (
 	return relationsMap, nil
 }
 
+// SyncObjectTuples synchronizes the OpenFGA tuples for an object to match the desired relations.
 func (s FgaService) SyncObjectTuples(
 	ctx context.Context,
 	object string,
@@ -262,6 +263,17 @@ func (s FgaService) SyncObjectTuples(
 					"relation", tuple.Key.Relation,
 					"object", object,
 				).DebugContext(ctx, "skipping deletion of excluded relation")
+				continue
+			}
+			// Preserve team member grant tuples (e.g. team:my-team#member) — these are
+			// managed by a separate workflow and must not be clobbered by resource
+			// service sync operations.
+			if strings.HasPrefix(tuple.Key.User, "team:") {
+				logger.With(
+					"user", tuple.Key.User,
+					"relation", tuple.Key.Relation,
+					"object", object,
+				).DebugContext(ctx, "skipping deletion of team member grant tuple")
 				continue
 			}
 			logger.With(
@@ -581,7 +593,7 @@ func (s FgaService) DeleteTuplesByUserAndObject(ctx context.Context, user, objec
 	return s.DeleteTuples(ctx, tuplesWithoutConditions)
 }
 
-// GetTuplesByUser returns all tuples for a specific user.
+// GetTuplesByUserAndObject returns all tuples for a specific user on a given object.
 func (s FgaService) GetTuplesByUserAndObject(ctx context.Context, user, object string) ([]ClientTupleKey, error) {
 	tuples, err := s.ReadObjectTuples(ctx, object)
 	if err != nil {
@@ -633,10 +645,10 @@ func (s FgaService) getLastCacheInvalidation(ctx context.Context) (time.Time, er
 }
 
 func (s FgaService) appendToMessage(
+	ctx context.Context,
 	message []byte,
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
-	ctx context.Context,
 ) []byte {
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -797,7 +809,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	}
 
 	// Loop through the responses.
-	message = s.appendToMessage(message, *batchResp.Result, mapCorrelationIDToTuple, ctx)
+	message = s.appendToMessage(ctx, message, *batchResp.Result, mapCorrelationIDToTuple)
 
 	if len(message) < 1 {
 		// This shouldn't happen (*batchResp was checked for ==0 above with an

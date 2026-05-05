@@ -1,0 +1,10 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+
+ignoreGeneratedHeader = true
+
+# [rule.dot-imports] is disabled because the OpenFGA Go SDK requires dot-importing
+# github.com/openfga/go-sdk/client to avoid verbose "client." prefixes on all SDK types.
+# See: https://github.com/openfga/go-sdk#readme
+[rule.dot-imports]
+  Disabled = true

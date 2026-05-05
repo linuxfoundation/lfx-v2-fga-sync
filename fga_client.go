@@ -1,6 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -23,7 +24,7 @@ type IFgaClient interface {
 	) (*ClientListObjectsResponse, error)
 }
 
-// FgaClient is a wrapper around the OpenFGA client.
+// FgaAdapter is a wrapper around the OpenFGA client that implements IFgaClient.
 type FgaAdapter struct {
 	OpenFgaClient
 }

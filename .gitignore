@@ -43,10 +43,7 @@ Thumbs.db
 .claude
 
 # Environment and configuration files
-.env
-.env.local
-.env.*.local
-*.env
+*.env*
 config.local.yaml
 config.local.yml
 secrets.yaml

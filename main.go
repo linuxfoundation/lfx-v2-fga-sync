@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// The fga-sync service.
+// Package main provides the fga-sync service entry point and supporting types.
 package main
 
 import (
@@ -157,7 +157,7 @@ func run(bind, port string) error {
 	natsConn, err = nats.Connect(
 		natsURL,
 		nats.DrainTimeout(gracefulShutdownSeconds*time.Second),
-		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			if err != nil {
 				logger.With(errKey, err).Warn("NATS disconnected with error")
 			} else {
@@ -361,196 +361,6 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			subject:     constants.ReadTuplesSubject,
 			handler:     handlerService.readTuplesHandler,
 			description: "read tuples",
-		},
-		{
-			subject:     constants.ProjectUpdateAccessSubject,
-			handler:     handlerService.projectUpdateAccessHandler,
-			description: "project update access",
-		},
-		{
-			subject:     constants.ProjectDeleteAllAccessSubject,
-			handler:     handlerService.projectDeleteAllAccessHandler,
-			description: "project delete all access",
-		},
-		{
-			subject:     constants.MeetingUpdateAccessSubject,
-			handler:     handlerService.meetingUpdateAccessHandler,
-			description: "meeting update access",
-		},
-		{
-			subject:     constants.MeetingDeleteAllAccessSubject,
-			handler:     handlerService.meetingDeleteAllAccessHandler,
-			description: "meeting delete all access",
-		},
-		{
-			subject:     constants.MeetingRegistrantPutSubject,
-			handler:     handlerService.meetingRegistrantPutHandler,
-			description: "meeting registrant put",
-		},
-		{
-			subject:     constants.MeetingRegistrantRemoveSubject,
-			handler:     handlerService.meetingRegistrantRemoveHandler,
-			description: "meeting registrant remove",
-		},
-		{
-			subject:     constants.MeetingAttachmentUpdateAccessSubject,
-			handler:     handlerService.meetingAttachmentUpdateAccessHandler,
-			description: "meeting attachment update access",
-		},
-		{
-			subject:     constants.MeetingAttachmentDeleteAccessSubject,
-			handler:     handlerService.meetingAttachmentDeleteAccessHandler,
-			description: "meeting attachment delete access",
-		},
-		{
-			subject:     constants.PastMeetingUpdateAccessSubject,
-			handler:     handlerService.pastMeetingUpdateAccessHandler,
-			description: "past meeting update access",
-		},
-		{
-			subject:     constants.PastMeetingDeleteAllAccessSubject,
-			handler:     handlerService.pastMeetingDeleteAllAccessHandler,
-			description: "past meeting delete all access",
-		},
-		{
-			subject:     constants.PastMeetingParticipantPutSubject,
-			handler:     handlerService.pastMeetingParticipantPutHandler,
-			description: "past meeting participant put",
-		},
-		{
-			subject:     constants.PastMeetingParticipantRemoveSubject,
-			handler:     handlerService.pastMeetingParticipantRemoveHandler,
-			description: "past meeting participant remove",
-		},
-		{
-			subject:     constants.CommitteeUpdateAccessSubject,
-			handler:     handlerService.committeeUpdateAccessHandler,
-			description: "committee update access",
-		},
-		{
-			subject:     constants.CommitteeDeleteAllAccessSubject,
-			handler:     handlerService.committeeDeleteAllAccessHandler,
-			description: "committee delete all access",
-		},
-		{
-			subject:     constants.CommitteeMemberPutSubject,
-			handler:     handlerService.committeeMemberPutHandler,
-			description: "committee member put",
-		},
-		{
-			subject:     constants.CommitteeMemberRemoveSubject,
-			handler:     handlerService.committeeMemberRemoveHandler,
-			description: "committee member remove",
-		},
-		{
-			subject:     constants.GroupsIOServiceUpdateAccessSubject,
-			handler:     handlerService.groupsIOServiceUpdateAccessHandler,
-			description: "groups.io service update access",
-		},
-		{
-			subject:     constants.GroupsIOServiceDeleteAllAccessSubject,
-			handler:     handlerService.groupsIOServiceDeleteAllAccessHandler,
-			description: "groups.io service delete all access",
-		},
-		{
-			subject:     constants.GroupsIOMailingListUpdateAccessSubject,
-			handler:     handlerService.groupsIOMailingListUpdateAccessHandler,
-			description: "groups.io MailingList update access",
-		},
-		{
-			subject:     constants.GroupsIOMailingListDeleteAllAccessSubject,
-			handler:     handlerService.groupsIOMailingListDeleteAllAccessHandler,
-			description: "groups.io MailingList delete all access",
-		},
-		{
-			subject:     constants.GroupsIOMailingListPutMemberSubject,
-			handler:     handlerService.groupsIOMailingListMemberPutHandler,
-			description: "groups.io mailing list member put",
-		},
-		{
-			subject:     constants.GroupsIOMailingListRemoveMemberSubject,
-			handler:     handlerService.groupsIOMailingListMemberRemoveHandler,
-			description: "groups.io mailing list member remove",
-		},
-		{
-			subject:     constants.PastMeetingRecordingUpdateAccessSubject,
-			handler:     handlerService.pastMeetingRecordingUpdateAccessHandler,
-			description: "past meeting recording update access",
-		},
-		{
-			subject:     constants.PastMeetingTranscriptUpdateAccessSubject,
-			handler:     handlerService.pastMeetingTranscriptUpdateAccessHandler,
-			description: "past meeting transcript update access",
-		},
-		{
-			subject:     constants.PastMeetingSummaryUpdateAccessSubject,
-			handler:     handlerService.pastMeetingSummaryUpdateAccessHandler,
-			description: "past meeting summary update access",
-		},
-		{
-			subject:     constants.PastMeetingAttachmentUpdateAccessSubject,
-			handler:     handlerService.pastMeetingAttachmentUpdateAccessHandler,
-			description: "past meeting attachment update access",
-		},
-		{
-			subject:     constants.PastMeetingAttachmentDeleteAccessSubject,
-			handler:     handlerService.pastMeetingAttachmentDeleteAccessHandler,
-			description: "past meeting attachment delete access",
-		},
-		{
-			subject:     constants.V1MeetingUpdateAccessSubject,
-			handler:     handlerService.v1MeetingUpdateAccessHandler,
-			description: "v1 meeting update access",
-		},
-		{
-			subject:     constants.V1MeetingDeleteAllAccessSubject,
-			handler:     handlerService.v1MeetingDeleteAllAccessHandler,
-			description: "v1 meeting delete all access",
-		},
-		{
-			subject:     constants.V1PastMeetingUpdateAccessSubject,
-			handler:     handlerService.v1PastMeetingUpdateAccessHandler,
-			description: "v1 past meeting update access",
-		},
-		{
-			subject:     constants.V1PastMeetingDeleteAllAccessSubject,
-			handler:     handlerService.v1PastMeetingDeleteAllAccessHandler,
-			description: "v1 past meeting delete all access",
-		},
-		{
-			subject:     constants.V1PastMeetingRecordingUpdateAccessSubject,
-			handler:     handlerService.v1PastMeetingRecordingUpdateAccessHandler,
-			description: "v1 past meeting recording update access",
-		},
-		{
-			subject:     constants.V1PastMeetingTranscriptUpdateAccessSubject,
-			handler:     handlerService.v1PastMeetingTranscriptUpdateAccessHandler,
-			description: "v1 past meeting transcript update access",
-		},
-		{
-			subject:     constants.V1PastMeetingSummaryUpdateAccessSubject,
-			handler:     handlerService.v1PastMeetingSummaryUpdateAccessHandler,
-			description: "v1 past meeting summary update access",
-		},
-		{
-			subject:     constants.V1MeetingRegistrantPutSubject,
-			handler:     handlerService.v1MeetingRegistrantPutHandler,
-			description: "v1 meeting registrant put",
-		},
-		{
-			subject:     constants.V1MeetingRegistrantRemoveSubject,
-			handler:     handlerService.v1MeetingRegistrantRemoveHandler,
-			description: "v1 meeting registrant remove",
-		},
-		{
-			subject:     constants.V1PastMeetingParticipantPutSubject,
-			handler:     handlerService.v1PastMeetingParticipantPutHandler,
-			description: "v1 past meeting participant put",
-		},
-		{
-			subject:     constants.V1PastMeetingParticipantRemoveSubject,
-			handler:     handlerService.v1PastMeetingParticipantRemoveHandler,
-			description: "v1 past meeting participant remove",
 		},
 		// Generic handlers (resource-agnostic)
 		{

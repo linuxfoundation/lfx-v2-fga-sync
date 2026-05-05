@@ -19,18 +19,20 @@ project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456
 project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456
 ```
 
-**Response** (plain text, one line per check, tab-delimited `{request}\t{true|false}`). Order is not guaranteed — cached results are returned first.
+**Response** (plain text, one line per check, tab-delimited `{request}\t{true|false}`). Order is not guaranteed —
+cached results are returned first.
 
 ```text
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456	false
-project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456	true
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#viewer@user:456\tfalse
+project:7cad5a8d-19d0-41a4-81a6-043453daf9ee#writer@user:456\ttrue
 ```
 
 ### Read Tuples
 
 **Subject:** `lfx.access_check.read_tuples`
 
-Returns all direct OpenFGA tuples for a given user and object type. Paginates internally so the caller receives the full result set.
+Returns all direct OpenFGA tuples for a given user and object type. Paginates internally so the caller receives the
+full result set.
 
 **Request** (JSON):
 
@@ -60,7 +62,9 @@ If no tuples are found:
 
 ## Sync API — Generic Handlers
 
-The FGA Sync service provides four universal NATS subjects that work with **any resource type** (projects, committees, meetings, etc.) without requiring resource-specific handlers. If a reply subject is provided, the service responds with `OK` after processing, allowing callers to implement synchronous acknowledgement.
+The FGA Sync service provides four universal NATS subjects that work with **any resource type** (projects,
+committees, meetings, etc.). If a reply subject is provided, the service responds with `OK` after processing,
+allowing callers to implement synchronous acknowledgement.
 
 ### Benefits of Generic Handlers
 
@@ -235,7 +239,8 @@ Use `exclude_relations` when some relations are managed by separate member opera
 }
 ```
 
-> **Note:** The `participant` and `host` relations are managed by separate `member_put`/`member_remove` operations, so they're excluded from the sync.
+> **Note:** The `participant` and `host` relations are managed by separate `member_put`/`member_remove`
+> operations, so they're excluded from the sync.
 
 ### Go Example
 
@@ -352,7 +357,8 @@ nc.Request("lfx.fga-sync.delete_access", payload, 5*time.Second)
 
 **Subject:** `lfx.fga-sync.member_put`
 
-Adds a user to a resource with one or more relations. Supports **atomic multi-relation updates** and **mutually exclusive relation handling**.
+Adds a user to a resource with one or more relations. Supports **atomic multi-relation updates** and
+**mutually exclusive relation handling**.
 
 ### Data Fields
 
@@ -557,7 +563,8 @@ Use an **empty array** to remove all relations for the user:
 }
 ```
 
-> **Behavior:** When `relations` is an empty array, the handler calls `DeleteTuplesByUserAndObject()` to remove all tuples for this user-object pair.
+> **Behavior:** When `relations` is an empty array, the handler calls `DeleteTuplesByUserAndObject()` to remove
+> all tuples for this user-object pair.
 
 ### Go Example
 
@@ -952,48 +959,7 @@ Error: failed to parse generic message
 
 ---
 
-## Migration from Resource-Specific Handlers
-
-If you're currently using resource-specific subjects like `lfx.put_member.committee`, here's how to migrate:
-
-### Before (Resource-Specific)
-
-```json
-// Subject: lfx.put_member.committee
-{
-  "username": "alice",
-  "committee_uid": "123"
-}
-```
-
-### After (Generic)
-
-```json
-// Subject: lfx.fga-sync.member_put
-{
-  "object_type": "committee",
-  "operation": "member_put",
-  "data": {
-    "uid": "123",
-    "username": "alice",
-    "relations": ["member"]
-  }
-}
-```
-
-### Benefits of Migration
-
-- ✅ Support for multiple relations
-- ✅ Mutually exclusive relation handling
-- ✅ Works with any resource type
-- ✅ No service changes needed for new resource types
-
----
-
 ## FAQ
-
-**Q: Can I mix resource-specific and generic handlers?**
-A: Yes! Both continue to work. Migrate at your own pace.
 
 **Q: What happens if I send the same member_put twice?**
 A: The handler is idempotent - it checks existing tuples and skips the write if the relation already exists.

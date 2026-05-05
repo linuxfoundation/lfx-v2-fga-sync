@@ -21,7 +21,7 @@ FILTER_REGEX_EXCLUDE: |
 ENABLE_LINTERS:
   - ACTION_ACTIONLINT
   - DOCKERFILE_HADOLINT
-  - GO_GOLANGCI_LINT
+  - GO_REVIVE
   - GO_SEC
   - YAML_YAMLLINT
   - MARKDOWN_MARKDOWNLINT
@@ -32,12 +32,11 @@ ENABLE_LINTERS:
 DISABLE_LINTERS:
   - COPYPASTE_JSCPD  # Can be too strict for Go code
   - REPOSITORY_GITLEAKS  # Using other secret scanners
-  - GO_GOLANGCI_LINT  # Go version mismatch in MegaLinter container
+  - GO_GOLANGCI_LINT  # Go version mismatch in MegaLinter bundled container
   - REPOSITORY_CHECKOV # Need to look into this since it is failing for unknown reasons
   - REPOSITORY_TRIVY # Need to look into this since it is failing for unknown reasons
 
 # Go-specific settings
-GO_GOLANGCI_LINT_ARGUMENTS: --timeout=5m
 GO_SEC_ARGUMENTS: -fmt sarif -out gosec.sarif -quiet
 
 # YAML settings
