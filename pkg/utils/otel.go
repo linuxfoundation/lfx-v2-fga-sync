@@ -40,6 +40,14 @@ const (
 	OTelExporterOTLP = "otlp"
 	// OTelExporterNone disables exporting for a signal.
 	OTelExporterNone = "none"
+
+	// OTel sampler type constants for OTEL_TRACES_SAMPLER.
+	otelSamplerAlwaysOn                = "always_on"
+	otelSamplerAlwaysOff               = "always_off"
+	otelSamplerTraceIDRatio            = "traceidratio"
+	otelSamplerParentBasedAlwaysOn     = "parentbased_always_on"
+	otelSamplerParentBasedAlwaysOff    = "parentbased_always_off"
+	otelSamplerParentBasedTraceIDRatio = "parentbased_traceidratio"
 )
 
 // OTelConfig holds OpenTelemetry configuration options.
@@ -316,26 +324,27 @@ func newSampler(cfg OTelConfig) trace.Sampler {
 			if err == nil && r >= 0.0 && r <= 1.0 {
 				return r
 			}
-			slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, using TracesSampleRatio", "value", arg)
+			slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, using TracesSampleRatio",
+				"value", arg, "sampler", sampler, "error", err)
 		}
 		return cfg.TracesSampleRatio
 	}
 
 	switch sampler {
-	case "always_on":
+	case otelSamplerAlwaysOn:
 		return trace.AlwaysSample()
-	case "always_off":
+	case otelSamplerAlwaysOff:
 		return trace.NeverSample()
-	case "traceidratio":
+	case otelSamplerTraceIDRatio:
 		return trace.TraceIDRatioBased(parseRatio())
-	case "parentbased_always_on":
+	case otelSamplerParentBasedAlwaysOn:
 		return trace.ParentBased(trace.AlwaysSample())
-	case "parentbased_always_off":
+	case otelSamplerParentBasedAlwaysOff:
 		return trace.ParentBased(trace.NeverSample())
-	case "parentbased_traceidratio":
+	case otelSamplerParentBasedTraceIDRatio:
 		return trace.ParentBased(trace.TraceIDRatioBased(parseRatio()))
 	default: // empty/unknown → parent-based with configured ratio
-		return trace.ParentBased(trace.TraceIDRatioBased(cfg.TracesSampleRatio))
+		return trace.ParentBased(trace.TraceIDRatioBased(parseRatio()))
 	}
 }
 
