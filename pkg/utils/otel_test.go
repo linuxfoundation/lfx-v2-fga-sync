@@ -6,7 +6,7 @@ package utils
 
 import (
 	"context"
-
+	"strings"
 	"testing"
 )
 
@@ -325,48 +325,72 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 	_ = shutdown(ctx)
 }
 
-// TestNewSampler verifies that newSampler returns a non-nil sampler for all
-// supported OTEL_TRACES_SAMPLER values, including the default (empty) case.
+// TestNewSampler verifies that newSampler creates correct samplers for all
+// supported OTEL_TRACES_SAMPLER values and validates their behavior via Description().
 func TestNewSampler(t *testing.T) {
 	cfg := OTelConfig{TracesSampleRatio: 0.5}
 
 	tests := []struct {
-		name    string
-		sampler string
-		arg     string
+		name              string
+		samplerType       string
+		samplerArg        string
+		wantDescription   string // substring match for Description()
+		wantParentBased   bool   // whether sampler should respect parent sampling
 	}{
-		{"default (empty)", "", ""},
-		{"always_on", "always_on", ""},
-		{"always_off", "always_off", ""},
-		{"traceidratio", "traceidratio", "0.5"},
-		{"parentbased_always_on", "parentbased_always_on", ""},
-		{"parentbased_always_off", "parentbased_always_off", ""},
-		{"parentbased_traceidratio", "parentbased_traceidratio", "0.5"},
-		{"unknown", "unknown", ""},
+		{"default (empty)", "", "", "ParentBased", true},
+		{"always_on", "always_on", "", "AlwaysOnSampler", false},
+		{"always_off", "always_off", "", "AlwaysOffSampler", false},
+		{"traceidratio", "traceidratio", "0.5", "TraceIDRatioBased", false},
+		{"parentbased_always_on", "parentbased_always_on", "", "ParentBased", true},
+		{"parentbased_always_off", "parentbased_always_off", "", "ParentBased", true},
+		{"parentbased_traceidratio", "parentbased_traceidratio", "0.3", "ParentBased", true},
+		{"unknown (defaults to parentbased)", "unknown_sampler", "", "ParentBased", true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("OTEL_TRACES_SAMPLER", tt.sampler)
-			t.Setenv("OTEL_TRACES_SAMPLER_ARG", tt.arg)
+			cfg.TracesSampler = tt.samplerType
+			cfg.TracesSamplerArg = tt.samplerArg
 
 			s := newSampler(cfg)
 			if s == nil {
-				t.Errorf("newSampler(%q) returned nil", tt.sampler)
+				t.Errorf("newSampler returned nil for %q", tt.samplerType)
+				return
+			}
+
+			desc := s.Description()
+			if !strings.Contains(desc, tt.wantDescription) {
+				t.Errorf("sampler Description() = %q, want substring %q", desc, tt.wantDescription)
 			}
 		})
 	}
 }
 
-// TestNewSampler_InvalidArg verifies that an invalid OTEL_TRACES_SAMPLER_ARG
-// falls back to cfg.TracesSampleRatio without panicking.
+// TestNewSampler_InvalidArg verifies that invalid OTEL_TRACES_SAMPLER_ARG
+// values (parse errors and out-of-range) fall back to cfg.TracesSampleRatio.
 func TestNewSampler_InvalidArg(t *testing.T) {
-	cfg := OTelConfig{TracesSampleRatio: 0.5}
-	t.Setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
-	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "invalid")
+	tests := []struct {
+		name        string
+		samplerType string
+		samplerArg  string
+		desc        string
+	}{
+		{"non-numeric arg", "parentbased_traceidratio", "invalid", "ParentBased"},
+		{"out of range (>1.0)", "parentbased_traceidratio", "1.5", "ParentBased"},
+		{"out of range (<0.0)", "traceidratio", "-0.1", "TraceIDRatioBased"},
+	}
 
-	s := newSampler(cfg)
-	if s == nil {
-		t.Error("newSampler returned nil for invalid OTEL_TRACES_SAMPLER_ARG")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := OTelConfig{TracesSampleRatio: 0.5, TracesSampler: tt.samplerType, TracesSamplerArg: tt.samplerArg}
+			s := newSampler(cfg)
+			if s == nil {
+				t.Error("newSampler returned nil for invalid arg")
+				return
+			}
+			if !strings.Contains(s.Description(), tt.desc) {
+				t.Errorf("expected Description containing %q, got %q", tt.desc, s.Description())
+			}
+		})
 	}
 }
