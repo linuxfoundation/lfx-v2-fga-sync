@@ -318,8 +318,14 @@ func newSampler(cfg OTelConfig) trace.Sampler {
 			if err == nil && r >= 0.0 && r <= 1.0 {
 				return r
 			}
-			slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, defaulting to 1.0",
-				"provided-value", arg, "error", err)
+			// Log parse error or range validation failure
+			if err != nil {
+				slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, defaulting to 1.0",
+					"provided-value", arg, "error", err)
+			} else {
+				slog.Warn("OTEL_TRACES_SAMPLER_ARG out of range [0.0, 1.0], defaulting to 1.0",
+					"provided-value", arg)
+			}
 		}
 		return 1.0
 	}

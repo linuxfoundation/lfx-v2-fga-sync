@@ -453,6 +453,32 @@ func TestNewSampler_InvalidArg(t *testing.T) {
 			if !strings.Contains(s.Description(), tt.desc) {
 				t.Errorf("expected Description containing %q, got %q", tt.desc, s.Description())
 			}
+
+			// Verify fallback behavior: invalid args should fall back to ratio 1.0
+			// For non-parent-based samplers, ratio 1.0 means always sample.
+			// For parent-based samplers, ratio 1.0 means honor parent (and sample if no parent).
+			if tt.samplerType == "traceidratio" {
+				// Non-parent-based: should always sample (ratio 1.0)
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+					Name:          "fallback-check",
+				})
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("expected fallback ratio 1.0 to RecordAndSample, got %v", res.Decision)
+				}
+			} else if tt.samplerType == "parentbased_traceidratio" {
+				// Parent-based: should honor parent, and with no parent should sample (ratio 1.0 default)
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+					Name:          "fallback-check",
+				})
+				// With no parent context and fallback ratio 1.0, should sample
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("expected parentbased fallback (ratio 1.0, no parent) to RecordAndSample, got %v", res.Decision)
+				}
+			}
 		})
 	}
 }
