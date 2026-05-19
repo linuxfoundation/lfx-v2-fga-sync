@@ -135,6 +135,10 @@ application:
     # "parentbased_always_off", "parentbased_traceidratio".
     # When empty, the application defaults to parentbased_traceidratio.
     tracesSampler: ""
+    # tracesSamplerArg specifies the OTEL_TRACES_SAMPLER_ARG value for samplers
+    # that require an argument (e.g., traceidratio samplers use a ratio 0.0-1.0).
+    # When empty, defaults to tracesSampleRatio for backward compatibility.
+    tracesSamplerArg: ""
     # metricsExporter specifies the metrics exporter: "otlp" or "none"
     # (default: "none")
     metricsExporter: "none"

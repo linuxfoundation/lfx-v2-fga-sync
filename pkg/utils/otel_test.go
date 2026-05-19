@@ -8,6 +8,9 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestOTelConfigFromEnv_Defaults verifies that OTelConfigFromEnv returns
@@ -326,7 +329,8 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 }
 
 // TestNewSampler verifies that newSampler creates correct samplers for all
-// supported OTEL_TRACES_SAMPLER values and validates their behavior via Description().
+// supported OTEL_TRACES_SAMPLER values and validates their behavior via Description()
+// and parent span context awareness.
 func TestNewSampler(t *testing.T) {
 	cfg := OTelConfig{TracesSampleRatio: 0.5}
 
@@ -362,8 +366,58 @@ func TestNewSampler(t *testing.T) {
 			if !strings.Contains(desc, tt.wantDescription) {
 				t.Errorf("sampler Description() = %q, want substring %q", desc, tt.wantDescription)
 			}
+
+			// Validate parent-based behavior: parent-based samplers should honor
+			// the parent's sampling decision when a remote parent is present.
+			if tt.wantParentBased {
+				if !isParentBasedSampler(t, s) {
+					t.Errorf("sampler %q should respect parent span context but doesn't", tt.name)
+				}
+			}
 		})
 	}
+}
+
+// isParentBasedSampler checks if a sampler respects parent sampling decisions
+// by testing with a sampled and non-sampled parent context.
+func isParentBasedSampler(t *testing.T, sampler trace.Sampler) bool {
+	// Create span contexts with sampled and non-sampled flags
+	sampledCtx := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: oteltrace.TraceFlags(1), // sampled (0x01)
+		Remote:     true,
+	})
+
+	nonSampledCtx := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: oteltrace.TraceFlags(0), // not sampled (0x00)
+		Remote:     true,
+	})
+
+	sampledParent := oteltrace.ContextWithSpanContext(context.Background(), sampledCtx)
+	nonSampledParent := oteltrace.ContextWithSpanContext(context.Background(), nonSampledCtx)
+
+	// For parent-based samplers:
+	// - When parent is sampled, decision should be RECORD_AND_SAMPLE
+	// - When parent is not sampled, decision should be DROP
+	// For non-parent-based samplers, both should make independent decisions.
+
+	sampledResult := sampler.ShouldSample(trace.SamplingParameters{
+		ParentContext: sampledParent,
+		TraceID:       sampledCtx.TraceID(),
+		Name:          "test",
+	})
+	nonSampledResult := sampler.ShouldSample(trace.SamplingParameters{
+		ParentContext: nonSampledParent,
+		TraceID:       nonSampledCtx.TraceID(),
+		Name:          "test",
+	})
+
+	// Parent-based samplers honor parent: sampled parent → sampled span, non-sampled → dropped
+	// Non-parent-based samplers may make independent decisions regardless of parent
+	return sampledResult.Decision == trace.RecordAndSample && nonSampledResult.Decision == trace.Drop
 }
 
 // TestNewSampler_InvalidArg verifies that invalid OTEL_TRACES_SAMPLER_ARG
