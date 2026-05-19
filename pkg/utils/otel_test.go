@@ -331,11 +331,11 @@ func TestNewSampler(t *testing.T) {
 	cfg := OTelConfig{TracesSampleRatio: 0.5}
 
 	tests := []struct {
-		name              string
-		samplerType       string
-		samplerArg        string
-		wantDescription   string // substring match for Description()
-		wantParentBased   bool   // whether sampler should respect parent sampling
+		name            string
+		samplerType     string
+		samplerArg      string
+		wantDescription string // substring match for Description()
+		wantParentBased bool   // whether sampler should respect parent sampling
 	}{
 		{"default (empty)", "", "", "ParentBased", true},
 		{"always_on", "always_on", "", "AlwaysOnSampler", false},
