@@ -134,6 +134,11 @@ application:
     # tracesSamplerArg specifies the OTEL_TRACES_SAMPLER_ARG value for samplers
     # that require an argument (e.g., traceidratio samplers use a ratio 0.0-1.0).
     tracesSamplerArg: ""
+    # tracesSampleRatio is the sampling ratio for trace.TraceIDRatioBased sampler.
+    # Only used if OTEL_TRACES_SAMPLER is unset and OTEL_TRACES_SAMPLER_ARG is unset.
+    # (default: "1.0")
+    # Deprecated: Use tracesSamplerArg with tracesSampler instead.
+    tracesSampleRatio: ""
     # metricsExporter specifies the metrics exporter: "otlp" or "none"
     # (default: "none")
     metricsExporter: "none"

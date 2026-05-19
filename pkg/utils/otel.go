@@ -131,8 +131,8 @@ func OTelConfigFromEnv() OTelConfig {
 		propagators = "tracecontext,baggage"
 	}
 
-	tracesSampler := os.Getenv("OTEL_TRACES_SAMPLER")
-	tracesSamplerArg := os.Getenv("OTEL_TRACES_SAMPLER_ARG")
+	tracesSampler := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))
+	tracesSamplerArg := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG"))
 
 	slog.With(
 		"service-name", serviceName,

@@ -96,17 +96,34 @@ func TestOTelConfigFromEnv_UnsupportedProtocol(t *testing.T) {
 	}
 }
 
+// TestOTelConfigFromEnv_TraceSamplerEnvVars verifies that OTEL_TRACES_SAMPLER
+// and OTEL_TRACES_SAMPLER_ARG environment variables are correctly parsed and
+// stored in the OTelConfig, with leading/trailing whitespace trimmed.
+func TestOTelConfigFromEnv_TraceSamplerEnvVars(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "  parentbased_traceidratio  ")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "  0.5  ")
+
+	cfg := OTelConfigFromEnv()
+
+	if cfg.TracesSampler != "parentbased_traceidratio" {
+		t.Errorf("expected TracesSampler 'parentbased_traceidratio' (trimmed), got %q", cfg.TracesSampler)
+	}
+	if cfg.TracesSamplerArg != "0.5" {
+		t.Errorf("expected TracesSamplerArg '0.5' (trimmed), got %q", cfg.TracesSamplerArg)
+	}
+}
+
 // TestSetupOTelSDKWithConfig_AllDisabled verifies that the SDK can be
 // initialized successfully when all exporters (traces, metrics, logs) are
 // disabled, and that the returned shutdown function works correctly.
 func TestSetupOTelSDKWithConfig_AllDisabled(t *testing.T) {
 	cfg := OTelConfig{
-		ServiceName:    "test-service",
-		ServiceVersion: "1.0.0",
-		Protocol:       OTelProtocolGRPC,
-		TracesExporter: OTelExporterNone,
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		TracesExporter:  OTelExporterNone,
 		MetricsExporter: OTelExporterNone,
-		LogsExporter:   OTelExporterNone,
+		LogsExporter:    OTelExporterNone,
 	}
 
 	ctx := context.Background()
@@ -295,15 +312,15 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "127.0.0.1:4317")
 
 	cfg := OTelConfig{
-		ServiceName:    "test-service",
-		ServiceVersion: "1.0.0",
-		Protocol:       OTelProtocolGRPC,
-		Endpoint:       "127.0.0.1:4317",
-		Insecure:       true,
-		TracesExporter: OTelExporterOTLP,
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		Endpoint:        "127.0.0.1:4317",
+		Insecure:        true,
+		TracesExporter:  OTelExporterOTLP,
 		MetricsExporter: OTelExporterNone,
-		LogsExporter:   OTelExporterNone,
-		Propagators:    "tracecontext,baggage",
+		LogsExporter:    OTelExporterNone,
+		Propagators:     "tracecontext,baggage",
 	}
 
 	ctx := context.Background()
