@@ -309,28 +309,25 @@ func endpointURL(raw string, insecure bool) string {
 // a default ratio of 1.0 when sampler is unset. This ensures parent span
 // sampling decisions are always honored when no explicit sampler is configured.
 func newSampler(cfg OTelConfig) trace.Sampler {
-	sampler := cfg.TracesSampler
-	arg := cfg.TracesSamplerArg
-
 	parseRatio := func() float64 {
-		if arg != "" {
-			r, err := strconv.ParseFloat(arg, 64)
-			if err == nil && r >= 0.0 && r <= 1.0 {
-				return r
-			}
-			// Log parse error or range validation failure
-			if err != nil {
-				slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, defaulting to 1.0",
-					"provided-value", arg, "error", err)
-			} else {
-				slog.Warn("OTEL_TRACES_SAMPLER_ARG out of range [0.0, 1.0], defaulting to 1.0",
-					"provided-value", arg)
-			}
+		if cfg.TracesSamplerArg == "" {
+			return 1.0
 		}
-		return 1.0
+		r, err := strconv.ParseFloat(cfg.TracesSamplerArg, 64)
+		if err != nil {
+			slog.Warn("invalid OTEL_TRACES_SAMPLER_ARG, defaulting to 1.0",
+				"provided-value", cfg.TracesSamplerArg, "error", err)
+			return 1.0
+		}
+		if r < 0.0 || r > 1.0 {
+			slog.Warn("OTEL_TRACES_SAMPLER_ARG out of range [0.0, 1.0], defaulting to 1.0",
+				"provided-value", cfg.TracesSamplerArg)
+			return 1.0
+		}
+		return r
 	}
 
-	switch sampler {
+	switch cfg.TracesSampler {
 	case otelSamplerAlwaysOn:
 		return trace.AlwaysSample()
 	case otelSamplerAlwaysOff:
@@ -347,7 +344,7 @@ func newSampler(cfg OTelConfig) trace.Sampler {
 		return trace.ParentBased(trace.TraceIDRatioBased(parseRatio()))
 	default: // unknown sampler type
 		slog.Warn("unknown OTEL_TRACES_SAMPLER value, defaulting to parentbased_traceidratio",
-			"value", sampler)
+			"value", cfg.TracesSampler)
 		return trace.ParentBased(trace.TraceIDRatioBased(parseRatio()))
 	}
 }
