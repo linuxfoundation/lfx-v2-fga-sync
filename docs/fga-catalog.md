@@ -21,6 +21,7 @@ match the type prefixes defined in `pkg/constants/fga.go` (without the trailing 
 | [lfx-v2-voting-service](https://github.com/linuxfoundation/lfx-v2-voting-service) | `vote`, `vote_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-voting-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-survey-service](https://github.com/linuxfoundation/lfx-v2-survey-service) | `survey`, `survey_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-survey-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-mailing-list-service](https://github.com/linuxfoundation/lfx-v2-mailing-list-service) | `groupsio_service`, `groupsio_mailing_list` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-mailing-list-service/blob/main/docs/fga-contract.md) |
+| [lfx-v2-member-service](https://github.com/linuxfoundation/lfx-v2-member-service) | `b2b_org`, `project_membership` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-member-service/blob/main/docs/fga-contract.md) |
 
 ---
 
