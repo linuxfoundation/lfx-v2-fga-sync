@@ -80,6 +80,8 @@
     "unmarshals",
     "uids",
     "tracecontext",
+    "traceidratio",
+    "parentbased",
     "GOTOOLCHAIN"
   ],
   "overrides": [
@@ -98,6 +100,7 @@
         "yml",
         "otel",
         "otlp",
+        "oteltrace",
         "semconv",
         "slogotel",
         "remychantenay",

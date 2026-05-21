@@ -6,8 +6,10 @@ package utils
 
 import (
 	"context"
-
 	"testing"
+
+	"go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 // TestOTelConfigFromEnv_Defaults verifies that OTelConfigFromEnv returns
@@ -33,9 +35,6 @@ func TestOTelConfigFromEnv_Defaults(t *testing.T) {
 	if cfg.TracesExporter != OTelExporterNone {
 		t.Errorf("expected default TracesExporter %q, got %q", OTelExporterNone, cfg.TracesExporter)
 	}
-	if cfg.TracesSampleRatio != 1.0 {
-		t.Errorf("expected default TracesSampleRatio 1.0, got %f", cfg.TracesSampleRatio)
-	}
 	if cfg.MetricsExporter != OTelExporterNone {
 		t.Errorf("expected default MetricsExporter %q, got %q", OTelExporterNone, cfg.MetricsExporter)
 	}
@@ -53,7 +52,6 @@ func TestOTelConfigFromEnv_CustomValues(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4318")
 	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
 	t.Setenv("OTEL_TRACES_EXPORTER", "otlp")
-	t.Setenv("OTEL_TRACES_SAMPLE_RATIO", "0.5")
 	t.Setenv("OTEL_METRICS_EXPORTER", "otlp")
 	t.Setenv("OTEL_LOGS_EXPORTER", "otlp")
 
@@ -77,9 +75,6 @@ func TestOTelConfigFromEnv_CustomValues(t *testing.T) {
 	if cfg.TracesExporter != OTelExporterOTLP {
 		t.Errorf("expected TracesExporter %q, got %q", OTelExporterOTLP, cfg.TracesExporter)
 	}
-	if cfg.TracesSampleRatio != 0.5 {
-		t.Errorf("expected TracesSampleRatio 0.5, got %f", cfg.TracesSampleRatio)
-	}
 	if cfg.MetricsExporter != OTelExporterOTLP {
 		t.Errorf("expected MetricsExporter %q, got %q", OTelExporterOTLP, cfg.MetricsExporter)
 	}
@@ -100,18 +95,34 @@ func TestOTelConfigFromEnv_UnsupportedProtocol(t *testing.T) {
 	}
 }
 
+// TestOTelConfigFromEnv_TraceSamplerEnvVars verifies that OTEL_TRACES_SAMPLER
+// and OTEL_TRACES_SAMPLER_ARG environment variables are correctly parsed and
+// stored in the OTelConfig, with leading/trailing whitespace trimmed.
+func TestOTelConfigFromEnv_TraceSamplerEnvVars(t *testing.T) {
+	t.Setenv("OTEL_TRACES_SAMPLER", "  parentbased_traceidratio  ")
+	t.Setenv("OTEL_TRACES_SAMPLER_ARG", "  0.5  ")
+
+	cfg := OTelConfigFromEnv()
+
+	if cfg.TracesSampler != "parentbased_traceidratio" {
+		t.Errorf("expected TracesSampler 'parentbased_traceidratio' (trimmed), got %q", cfg.TracesSampler)
+	}
+	if cfg.TracesSamplerArg != "0.5" {
+		t.Errorf("expected TracesSamplerArg '0.5' (trimmed), got %q", cfg.TracesSamplerArg)
+	}
+}
+
 // TestSetupOTelSDKWithConfig_AllDisabled verifies that the SDK can be
 // initialized successfully when all exporters (traces, metrics, logs) are
 // disabled, and that the returned shutdown function works correctly.
 func TestSetupOTelSDKWithConfig_AllDisabled(t *testing.T) {
 	cfg := OTelConfig{
-		ServiceName:       "test-service",
-		ServiceVersion:    "1.0.0",
-		Protocol:          OTelProtocolGRPC,
-		TracesExporter:    OTelExporterNone,
-		TracesSampleRatio: 1.0,
-		MetricsExporter:   OTelExporterNone,
-		LogsExporter:      OTelExporterNone,
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		TracesExporter:  OTelExporterNone,
+		MetricsExporter: OTelExporterNone,
+		LogsExporter:    OTelExporterNone,
 	}
 
 	ctx := context.Background()
@@ -300,16 +311,15 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "127.0.0.1:4317")
 
 	cfg := OTelConfig{
-		ServiceName:       "test-service",
-		ServiceVersion:    "1.0.0",
-		Protocol:          OTelProtocolGRPC,
-		Endpoint:          "127.0.0.1:4317",
-		Insecure:          true,
-		TracesExporter:    OTelExporterOTLP,
-		TracesSampleRatio: 1.0,
-		MetricsExporter:   OTelExporterNone,
-		LogsExporter:      OTelExporterNone,
-		Propagators:       "tracecontext,baggage",
+		ServiceName:     "test-service",
+		ServiceVersion:  "1.0.0",
+		Protocol:        OTelProtocolGRPC,
+		Endpoint:        "127.0.0.1:4317",
+		Insecure:        true,
+		TracesExporter:  OTelExporterOTLP,
+		MetricsExporter: OTelExporterNone,
+		LogsExporter:    OTelExporterNone,
+		Propagators:     "tracecontext,baggage",
 	}
 
 	ctx := context.Background()
@@ -323,4 +333,161 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 	}
 
 	_ = shutdown(ctx)
+}
+
+// TestNewSampler verifies that newSampler creates correct samplers for all
+// supported OTEL_TRACES_SAMPLER values and validates their behavior via
+// ShouldSample decisions and parent span context awareness.
+func TestNewSampler(t *testing.T) {
+	cfg := OTelConfig{}
+
+	tests := []struct {
+		name            string
+		samplerType     string
+		samplerArg      string
+		wantParentBased bool // whether sampler should respect parent sampling
+		wantNeverSample bool // whether sampler should always drop (always_off)
+	}{
+		{"default (empty)", "", "", true, false},
+		{"always_on", "always_on", "", false, false},
+		{"always_off", "always_off", "", false, true},
+		{"traceidratio", "traceidratio", "1.0", false, false},
+		{"parentbased_always_on", "parentbased_always_on", "", true, false},
+		{"parentbased_always_off", "parentbased_always_off", "", true, false},
+		{"parentbased_traceidratio", "parentbased_traceidratio", "0.3", true, false},
+		{"unknown (defaults to parentbased)", "unknown_sampler", "", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg.TracesSampler = tt.samplerType
+			cfg.TracesSamplerArg = tt.samplerArg
+
+			s := newSampler(cfg)
+			if s == nil {
+				t.Errorf("newSampler returned nil for %q", tt.samplerType)
+				return
+			}
+
+			if tt.wantParentBased {
+				// Validate parent-based behavior: sampler should honor the
+				// parent's sampling decision when a remote parent is present.
+				if !isParentBasedSampler(t, s) {
+					t.Errorf("sampler %q should respect parent span context but doesn't", tt.name)
+				}
+			} else if tt.wantNeverSample {
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{1},
+					Name:          "test",
+				})
+				if res.Decision != trace.Drop {
+					t.Errorf("sampler %q: expected Drop, got %v", tt.name, res.Decision)
+				}
+			} else {
+				// Non-parent-based, always-sample (ratio 1.0): should record.
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{1},
+					Name:          "test",
+				})
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("sampler %q: expected RecordAndSample, got %v", tt.name, res.Decision)
+				}
+			}
+		})
+	}
+}
+
+// isParentBasedSampler checks if a sampler respects parent sampling decisions
+// by testing with a sampled and non-sampled parent context.
+func isParentBasedSampler(t *testing.T, sampler trace.Sampler) bool {
+	// Create span contexts with sampled and non-sampled flags
+	sampledCtx := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: oteltrace.TraceFlags(1), // sampled (0x01)
+		Remote:     true,
+	})
+
+	nonSampledCtx := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
+		SpanID:     oteltrace.SpanID{1, 2, 3, 4, 5, 6, 7, 8},
+		TraceFlags: oteltrace.TraceFlags(0), // not sampled (0x00)
+		Remote:     true,
+	})
+
+	sampledParent := oteltrace.ContextWithSpanContext(context.Background(), sampledCtx)
+	nonSampledParent := oteltrace.ContextWithSpanContext(context.Background(), nonSampledCtx)
+
+	// For parent-based samplers:
+	// - When parent is sampled, decision should be RECORD_AND_SAMPLE
+	// - When parent is not sampled, decision should be DROP
+	// For non-parent-based samplers, both should make independent decisions.
+
+	sampledResult := sampler.ShouldSample(trace.SamplingParameters{
+		ParentContext: sampledParent,
+		TraceID:       sampledCtx.TraceID(),
+		Name:          "test",
+	})
+	nonSampledResult := sampler.ShouldSample(trace.SamplingParameters{
+		ParentContext: nonSampledParent,
+		TraceID:       nonSampledCtx.TraceID(),
+		Name:          "test",
+	})
+
+	// Parent-based samplers honor parent: sampled parent → sampled span, non-sampled → dropped
+	// Non-parent-based samplers may make independent decisions regardless of parent
+	return sampledResult.Decision == trace.RecordAndSample && nonSampledResult.Decision == trace.Drop
+}
+
+// TestNewSampler_InvalidArg verifies that invalid OTEL_TRACES_SAMPLER_ARG
+// values (parse errors and out-of-range) fall back to default ratio of 1.0.
+func TestNewSampler_InvalidArg(t *testing.T) {
+	tests := []struct {
+		name        string
+		samplerType string
+		samplerArg  string
+	}{
+		{"non-numeric arg", "parentbased_traceidratio", "invalid"},
+		{"out of range (>1.0)", "parentbased_traceidratio", "1.5"},
+		{"out of range (<0.0)", "traceidratio", "-0.1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := OTelConfig{TracesSampler: tt.samplerType, TracesSamplerArg: tt.samplerArg}
+			s := newSampler(cfg)
+			if s == nil {
+				t.Error("newSampler returned nil for invalid arg")
+				return
+			}
+
+			// Verify fallback behavior: invalid args should fall back to ratio 1.0
+			// For non-parent-based samplers, ratio 1.0 means always sample.
+			// For parent-based samplers, ratio 1.0 means honor parent (and sample if no parent).
+			if tt.samplerType == "traceidratio" {
+				// Non-parent-based: should always sample (ratio 1.0)
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+					Name:          "fallback-check",
+				})
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("expected fallback ratio 1.0 to RecordAndSample, got %v", res.Decision)
+				}
+			} else if tt.samplerType == "parentbased_traceidratio" {
+				// Parent-based: should honor parent, and with no parent should sample (ratio 1.0 default)
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
+					Name:          "fallback-check",
+				})
+				// With no parent context and fallback ratio 1.0, should sample
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("expected parentbased fallback (ratio 1.0, no parent) to RecordAndSample, got %v", res.Decision)
+				}
+			}
+		})
+	}
 }
