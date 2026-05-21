@@ -48,6 +48,8 @@ const (
 	ObjectTypePastMeetingSummary    = "past_meeting_summary:"
 	ObjectTypeGroupsIOService       = "groupsio_service:"
 	ObjectTypeGroupsIOMailingList   = "groupsio_mailing_list:"
+	ObjectTypeB2BOrg                = "b2b_org:"
+	ObjectTypeProjectMembership     = "project_membership:"
 
 	// V1 object type prefixes (for read-only LFX v1 data sync)
 	ObjectTypeV1Meeting               = "v1_meeting:"
