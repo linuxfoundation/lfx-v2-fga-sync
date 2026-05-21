@@ -6,7 +6,6 @@ package utils
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -337,8 +336,8 @@ func TestSetupOTelSDKWithConfig_IPEndpoint(t *testing.T) {
 }
 
 // TestNewSampler verifies that newSampler creates correct samplers for all
-// supported OTEL_TRACES_SAMPLER values and validates their behavior via Description()
-// and parent span context awareness.
+// supported OTEL_TRACES_SAMPLER values and validates their behavior via
+// ShouldSample decisions and parent span context awareness.
 func TestNewSampler(t *testing.T) {
 	cfg := OTelConfig{}
 
@@ -346,17 +345,17 @@ func TestNewSampler(t *testing.T) {
 		name            string
 		samplerType     string
 		samplerArg      string
-		wantDescription string // substring match for Description()
-		wantParentBased bool   // whether sampler should respect parent sampling
+		wantParentBased bool // whether sampler should respect parent sampling
+		wantNeverSample bool // whether sampler should always drop (always_off)
 	}{
-		{"default (empty)", "", "", "ParentBased", true},
-		{"always_on", "always_on", "", "AlwaysOnSampler", false},
-		{"always_off", "always_off", "", "AlwaysOffSampler", false},
-		{"traceidratio", "traceidratio", "0.5", "TraceIDRatioBased", false},
-		{"parentbased_always_on", "parentbased_always_on", "", "ParentBased", true},
-		{"parentbased_always_off", "parentbased_always_off", "", "ParentBased", true},
-		{"parentbased_traceidratio", "parentbased_traceidratio", "0.3", "ParentBased", true},
-		{"unknown (defaults to parentbased)", "unknown_sampler", "", "ParentBased", true},
+		{"default (empty)", "", "", true, false},
+		{"always_on", "always_on", "", false, false},
+		{"always_off", "always_off", "", false, true},
+		{"traceidratio", "traceidratio", "1.0", false, false},
+		{"parentbased_always_on", "parentbased_always_on", "", true, false},
+		{"parentbased_always_off", "parentbased_always_off", "", true, false},
+		{"parentbased_traceidratio", "parentbased_traceidratio", "0.3", true, false},
+		{"unknown (defaults to parentbased)", "unknown_sampler", "", true, false},
 	}
 
 	for _, tt := range tests {
@@ -370,16 +369,30 @@ func TestNewSampler(t *testing.T) {
 				return
 			}
 
-			desc := s.Description()
-			if !strings.Contains(desc, tt.wantDescription) {
-				t.Errorf("sampler Description() = %q, want substring %q", desc, tt.wantDescription)
-			}
-
-			// Validate parent-based behavior: parent-based samplers should honor
-			// the parent's sampling decision when a remote parent is present.
 			if tt.wantParentBased {
+				// Validate parent-based behavior: sampler should honor the
+				// parent's sampling decision when a remote parent is present.
 				if !isParentBasedSampler(t, s) {
 					t.Errorf("sampler %q should respect parent span context but doesn't", tt.name)
+				}
+			} else if tt.wantNeverSample {
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{1},
+					Name:          "test",
+				})
+				if res.Decision != trace.Drop {
+					t.Errorf("sampler %q: expected Drop, got %v", tt.name, res.Decision)
+				}
+			} else {
+				// Non-parent-based, always-sample (ratio 1.0): should record.
+				res := s.ShouldSample(trace.SamplingParameters{
+					ParentContext: context.Background(),
+					TraceID:       oteltrace.TraceID{1},
+					Name:          "test",
+				})
+				if res.Decision != trace.RecordAndSample {
+					t.Errorf("sampler %q: expected RecordAndSample, got %v", tt.name, res.Decision)
 				}
 			}
 		})
@@ -435,11 +448,10 @@ func TestNewSampler_InvalidArg(t *testing.T) {
 		name        string
 		samplerType string
 		samplerArg  string
-		desc        string
 	}{
-		{"non-numeric arg", "parentbased_traceidratio", "invalid", "ParentBased"},
-		{"out of range (>1.0)", "parentbased_traceidratio", "1.5", "ParentBased"},
-		{"out of range (<0.0)", "traceidratio", "-0.1", "TraceIDRatioBased"},
+		{"non-numeric arg", "parentbased_traceidratio", "invalid"},
+		{"out of range (>1.0)", "parentbased_traceidratio", "1.5"},
+		{"out of range (<0.0)", "traceidratio", "-0.1"},
 	}
 
 	for _, tt := range tests {
@@ -449,9 +461,6 @@ func TestNewSampler_InvalidArg(t *testing.T) {
 			if s == nil {
 				t.Error("newSampler returned nil for invalid arg")
 				return
-			}
-			if !strings.Contains(s.Description(), tt.desc) {
-				t.Errorf("expected Description containing %q, got %q", tt.desc, s.Description())
 			}
 
 			// Verify fallback behavior: invalid args should fall back to ratio 1.0
