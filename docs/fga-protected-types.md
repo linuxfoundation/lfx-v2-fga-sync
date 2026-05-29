@@ -26,6 +26,7 @@ For human onboarding (adding a new service to this list), see
 | [lfx-v2-voting-service](https://github.com/linuxfoundation/lfx-v2-voting-service) | `vote`, `vote_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-voting-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-survey-service](https://github.com/linuxfoundation/lfx-v2-survey-service) | `survey`, `survey_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-survey-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-mailing-list-service](https://github.com/linuxfoundation/lfx-v2-mailing-list-service) | `groupsio_service`, `groupsio_mailing_list` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-mailing-list-service/blob/main/docs/fga-contract.md) |
+| [lfx-v2-member-service](https://github.com/linuxfoundation/lfx-v2-member-service) | `b2b_org`, `project_membership` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-member-service/blob/main/docs/fga-contract.md) |
 
 ---
 
@@ -86,6 +87,19 @@ FGA contract: [docs/fga-contract.md](https://github.com/linuxfoundation/lfx-v2-m
 |-------------|------------|
 | `groupsio_service` | `update_access`, `delete_access` |
 | `groupsio_mailing_list` | `update_access`, `delete_access`, `member_put`, `member_remove` |
+
+### Members: `lfx-v2-member-service`
+
+FGA contract: [docs/fga-contract.md](https://github.com/linuxfoundation/lfx-v2-member-service/blob/main/docs/fga-contract.md)
+
+| Object type | Operations |
+|-------------|------------|
+| `b2b_org` | `update_access`, `delete_access` |
+| `project_membership` | `member_put`, `member_remove` |
+
+> `project_membership` only carries the `key_contact` relation, managed via
+> `member_put`/`member_remove`; the member service does not issue `update_access`
+> or `delete_access` for `project_membership` objects directly.
 
 ---
 
