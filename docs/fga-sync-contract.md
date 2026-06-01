@@ -96,7 +96,7 @@ type GenericFGAMessage struct {
 - `references` values can be bare UIDs (handler prepends the map key as the type
   prefix, e.g. `"project": ["abc"]` → `project:abc`) or full `type:uid` strings.
   Both are accepted.
-- `references.project` produces tuple `project:{project_uid}#project@committee:{committee_uid}`,
+- `references.project` produces tuple `committee:{committee_uid}#project@project:{project_uid}`,
   enabling permission inheritance from the parent project.
 - `exclude_relations` lets a publisher manage some relations separately (e.g. members
   managed by a different subject). Those relations are left untouched.
@@ -251,6 +251,11 @@ msg := GenericFGAMessage{
             "project": {resource.ProjectUID},
         },
     },
+}
+
+payload, err := json.Marshal(msg)
+if err != nil {
+    return err
 }
 nc.Publish("lfx.fga-sync.update_access", payload)
 ```
