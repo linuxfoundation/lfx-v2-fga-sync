@@ -29,15 +29,15 @@ envelope below.
 ## Tuple Format
 
 ```text
-{user_type}:{user_id}#{relation}@{object_type}:{object_id}
+{object_type}:{object_id}#{relation}@{user_type}:{user_id}
 ```
 
 Examples:
 
-- `user:alice#writer@project:proj-123`: alice is a writer on this project
-- `user:*#viewer@project:proj-123`: anyone (public) can view this project
-- `project:parent-123#parent@project:child-456`: parent-child hierarchy link
-- `user:bob#member@committee:abc`: bob is a member of this committee
+- `project:proj-123#writer@user:alice`: alice is a writer on this project
+- `project:proj-123#viewer@user:*`: anyone (public) can view this project
+- `project:child-456#parent@project:parent-123`: parent-child hierarchy link
+- `committee:abc#member@user:bob`: bob is a member of this committee
 
 ### Tuple-format rejection conditions
 
