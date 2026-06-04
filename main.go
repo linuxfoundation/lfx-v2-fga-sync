@@ -328,6 +328,10 @@ type subscriptionConfig struct {
 // subscribeToSubject subscribes to a single NATS subject with error handling and logging.
 func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
 	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
+		// Initialize message header if nil to prevent panic when injecting trace context
+		if msg.Header == nil {
+			msg.Header = make(nats.Header)
+		}
 		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
 		msgCtx, span := tracer.Start(msgCtx, "nats.process",
 			trace.WithSpanKind(trace.SpanKindConsumer),
