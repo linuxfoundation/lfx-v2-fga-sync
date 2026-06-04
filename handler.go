@@ -40,6 +40,7 @@ type INatsMsg interface {
 	Respond(data []byte) error
 	Data() []byte
 	Subject() string
+	Header() nats.Header
 }
 
 // NatsMsg is a wrapper around [nats.Msg] that implements [INatsMsg].
@@ -67,13 +68,18 @@ func (m *NatsMsg) Subject() string {
 	return m.Msg.Subject
 }
 
+// Header implements [INatsMsg.Header].
+func (m *NatsMsg) Header() nats.Header {
+	return m.Msg.Header
+}
+
 // processStandardAccessUpdate handles the default access control update logic
 func (h *HandlerService) processStandardAccessUpdate(
+	ctx context.Context,
 	message INatsMsg,
 	obj *standardAccessStub,
 	excludeRelations ...string,
 ) error {
-	ctx := context.Background()
 
 	logger.With("message", string(message.Data())).InfoContext(
 		ctx,

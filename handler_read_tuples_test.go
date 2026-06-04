@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -279,7 +280,7 @@ func TestReadTuplesHandler(t *testing.T) {
 			tt.mockSetup(service.fgaService.client.(*MockFgaClient), msg)
 
 			assert.NotPanics(t, func() {
-				err := service.readTuplesHandler(msg)
+				err := service.readTuplesHandler(context.Background(), msg)
 				if tt.expectError {
 					assert.Error(t, err)
 				} else {

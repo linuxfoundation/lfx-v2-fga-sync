@@ -33,8 +33,7 @@ import (
 //	    "exclude_relations": ["participant"]
 //	  }
 //	}
-func (h *HandlerService) genericUpdateAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
+func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message INatsMsg) error {
 
 	// Parse generic message
 	genericMsg := new(fgatypes.GenericFGAMessage)
@@ -75,7 +74,7 @@ func (h *HandlerService) genericUpdateAccessHandler(message INatsMsg) error {
 	}
 
 	// Use existing generic handler
-	return h.processStandardAccessUpdate(message, stub, data.ExcludeRelations...)
+	return h.processStandardAccessUpdate(ctx, message, stub, data.ExcludeRelations...)
 }
 
 // genericDeleteAccessHandler handles universal delete_access operations.
@@ -92,8 +91,7 @@ func (h *HandlerService) genericUpdateAccessHandler(message INatsMsg) error {
 //	    "uid": "committee-123"
 //	  }
 //	}
-func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
-	ctx := context.Background()
+func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message INatsMsg) error {
 
 	// Parse generic message
 	genericMsg := new(fgatypes.GenericFGAMessage)
@@ -198,8 +196,7 @@ func (h *HandlerService) genericDeleteAccessHandler(message INatsMsg) error {
 //	    "mutually_exclusive_with": ["participant", "host"]
 //	  }
 //	}
-func (h *HandlerService) genericMemberPutHandler(message INatsMsg) error {
-	ctx := context.Background()
+func (h *HandlerService) genericMemberPutHandler(ctx context.Context, message INatsMsg) error {
 
 	// Parse and validate message
 	genericMsg, data, err := h.parseAndValidateMemberPutMessage(ctx, message)
@@ -425,8 +422,7 @@ func (h *HandlerService) sendReplyIfNeeded(ctx context.Context, message INatsMsg
 //	    "relations": []
 //	  }
 //	}
-func (h *HandlerService) genericMemberRemoveHandler(message INatsMsg) error {
-	ctx := context.Background()
+func (h *HandlerService) genericMemberRemoveHandler(ctx context.Context, message INatsMsg) error {
 
 	// Parse generic message
 	genericMsg := new(fgatypes.GenericFGAMessage)

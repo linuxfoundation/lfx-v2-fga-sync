@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"strings"
@@ -234,7 +235,7 @@ func TestAccessCheckHandler(t *testing.T) {
 
 			// Test that the function doesn't panic
 			assert.NotPanics(t, func() {
-				err := handlerService.accessCheckHandler(msg)
+				err := handlerService.accessCheckHandler(context.Background(), msg)
 				if tt.expectedError {
 					assert.Error(t, err)
 				} else {
@@ -661,7 +662,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 
 			// Test that the function doesn't panic
 			assert.NotPanics(t, func() {
-				err := handlerService.processStandardAccessUpdate(msg, tt.obj)
+				err := handlerService.processStandardAccessUpdate(context.Background(), msg, tt.obj)
 				if tt.expectedError {
 					assert.Error(t, err)
 				} else {

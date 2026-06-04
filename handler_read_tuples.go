@@ -20,8 +20,8 @@ const readTuplesTimeout = 10 * time.Second
 // readTuplesHandler handles requests to read a user's direct OpenFGA tuples for
 // a given object type. It responds with a JSON-encoded ReadTuplesResponse
 // containing tuple-strings in object#relation@user format.
-func (h *HandlerService) readTuplesHandler(message INatsMsg) error {
-	ctx, cancel := context.WithTimeout(context.Background(), readTuplesTimeout)
+func (h *HandlerService) readTuplesHandler(ctx context.Context, message INatsMsg) error {
+	ctx, cancel := context.WithTimeout(ctx, readTuplesTimeout)
 	defer cancel()
 
 	// Unmarshal the JSON request payload.

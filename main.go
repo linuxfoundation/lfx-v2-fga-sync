@@ -22,6 +22,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	slogotel "github.com/remychantenay/slog-otel"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -312,7 +316,7 @@ func createHTTPHandlers() {
 }
 
 // HandlerFunc defines a message handler function type.
-type HandlerFunc func(INatsMsg) error
+type HandlerFunc func(context.Context, INatsMsg) error
 
 // subscriptionConfig defines a NATS subscription configuration.
 type subscriptionConfig struct {
@@ -324,7 +328,19 @@ type subscriptionConfig struct {
 // subscribeToSubject subscribes to a single NATS subject with error handling and logging.
 func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
 	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
-		if errHandler := handler(&NatsMsg{msg}); errHandler != nil {
+		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(msg.Header))
+		msgCtx, span := tracer.Start(msgCtx, "nats.process",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "nats"),
+				attribute.String("messaging.destination", subject),
+				attribute.String("messaging.operation", "process"),
+			),
+		)
+		defer span.End()
+		if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
+			span.RecordError(errHandler)
+			span.SetStatus(codes.Error, errHandler.Error())
 			logger.Error("error handling "+description+" request",
 				errKey, errHandler,
 				"subject", subject,
