@@ -334,7 +334,7 @@ func subscribeToSubject(subject, description, queue string, handler HandlerFunc)
 			hdr = msg.Header
 		}
 		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(hdr))
-		msgCtx, span := tracer.Start(msgCtx, subject + " process",
+		msgCtx, span := tracer.Start(msgCtx, subject+" process",
 			trace.WithSpanKind(trace.SpanKindConsumer),
 			trace.WithAttributes(
 				attribute.String("messaging.system", "nats"),

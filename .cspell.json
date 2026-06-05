@@ -120,7 +120,8 @@
         "traceparent",
         "tracestate",
         "INTERNALERRORCODE",
-        "noctx"
+        "noctx",
+        "natsgo"
       ]
     },
     {

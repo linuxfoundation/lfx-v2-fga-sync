@@ -22,7 +22,7 @@ func (c natsHeaderCarrier) Get(key string) string {
 	return vals[0]
 }
 
-func (c natsHeaderCarrier) Set(key string, value string) {
+func (c natsHeaderCarrier) Set(key, value string) {
 	c[key] = []string{value}
 }
 
