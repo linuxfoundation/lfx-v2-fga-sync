@@ -23,6 +23,11 @@ func (c natsHeaderCarrier) Get(key string) string {
 }
 
 func (c natsHeaderCarrier) Set(key, value string) {
+	if c == nil {
+		// Cannot set on nil carrier; silently drop the value.
+		// This matches the behavior of Extract, which safely reads from nil maps.
+		return
+	}
 	c[key] = []string{value}
 }
 
