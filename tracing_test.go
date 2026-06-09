@@ -4,6 +4,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -102,10 +103,9 @@ func TestNatsHeaderCarrier_Set(t *testing.T) {
 				}
 			}()
 			c.Set(tt.key, tt.value)
-			// Only check the header if we expect it to be non-nil and not panicked
-			if !tt.wantPanic && tt.header != nil {
-				if val := tt.header[tt.key]; len(val) > 0 && val[0] != tt.value {
-					t.Errorf("Set(%q, %q) resulted in %q", tt.key, tt.value, val[0])
+			if !tt.wantPanic {
+				if !reflect.DeepEqual(tt.header, tt.wantHeader) {
+					t.Errorf("Set(%q, %q) header = %#v, want %#v", tt.key, tt.value, tt.header, tt.wantHeader)
 				}
 			}
 		})
