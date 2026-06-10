@@ -1,6 +1,6 @@
 ---
 name: fga-sync-dev
-description: Path-scoped Go coding conventions for the lfx-v2-fga-sync repository. Owns repo-local truth for the single-package main layout, slog logging style, NATS QueueSubscribe + JetStream KV cache patterns, the generic resource-agnostic handler shape, table-driven tests against the INatsMsg/FgaService mocks, license headers, and Makefile-driven lint/format/build. Auto-attaches on Go files, go.mod/go.sum, Makefile, charts, scripts, and pkg. Defers cross-repo platform topology to lfx-skills:lfx-platform-architecture, the FGA tuple-emission contract to docs/fga-sync-contract.md, and the publisher-side workflow to the peer fga-tuple-emission skill.
+description: Path-scoped Go coding conventions for the lfx-v2-fga-sync repository. Owns repo-local truth for the single-package main layout, slog logging style, NATS QueueSubscribe + JetStream KV cache patterns, the generic resource-agnostic handler shape, table-driven tests against the INatsMsg/IFgaClient mocks, license headers, and Makefile-driven lint/format/build. Auto-attaches on Go files, go.mod/go.sum, Makefile, charts, scripts, and pkg. Defers cross-repo platform topology to lfx-skills:lfx-platform-architecture, the FGA tuple-emission contract to docs/fga-sync-contract.md, and the publisher-side workflow to the peer fga-tuple-emission skill.
 paths:
   - "**/*.go"
   - "go.mod"
@@ -47,15 +47,15 @@ There is no `cmd/`, `internal/`, `api/`, or `gen/` tree. Do not introduce a Goa 
 
 - Everything implementation-level is `package main`. Add new files to the root unless they are pure helpers, constants, or typed payloads that belong under `pkg/`.
 - Group imports in three blocks: standard library, third-party, then `github.com/linuxfoundation/lfx-v2-fga-sync/...`. Run `make fmt` to enforce.
-- Match the existing constructor style on `HandlerService` and `FgaService`. Both are passed by value or by small struct; do not introduce pointer receivers without a reason.
+- Match the existing receiver style: `HandlerService` handler methods use pointer receivers (`func (h *HandlerService)`); `FgaService` methods use value receivers (`func (s FgaService)`). Both are constructed as small struct values in `main.go`; do not switch receiver styles without a reason.
 
 ### Logging
 
 - Use the package-level `logger` (a `*slog.Logger` wrapped by `slog-otel`). Do not call `fmt.Println`, `fmt.Printf`, `log.Print*`, or `log.Println` for runtime logging.
 - Use `*Context` variants (`InfoContext`, `WarnContext`, `DebugContext`, `ErrorContext`) so trace and span IDs flow through. Pass the same `ctx` you handed to `FgaService` calls.
 - Use the package-level `errKey = "error"` constant for error fields; do not invent new keys for the same concept.
-- Include stable structured fields when available: `subject`, `queue`, `object_type`, `object_id`, `relation`, `principal`, `operation`, `count`.
-- Never log raw payloads, bearer tokens, or anything that may contain PII. Logging `string(message.Data())` at info level is acceptable for the existing access-check and read-tuples flows because those payloads are tuple-shaped, not user content; do not extend that pattern to new payload types without checking.
+- Include stable structured fields when available, matching the names already used in the code: `subject`, `queue`, `object_type`, `uid`, `object`, `user`, `username`, `relation`/`relations`, `operation`, `count`.
+- Never log raw payloads, bearer tokens, or anything that may contain PII. Logging `string(message.Data())` at info level is acceptable for the existing access-check and sync update-access flows because those payloads are tuple-shaped, not user content (read-tuples logs only parsed fields); do not extend that pattern to new payload types without checking.
 - Honor `DEBUG` and the `-d` flag for debug logging; both already wire into `logOptions.Level`.
 
 ### Error handling

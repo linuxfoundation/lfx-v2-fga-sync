@@ -164,7 +164,7 @@ make helm-install-local
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `NATS_URL` | NATS server connection URL | `nats://localhost:4222` | Yes |
+| `NATS_URL` | NATS server connection URL | `nats://nats:4222` | No |
 | `OPENFGA_API_URL` | OpenFGA API endpoint | - | Yes |
 | `OPENFGA_STORE_ID` | OpenFGA store ID | - | Yes |
 | `OPENFGA_AUTH_MODEL_ID` | OpenFGA authorization model ID | - | Yes |

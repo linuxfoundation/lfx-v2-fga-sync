@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **Central LFX skills:**
 > - Start with `/lfx-skills:lfx` for cross-repo tasks, "where does X live" questions, owner/peer repo routing, or missing checkouts.
 > - Use `/lfx-skills:lfx-platform-architecture` for platform composition, V2 service classes, write/read/access-check flows, cross-service responsibilities, NATS/KV ownership, and the OpenFGA/Heimdall coordination order across `lfx-v2-helm`, owning services, and `lfx-v2-argocd`.
-> - The repo-local path-scoped `fga-sync-dev` skill auto-attaches on Go paths (`**/*.go`, `go.mod`, `go.sum`, `Makefile`, `pkg/**`, `charts/**`, `scripts/**`) and owns repo-local Go style for this service: single `package main` layout, slog wrapper, `INatsMsg`/`FgaService` mocks, generic resource-agnostic handlers, JetStream KV cache pattern, NATS queue-group conventions, tests, formatting, and linting.
+> - The repo-local path-scoped `fga-sync-dev` skill auto-attaches on Go paths (`**/*.go`, `go.mod`, `go.sum`, `Makefile`, `pkg/**`, `charts/**`, `scripts/**`) and owns repo-local Go style for this service: single `package main` layout, slog wrapper, `INatsMsg`/`IFgaClient` mocks, generic resource-agnostic handlers, JetStream KV cache pattern, NATS queue-group conventions, tests, formatting, and linting.
 > - The repo-local `fga-tuple-emission` peer skill owns the publisher-side workflow (resource services emitting `GenericFGAMessage`) and the fga-sync handler side of that contract.
 > - **This repo owns the FGA tuple-emission contract and the access-check contract.** Other V2 services route here for envelope shapes, generic subjects, tuple format, cache behavior, and `lfx.access_check.*` semantics. See `docs/fga-sync-contract.md` and `docs/fga-protected-types.md`.
 > - Repo-owned docs under `docs/` are canonical for FGA Sync contracts, onboarding, and caller examples. If the plugin is missing, install with `/plugin marketplace add linuxfoundation/lfx-skills` then `/plugin install lfx-skills@lfx-skills`.
@@ -80,7 +80,8 @@ build/test/lint workflow. Quick reference:
 
 ### Required Environment Variables
 
-- `NATS_URL`: NATS server connection URL (e.g., `nats://localhost:4222`)
+- `NATS_URL`: NATS server connection URL (e.g., `nats://localhost:4222`; binary
+  defaults to `nats://nats:4222` if unset)
 - `OPENFGA_API_URL`: OpenFGA API endpoint (e.g., `http://localhost:8080`)
 - `OPENFGA_STORE_ID`: OpenFGA store ID
 - `OPENFGA_AUTH_MODEL_ID`: OpenFGA authorization model ID
@@ -108,8 +109,8 @@ For the full per-operation reference and best practices, see
 
 Use `make test` (or `make test-coverage` for an HTML report). Test files are
 co-located with the file under test (`handler_access_test.go` next to
-`handler_access.go`, etc.) and drive handlers via the `INatsMsg` and `FgaService`
-mocks in `mock.go`. There is no in-repo integration suite; integration coverage
+`handler_access.go`, etc.) and drive handlers via the `INatsMsg` and `IFgaClient`
+mocks in `mock.go` (injected into a real `FgaService`). There is no in-repo integration suite; integration coverage
 lives in the platform stack via `lfx-v2-helm` and `load-mock-data`.
 
 The path-scoped `fga-sync-dev` skill auto-attaches on `**/*_test.go`

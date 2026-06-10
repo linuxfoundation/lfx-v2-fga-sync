@@ -14,8 +14,9 @@ service's object types or supported operations change.
 
 ## Services
 
-The "Object Types" column lists the `object_type` string values carried in each FGA sync message payload — these
-match the type prefixes defined in `pkg/constants/fga.go` (without the trailing colon used internally).
+The "Object Types" column lists the `object_type` string values carried in each FGA sync message payload. fga-sync's
+handlers are generic and do not require a constant per type; where `pkg/constants/fga.go` does define a type prefix,
+it matches these values (without the trailing colon used internally).
 
 | Service | Object Types | FGA Contract |
 |---|---|---|
