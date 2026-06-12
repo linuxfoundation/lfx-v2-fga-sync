@@ -1,6 +1,9 @@
 # FGA Sync Client Guide
 
 This guide explains how to use the FGA Sync service's NATS API to manage fine-grained authorization for your resources.
+It is a caller-facing walkthrough. The authoritative generic subjects, envelope
+shape, tuple format, cache behavior, and access-check semantics live in
+[`docs/fga-sync-contract.md`](fga-sync-contract.md).
 
 ## Request/Reply API
 
@@ -62,16 +65,17 @@ If no tuples are found:
 
 ## Sync API — Generic Handlers
 
-The FGA Sync service provides four universal NATS subjects that work with **any resource type** (projects,
-committees, meetings, etc.). If a reply subject is provided, the service responds with `OK` after processing,
-allowing callers to implement synchronous acknowledgement.
+The FGA Sync service provides four universal NATS subjects that work with any
+resource type defined in the OpenFGA model, such as projects, committees, and
+v1 meetings. If a reply subject is provided, the service responds with `OK`
+after processing, allowing callers to implement synchronous acknowledgement.
 
 ### Benefits of Generic Handlers
 
-- ✅ **Resource Agnostic** - Works with any object type
+- ✅ **Resource Agnostic** - Works with any model-defined object type
 - ✅ **Multiple Relations** - Add/remove multiple relations atomically
 - ✅ **Mutually Exclusive Relations** - Automatic cleanup of conflicting roles
-- ✅ **Future Proof** - New resource types require no service changes
+- ✅ **Future Proof** - New model-defined resource types require no fga-sync service changes
 - ✅ **Consistent API** - Same pattern for all operations
 
 ---
@@ -104,7 +108,7 @@ All messages use the **GenericFGAMessage** envelope:
 ### Fields
 
 - **`object_type`** *(required, string)* - Your resource type, must be defined in the [OpenFGA authorization model](https://github.com/linuxfoundation/lfx-v2-helm/blob/main/charts/lfx-platform/templates/openfga/model.yaml)
-  - Examples: `"committee"`, `"project"`, `"meeting"`
+  - Examples: `"committee"`, `"project"`, `"v1_meeting"`, `"v1_past_meeting"`
 - **`operation`** *(required, string)* - Must match the NATS subject operation without the `lfx.fga-sync.` prefix
   - Example: If sending to `lfx.fga-sync.update_access`, this must be `"update_access"`
 - **`data`** *(required, object)* - Operation-specific payload (see below)
@@ -223,7 +227,7 @@ Use `exclude_relations` when some relations are managed by separate member opera
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "update_access",
   "data": {
     "uid": "meeting-789",
@@ -324,7 +328,7 @@ Deletes **all** access control tuples for a resource. Typically used when a reso
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "delete_access",
   "data": {
     "uid": "meeting-456"
@@ -404,7 +408,7 @@ Add both `host` and `invitee` relations in a single atomic operation:
 
 ```json
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_put",
   "data": {
     "uid": "past-meeting-456",
@@ -420,7 +424,7 @@ When promoting a participant to host, automatically remove the `participant` rel
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "member_put",
   "data": {
     "uid": "meeting-789",
@@ -461,7 +465,7 @@ msg := GenericFGAMessage{
 
 // Multiple relations
 msg := GenericFGAMessage{
-    ObjectType: "past_meeting",
+    ObjectType: "v1_past_meeting",
     Operation:  "member_put",
     Data: MemberData{
         UID:       "past-meeting-456",
@@ -472,7 +476,7 @@ msg := GenericFGAMessage{
 
 // Mutually exclusive
 msg := GenericFGAMessage{
-    ObjectType: "meeting",
+    ObjectType: "v1_meeting",
     Operation:  "member_put",
     Data: MemberData{
         UID:                   "meeting-789",
@@ -523,7 +527,7 @@ Remove only the `invitee` relation, keeping other relations intact:
 
 ```json
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_remove",
   "data": {
     "uid": "past-meeting-456",
@@ -537,7 +541,7 @@ Remove only the `invitee` relation, keeping other relations intact:
 
 ```json
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_remove",
   "data": {
     "uid": "past-meeting-456",
@@ -689,7 +693,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "update_access",
   "data": {
     "uid": "meeting-2026-01-15",
@@ -712,7 +716,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "member_put",
   "data": {
     "uid": "meeting-2026-01-15",
@@ -726,7 +730,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "member_put",
   "data": {
     "uid": "meeting-2026-01-15",
@@ -743,7 +747,7 @@ nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
 
 ```json
 {
-  "object_type": "meeting",
+  "object_type": "v1_meeting",
   "operation": "member_remove",
   "data": {
     "uid": "meeting-2026-01-15",
@@ -763,7 +767,7 @@ A participant can have multiple roles (invitee, attendee, host):
 
 ```json
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_put",
   "data": {
     "uid": "past-meeting-123",
@@ -779,7 +783,7 @@ Remove `attendee` if they didn't actually attend:
 
 ```json
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_remove",
   "data": {
     "uid": "past-meeting-123",
@@ -795,13 +799,17 @@ Remove `attendee` if they didn't actually attend:
 
 ## Response Format
 
-All operations return a simple `"OK"` string on success:
+Sync operations return a simple `"OK"` string on success when the request
+includes a reply subject:
 
 ```text
 OK
 ```
 
-Errors are logged server-side and returned as error messages in the NATS reply.
+Sync-operation failures are logged server-side by the subscription loop. They do
+not currently have a standardized NATS error response body, so callers using
+request/reply should treat a missing `OK` as failure and apply their normal
+timeout/retry handling.
 
 ---
 
@@ -826,7 +834,7 @@ When a user needs multiple relations, send them in one `member_put` operation:
 ```json
 // ✅ Good: Atomic operation
 {
-  "object_type": "past_meeting",
+  "object_type": "v1_past_meeting",
   "operation": "member_put",
   "data": {
     "uid": "meeting-123",
@@ -893,17 +901,17 @@ To remove all relations for a user, use an empty `relations` array:
 
 ## Performance Characteristics
 
-Based on production testing:
+The repo does not publish canonical latency numbers. In general:
 
-| Operation | Average Response Time | Notes |
-|-----------|----------------------|-------|
-| `update_access` | 30-60ms | Depends on number of relations |
-| `delete_access` | 7-10ms | Fast deletion |
-| `member_put` (new) | 8-11ms | Creates new tuple |
-| `member_put` (existing) | 5-6ms | Idempotent, skips write |
-| `member_put` (mutually exclusive) | 80-90ms | Extra read/delete operations |
-| `member_remove` (specific) | 8-9ms | Deletes specific tuples |
-| `member_remove` (all) | 8-9ms | Deletes all user tuples |
+| Operation | Cost driver |
+|-----------|-------------|
+| `update_access` | Reads current object tuples, computes diff, writes/deletes changed tuples |
+| `delete_access` | Reads current object tuples, then deletes all tuples for the object |
+| `member_put` (new) | Reads current object tuples, writes missing relations |
+| `member_put` (existing) | Reads current object tuples, skips writes when relations already exist |
+| `member_put` (mutually exclusive) | Reads current object tuples, deletes mutually exclusive relations, writes desired relations |
+| `member_remove` (specific) | Deletes specific tuples without a full-object sync |
+| `member_remove` (all) | Reads tuples for the user/object pair, then deletes them |
 
 ---
 
@@ -974,7 +982,10 @@ A: Send `member_remove` with an empty relations array: `"relations": []`
 A: `update_access` is a full sync (sets complete state), while `member_put` adds specific relations incrementally.
 
 **Q: Can I use any object_type value?**
-A: Yes! The handlers are resource-agnostic. Use any string like `"committee"`, `"project"`, `"working_group"`, etc.
+A: Use any object type that is defined in the OpenFGA model, such as
+`"committee"`, `"project"`, `"v1_meeting"`, or `"v1_past_meeting"`. Unknown
+or invalid tuple writes are logged and skipped by the OpenFGA validation retry
+path; non-validation OpenFGA errors fail the operation.
 
 ---
 
