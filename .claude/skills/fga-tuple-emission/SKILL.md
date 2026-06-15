@@ -17,6 +17,8 @@ paths:
   - 'docs/fga*.md'
   - 'docs/client-guide.md'
 ---
+<!-- Copyright The Linux Foundation and each contributor to LFX. -->
+<!-- SPDX-License-Identifier: MIT -->
 
 # FGA Access Control
 

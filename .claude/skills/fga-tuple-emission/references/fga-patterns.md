@@ -1,3 +1,6 @@
+<!-- Copyright The Linux Foundation and each contributor to LFX. -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # FGA Patterns Reference
 
 This skill's reference content lives in the repo-owned canonical doc:

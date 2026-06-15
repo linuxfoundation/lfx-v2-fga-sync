@@ -12,6 +12,8 @@ paths:
   - ".claude/skills/fga-sync-dev/**"
 allowed-tools: Read, Glob, Grep, Edit, Write, Bash
 ---
+<!-- Copyright The Linux Foundation and each contributor to LFX. -->
+<!-- SPDX-License-Identifier: MIT -->
 
 # Development Conventions (lfx-v2-fga-sync)
 
