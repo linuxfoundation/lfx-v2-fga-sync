@@ -1,17 +1,22 @@
 # FGA Contract Catalog
 
-This document is the index of all services that publish FGA sync messages to this service, organized by service.
+This page is the onboarding entry point for service owners adding FGA sync to a
+new resource service. For the full list of FGA-protected object types and the
+operations each service supports, see
+[`docs/fga-protected-types.md`](fga-protected-types.md).
 
-Each service owns its FGA contract — the authoritative reference for the object types it manages, the NATS subjects
-it publishes to, and the payload shape for each operation. When a service's access control logic changes, only that
-service's contract needs updating.
+Each service owns its FGA contract (`docs/fga-contract.md` in that repo) — the authoritative reference for the object
+types it manages, the NATS subjects it publishes to, and the payload shape for each operation. When a service's access
+control logic changes, update that service's contract; update this repo's protected-types inventory only when the
+service's object types or supported operations change.
 
 ---
 
 ## Services
 
-The "Object Types" column lists the `object_type` string values carried in each FGA sync message payload — these
-match the type prefixes defined in `pkg/constants/fga.go` (without the trailing colon used internally).
+The "Object Types" column lists the `object_type` string values carried in each FGA sync message payload. fga-sync's
+handlers are generic and do not require a constant per type; where `pkg/constants/fga.go` does define a type prefix,
+it matches these values (without the trailing colon used internally).
 
 | Service | Object Types | FGA Contract |
 |---|---|---|
@@ -29,8 +34,16 @@ match the type prefixes defined in `pkg/constants/fga.go` (without the trailing 
 
 When a new service starts publishing FGA sync messages:
 
-1. Add a `docs/fga-contract.md` to that service's repo following the [committee-service pattern](https://github.com/linuxfoundation/lfx-v2-committee-service/blob/main/docs/fga-contract.md)
-2. Add a row to the table above with the service name, object types, and a link to its contract
+1. Add or update `docs/fga-contract.md` in that service's repo. Use an
+   existing resource service as a shape-only example, but do not copy
+   service-specific relations or references; the target service owns its own
+   contract.
+2. Add a row to the service table in
+   [`docs/fga-protected-types.md`](fga-protected-types.md)
+   with the service name, object types, and a link to its contract.
 
-All integrations must publish to the generic `lfx.fga-sync.*` subjects.
-See the [client guide](client-guide.md) for message format details.
+All integrations must publish to the generic `lfx.fga-sync.*` subjects. See the
+[client guide](client-guide.md) for caller examples, and
+[`docs/fga-sync-contract.md`](fga-sync-contract.md) for the authoritative
+generic subjects, envelope shape, tuple format, cache behavior, and
+access-check semantics.
