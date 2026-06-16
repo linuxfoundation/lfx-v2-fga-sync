@@ -9,8 +9,7 @@ import (
 )
 
 // accessCheckHandler handles access check requests from the NATS server.
-func (h *HandlerService) accessCheckHandler(message INatsMsg) error {
-	ctx := context.Background()
+func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMsg) error {
 
 	var response []byte
 	var err error

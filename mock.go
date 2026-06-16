@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"github.com/stretchr/testify/mock"
@@ -90,6 +91,11 @@ func (m *MockNatsMsg) Data() []byte {
 // Subject implements the INatsMsg interface
 func (m *MockNatsMsg) Subject() string {
 	return m.subject
+}
+
+// Header implements the INatsMsg interface
+func (m *MockNatsMsg) Header() nats.Header {
+	return nats.Header{}
 }
 
 // CreateMockNatsMsg creates a mock NATS message that can be used in tests

@@ -48,6 +48,9 @@ const (
 	otelSamplerParentBasedAlwaysOn     = "parentbased_always_on"
 	otelSamplerParentBasedAlwaysOff    = "parentbased_always_off"
 	otelSamplerParentBasedTraceIDRatio = "parentbased_traceidratio"
+
+	// defaultPropagators is the default value for OTEL_PROPAGATORS.
+	defaultPropagators = "tracecontext,baggage"
 )
 
 // OTelConfig holds OpenTelemetry configuration options.
@@ -128,7 +131,7 @@ func OTelConfigFromEnv() OTelConfig {
 
 	propagators := os.Getenv("OTEL_PROPAGATORS")
 	if propagators == "" {
-		propagators = "tracecontext,baggage"
+		propagators = defaultPropagators
 	}
 
 	tracesSampler := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER"))
