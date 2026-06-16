@@ -2,19 +2,25 @@
 
 ![Build Status](https://github.com/linuxfoundation/lfx-v2-fga-sync/workflows/FGA%20Sync%20Build/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)
+![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)
 
 A high-performance microservice that synchronizes authorization data between NATS messaging and OpenFGA
 (Fine-Grained Authorization), providing cached relationship checks and real-time access control updates for the
 LFX Platform v2.
 
+> Agents working in this repo should start with [`CLAUDE.md`](CLAUDE.md).
+> The authoritative FGA Sync contract lives in
+> [`docs/fga-sync-contract.md`](docs/fga-sync-contract.md); protected object
+> inventory lives in [`docs/fga-protected-types.md`](docs/fga-protected-types.md).
+> Service-owner onboarding lives in [`docs/fga-catalog.md`](docs/fga-catalog.md).
+
 ## 🚀 Features
 
-- **Real-time Authorization Sync**: Synchronizes project access permissions between NATS and OpenFGA
-- **High-Performance Caching**: JetStream-based caching with automatic invalidation for sub-millisecond response times
+- **Real-time Authorization Sync**: Synchronizes resource access tuples between NATS and OpenFGA
+- **Cache-first Access Checks**: JetStream KV caching with global timestamp invalidation
 - **Batch Operations**: Efficient bulk relationship checking and updates
 - **Health Monitoring**: Kubernetes-ready health checks and observability
-- **Security First**: Comprehensive security scanning and best practices
+- **Security First**: Non-root container image, CodeQL, MegaLinter, and pinned workflow actions
 
 ## 📋 Architecture
 
@@ -39,15 +45,15 @@ graph TB
 ### Components
 
 - **Access Check Handler**: Processes authorization queries with intelligent caching
-- **Resource Handlers**: Manages resource permission synchronization: updates, deletes
-(e.g. `handler_project.go` for project permission data)
+- **Generic Sync Handlers**: Manage `update_access`, `delete_access`,
+  `member_put`, and `member_remove` for any OpenFGA model-defined resource type
 - **Cache Layer**: JetStream KeyValue store for high-performance relationship caching
 
 ## 🛠️ Quick Start
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.25+
 - Kubernetes 1.19+
 - Helm 3.2.0+
 - Docker (optional)
@@ -158,7 +164,7 @@ make helm-install-local
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `NATS_URL` | NATS server connection URL | `nats://localhost:4222` | Yes |
+| `NATS_URL` | NATS server connection URL | `nats://nats:4222` | No |
 | `OPENFGA_API_URL` | OpenFGA API endpoint | - | Yes |
 | `OPENFGA_STORE_ID` | OpenFGA store ID | - | Yes |
 | `OPENFGA_AUTH_MODEL_ID` | OpenFGA authorization model ID | - | Yes |
@@ -175,8 +181,10 @@ because otherwise access checks will use the cached access tuples even though th
 
 | Document | Description |
 | --- | --- |
-| [docs/client-guide.md](docs/client-guide.md) | NATS API reference — request/reply queries, sync message formats, and integration examples |
-| [docs/fga-catalog.md](docs/fga-catalog.md) | Index of all services publishing FGA sync messages, with links to their FGA contracts |
+| [docs/fga-sync-contract.md](docs/fga-sync-contract.md) | Authoritative generic FGA envelope, subjects, tuple format, cache behavior, and access-check semantics |
+| [docs/fga-protected-types.md](docs/fga-protected-types.md) | Inventory of services, object types, and supported FGA sync operations |
+| [docs/client-guide.md](docs/client-guide.md) | NATS API reference, request/reply queries, sync message formats, and integration examples |
+| [docs/fga-catalog.md](docs/fga-catalog.md) | Onboarding checklist for service owners adding FGA sync to a resource service |
 
 ## 📊 API Reference
 
@@ -243,7 +251,7 @@ make fmt
 # Run linter
 make lint
 
-# Run security checks
+# Run go vet
 make vet
 
 # Run all quality checks
@@ -265,24 +273,25 @@ make dev
 
 ## 📈 Performance
 
-- **Throughput**: 10,000+ relationship checks per second
-- **Latency**: Sub-millisecond response times with cache hits
-- **Cache Hit Rate**: >95% for typical workloads
-- **Memory Usage**: ~64MB baseline, scales with cache size
+This service uses cache-first access checks and batches OpenFGA writes in groups
+of up to 100 operations, matching the OpenFGA Write API limit. No benchmark
+numbers are claimed in this README; verify workload-specific throughput and
+latency in the target environment.
 
 ### Caching Strategy
 
 1. **Cache Key Format**: `rel.{base32-encoded-relation}`
-2. **Cache Invalidation**: Timestamp-based with automatic cleanup
-3. **Cache TTL**: Configurable via JetStream bucket settings
-4. **Fallback**: Direct OpenFGA queries on cache miss
+2. **Cache Values**: raw `true` / `false` strings; freshness comes from NATS KV entry timestamps
+3. **Cache Invalidation**: global `inv` timestamp marker written after successful OpenFGA writes
+4. **Cache TTL**: Configurable via JetStream bucket settings
+5. **Fallback**: Direct OpenFGA queries on cache miss or stale hit
 
 ## 🛡️ Security
 
-- **Principle of Least Privilege**: Runs as non-root user (nobody)
-- **Read-only Filesystem**: Container uses read-only root filesystem
-- **Security Scanning**: Automated vulnerability scanning with Trivy and Gosec
-- **Secret Management**: No secrets stored in code or environment variables
+- **Principle of Least Privilege**: Runs as a non-root user in the runtime image
+- **Minimal Runtime Image**: Uses Chainguard static runtime image for the final container
+- **Security Scanning**: Automated CodeQL and MegaLinter workflows
+- **Secret Management**: No secrets should be committed; deployment-owned values come from environment or cluster injection
 
 ## 🔍 Monitoring
 
@@ -291,7 +300,7 @@ make dev
 The service exposes metrics via expvar at `/debug/vars`:
 
 - `cache_hits` - Number of successful cache lookups
-- `cache_stale_hits` - Number of stale cache entries used
+- `cache_stale_hits` - Number of stale cache entries detected and rechecked
 - `cache_misses` - Number of cache misses requiring OpenFGA queries
 
 ### Logging
@@ -342,7 +351,7 @@ fga:
 
 ### Creating a Release
 
-To create a new release of the project service:
+To create a new release of the fga-sync service:
 
 1. **Update the chart version** in `charts/lfx-v2-fga-sync/Chart.yaml` prior to any project releases, or if any
    change is made to the chart manifests or configuration:

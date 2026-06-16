@@ -42,6 +42,16 @@ Thumbs.db
 # Claude AI assistant
 .claude
 
+# Commit repo-owned Claude skills while keeping other local Claude state ignored.
+!.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/fga-sync-dev/
+!.claude/skills/fga-sync-dev/**
+!.claude/skills/fga-tuple-emission/
+!.claude/skills/fga-tuple-emission/**
+
 # Environment and configuration files
 *.env*
 config.local.yaml
