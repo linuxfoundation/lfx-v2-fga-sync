@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -65,14 +64,16 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 		setup    func() FgaService
 		run      func(ctx context.Context, svc FgaService) error
 	}{
-		// 5xx / generic errors — span must be marked as errored.
+		// 5xx SDK errors — span must be marked as errored. Uses fakeStatusErr{code:500}
+		// (which implements fgaStatusCoder) to verify that status-coded server errors
+		// are not suppressed by the fgaIs4xx guard (which only skips 400–499).
 		{
 			name:     "ReadObjectTuples/5xx",
 			wantSpan: true,
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
-					Return((*ClientReadResponse)(nil), errors.New("fga read error"))
+					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 500})
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
@@ -86,7 +87,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
-					Return((*ClientReadResponse)(nil), errors.New("fga read error"))
+					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 500})
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
@@ -100,7 +101,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
 				mc.On("ListObjects", mock.Anything, mock.Anything, mock.Anything).
-					Return((*ClientListObjectsResponse)(nil), errors.New("fga list error"))
+					Return((*ClientListObjectsResponse)(nil), fakeStatusErr{code: 500})
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
@@ -113,9 +114,10 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 			wantSpan: true,
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
-				// Return a non-validation error so the retry path is not taken.
+				// fakeStatusErr{code:500} is not a validation error, so the retry
+				// path is not taken and the error is returned immediately.
 				mc.On("Write", mock.Anything, mock.Anything).
-					Return((*ClientWriteResponse)(nil), errors.New("fga write error"))
+					Return((*ClientWriteResponse)(nil), fakeStatusErr{code: 500})
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
@@ -131,7 +133,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
 				mc.On("BatchCheck", mock.Anything, mock.Anything).
-					Return((*openfga.BatchCheckResponse)(nil), errors.New("fga batch check error"))
+					Return((*openfga.BatchCheckResponse)(nil), fakeStatusErr{code: 500})
 				mockKV := new(MockNatsKeyValue)
 				mockKV.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
 				return FgaService{client: mc, cacheBucket: mockKV}
