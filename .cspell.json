@@ -122,7 +122,9 @@
         "tracestate",
         "INTERNALERRORCODE",
         "noctx",
-        "natsgo"
+        "natsgo",
+        "tracetest",
+        "sdktrace"
       ]
     },
     {

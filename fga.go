@@ -21,6 +21,8 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	. "github.com/openfga/go-sdk/client"
 )
@@ -126,6 +128,7 @@ func (s FgaService) ReadObjectTuples(ctx context.Context, object string) ([]open
 	for {
 		resp, err := s.client.Read(ctx, req, options)
 		if err != nil {
+			recordSpanError(ctx, err)
 			return nil, err
 		}
 		tuples = append(tuples, resp.Tuples...)
@@ -151,6 +154,7 @@ func (s FgaService) ReadUserTuples(ctx context.Context, user, objectType string)
 	for {
 		resp, err := s.client.Read(ctx, req, options)
 		if err != nil {
+			recordSpanError(ctx, err)
 			return nil, err
 		}
 		tuples = append(tuples, resp.Tuples...)
@@ -179,6 +183,7 @@ func (s FgaService) ListObjectsByUserAndRelation(
 
 	resp, err := s.client.ListObjects(ctx, body, options)
 	if err != nil {
+		recordSpanError(ctx, err)
 		return nil, err
 	}
 
@@ -456,6 +461,7 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 		if err != nil {
 			tupleStr, ok := extractInvalidTuple(err)
 			if !ok {
+				recordSpanError(ctx, err)
 				return err
 			}
 
@@ -465,6 +471,7 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 				deletes, removed = removeInvalidDeleteTuple(deletes, tupleStr)
 			}
 			if !removed {
+				recordSpanError(ctx, err)
 				return err
 			}
 
@@ -497,6 +504,32 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 	).InfoContext(ctx, "wrote and deleted tuples")
 
 	return nil
+}
+
+// fgaStatusCoder is implemented by all OpenFGA SDK API error types. It exposes
+// the HTTP response status code so callers can distinguish client (4xx) from
+// server (5xx) failures without importing concrete SDK error types.
+type fgaStatusCoder interface {
+	ResponseStatusCode() int
+}
+
+// fgaIs4xx returns true when err is an OpenFGA SDK API error with a 4xx HTTP
+// status code. These represent expected client-side conditions (bad request,
+// auth, not found) and must not be recorded as span errors.
+func fgaIs4xx(err error) bool {
+	var sc fgaStatusCoder
+	return errors.As(err, &sc) && sc.ResponseStatusCode() >= 400 && sc.ResponseStatusCode() < 500
+}
+
+// recordSpanError records err on the active span and marks it errored,
+// unless err represents an OpenFGA 4xx (expected client-side) condition.
+func recordSpanError(ctx context.Context, err error) {
+	if fgaIs4xx(err) {
+		return
+	}
+	span := trace.SpanFromContext(ctx)
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }
 
 // extractInvalidTuple extracts the tuple string from an OpenFGA validation error.
@@ -801,6 +834,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	}
 	batchResp, err := s.client.BatchCheck(ctx, batchCheckRequest)
 	if err != nil {
+		recordSpanError(ctx, err)
 		return nil, err
 	}
 
