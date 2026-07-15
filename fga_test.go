@@ -1698,3 +1698,90 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 		})
 	}
 }
+
+// TestAppendToMessage_SkipCachingFalse tests that false results are not cached when
+// skipCachingFalse is true. This covers the race condition where a cache invalidation
+// lands during an in-flight OpenFGA batch check: if the false result were cached with
+// a timestamp newer than the invalidation marker, the next staleness check would treat
+// it as fresh and serve the stale false to all retries.
+func TestAppendToMessage_SkipCachingFalse(t *testing.T) {
+	cacheKeyFor := func(object, relation, user string) string {
+		relationKey := object + "#" + relation + "@" + user
+		return "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+	}
+
+	buildResult := func(correlationID string, allowed bool) map[string]openfga.BatchCheckSingleResult {
+		res := openfga.NewBatchCheckSingleResult()
+		res.SetAllowed(allowed)
+		return map[string]openfga.BatchCheckSingleResult{correlationID: *res}
+	}
+
+	buildTupleMap := func(correlationID, object, relation, user string) map[string]ClientBatchCheckItem {
+		return map[string]ClientBatchCheckItem{
+			correlationID: {Object: object, Relation: relation, User: user},
+		}
+	}
+
+	t.Run("skipCachingFalse=false caches both true and false results", func(t *testing.T) {
+		ctx := context.Background()
+		tupleMap := buildTupleMap("1", "committee_invite:abc", "viewer", "user:alice")
+		k := cacheKeyFor("committee_invite:abc", "viewer", "user:alice")
+
+		mockCacheTrue := NewMockKeyValue()
+		svc := FgaService{cacheBucket: mockCacheTrue}
+		svc.appendToMessage(ctx, nil, buildResult("1", true), tupleMap, false)
+		if _, exists := mockCacheTrue.data[k]; !exists {
+			t.Error("expected true result to be cached, but it was not")
+		}
+
+		mockCacheFalse := NewMockKeyValue()
+		svc2 := FgaService{cacheBucket: mockCacheFalse}
+		svc2.appendToMessage(ctx, nil, buildResult("1", false), tupleMap, false)
+		if _, exists := mockCacheFalse.data[k]; !exists {
+			t.Error("expected false result to be cached when skipCachingFalse=false, but it was not")
+		}
+	})
+
+	t.Run("skipCachingFalse=true caches true but not false", func(t *testing.T) {
+		ctx := context.Background()
+		tupleMap := buildTupleMap("1", "committee_invite:abc", "viewer", "user:alice")
+		k := cacheKeyFor("committee_invite:abc", "viewer", "user:alice")
+
+		// true result should still be cached even when skipCachingFalse=true
+		mockCacheTrue := NewMockKeyValue()
+		svc := FgaService{cacheBucket: mockCacheTrue}
+		svc.appendToMessage(ctx, nil, buildResult("1", true), tupleMap, true)
+		if _, exists := mockCacheTrue.data[k]; !exists {
+			t.Error("expected true result to be cached even when skipCachingFalse=true, but it was not")
+		}
+
+		// false result must NOT be cached when skipCachingFalse=true
+		mockCacheFalse := NewMockKeyValue()
+		svc2 := FgaService{cacheBucket: mockCacheFalse}
+		svc2.appendToMessage(ctx, nil, buildResult("1", false), tupleMap, true)
+		if _, exists := mockCacheFalse.data[k]; exists {
+			t.Error("expected false result NOT to be cached when skipCachingFalse=true, but it was cached")
+		}
+	})
+
+	t.Run("error responses are never cached regardless of skipCachingFalse", func(t *testing.T) {
+		ctx := context.Background()
+		tupleMap := buildTupleMap("1", "committee_invite:abc", "viewer", "user:alice")
+		k := cacheKeyFor("committee_invite:abc", "viewer", "user:alice")
+
+		errResult := openfga.NewBatchCheckSingleResult()
+		checkErr := openfga.NewCheckError()
+		checkErr.SetMessage("timeout")
+		errResult.SetError(*checkErr)
+		result := map[string]openfga.BatchCheckSingleResult{"1": *errResult}
+
+		for _, skip := range []bool{false, true} {
+			mockCache := NewMockKeyValue()
+			svc := FgaService{cacheBucket: mockCache}
+			svc.appendToMessage(ctx, nil, result, tupleMap, skip)
+			if _, exists := mockCache.data[k]; exists {
+				t.Errorf("skipCachingFalse=%v: error response should never be cached", skip)
+			}
+		}
+	})
+}

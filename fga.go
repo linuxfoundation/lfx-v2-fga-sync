@@ -682,6 +682,7 @@ func (s FgaService) appendToMessage(
 	message []byte,
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
+	skipCachingFalse bool,
 ) []byte {
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -713,8 +714,11 @@ func (s FgaService) appendToMessage(
 		// Append the result to our response message.
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
-		// Cache the result.
-		if shouldCache {
+		// Cache the result. When skipCachingFalse is true a write invalidated the
+		// cache while the batch check was in-flight, so caching a false result now
+		// would create a fresh-looking stale entry that survives subsequent staleness
+		// checks. True results are always safe to cache.
+		if shouldCache && (!skipCachingFalse || resp.GetAllowed()) {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			_, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowed))
 			if err != nil {
@@ -842,8 +846,26 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		return nil, errors.New("batch check response was nil or empty")
 	}
 
+	// Re-read the invalidation timestamp. If it advanced while the batch check
+	// was in-flight, a concurrent write landed between our cache read and the
+	// OpenFGA response. Caching any false result now would stamp it with a
+	// timestamp newer than the invalidation, making it look fresh to the next
+	// staleness check even though the underlying permission may have changed.
+	// Skip caching false results in that case so the next request re-evaluates.
+	postCheckInvalidation, err := s.getLastCacheInvalidation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	skipCachingFalse := postCheckInvalidation.After(lastInvalidation)
+	if skipCachingFalse {
+		logger.With(
+			"pre_check_invalidation", lastInvalidation,
+			"post_check_invalidation", postCheckInvalidation,
+		).DebugContext(ctx, "cache invalidated during batch check; skipping false result caching")
+	}
+
 	// Loop through the responses.
-	message = s.appendToMessage(ctx, message, *batchResp.Result, mapCorrelationIDToTuple)
+	message = s.appendToMessage(ctx, message, *batchResp.Result, mapCorrelationIDToTuple, skipCachingFalse)
 
 	if len(message) < 1 {
 		// This shouldn't happen (*batchResp was checked for ==0 above with an
