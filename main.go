@@ -383,6 +383,11 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			handler:     handlerService.readTuplesHandler,
 			description: "read tuples",
 		},
+		{
+			subject:     constants.ListObjectsSubject,
+			handler:     handlerService.listObjectsHandler,
+			description: "list objects",
+		},
 		// Generic handlers (resource-agnostic)
 		{
 			subject:     constants.GenericUpdateAccessSubject,

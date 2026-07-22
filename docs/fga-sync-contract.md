@@ -21,6 +21,7 @@ this service (`lfx-v2-fga-sync`).
 | `lfx.fga-sync.member_remove` | Remove specific or all relations for a user | `OK` on success if reply subject is provided |
 | `lfx.access_check.request` | Batch authorization check (used by query-service) | text body |
 | `lfx.access_check.read_tuples` | Read all direct tuples for a user + object_type | JSON body |
+| `lfx.access_check.list_objects` | Resolve which objects a user holds a given relation on, per `(object_type, relation)` query batch | JSON body |
 
 Handlers are generic: **publishers do not need fga-sync code changes when adding a
 new resource type that is defined in the OpenFGA model**. Use the generic
@@ -163,6 +164,57 @@ Returns all direct OpenFGA tuples for a given user and object type. Paginates in
 // Response error
 {"error": "failed to read tuples"}
 ```
+
+### `lfx.access_check.list_objects`
+
+Resolves, for a batch of `(object_type, relation)` query pairs, which objects a
+user holds each relation on — evaluated via OpenFGA `ListObjects`, so computed
+and hierarchical relations are included (unlike `read_tuples`, which only
+returns direct tuples). Not limited to any single relation or use case; any
+relation defined in the model can be queried. Each returned target is
+annotated with `creatable_types`, the artifact types creatable given that
+relation on that object — this mapping is domain knowledge intentionally held
+in fga-sync (see Model Boundaries below) and reviewed jointly with the
+consuming client's owner.
+
+```json
+// Request
+{
+  "user": "user:auth0|alice",
+  "queries": [
+    {"object_type": "project", "relation": "writer"},
+    {"object_type": "committee", "relation": "writer"}
+  ]
+}
+
+// Response success
+{
+  "targets": [
+    {
+      "object": "project:uuid1",
+      "object_type": "project",
+      "relation": "writer",
+      "creatable_types": ["project", "committee", "meeting", "mailing_list", "survey", "vote"]
+    },
+    {
+      "object": "committee:abc",
+      "object_type": "committee",
+      "relation": "writer",
+      "creatable_types": ["meeting", "survey", "vote"]
+    }
+  ]
+}
+
+// Response empty
+{"targets": []}
+
+// Response error
+{"error": "failed to list objects"}
+```
+
+Targets are cached per `(user, relation, object_type)`, mirroring the
+`access_check` cache pattern below. **Order is not guaranteed**; callers must
+match targets by field, not by index.
 
 ## OpenFGA Model Boundaries
 
