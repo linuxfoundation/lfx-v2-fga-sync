@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base32"
+	"encoding/json"
 	"errors"
 	"expvar"
 	"fmt"
@@ -188,6 +189,55 @@ func (s FgaService) ListObjectsByUserAndRelation(
 	}
 
 	return resp.Objects, nil
+}
+
+// ListObjectsCached is a cache-aware wrapper around ListObjectsByUserAndRelation,
+// following the same cache/invalidation pattern as CheckRelationships: results
+// are cached per (user, relation, objectType) tuple and treated as stale once
+// older than the last cache invalidation.
+func (s FgaService) ListObjectsCached(ctx context.Context, objectType, relation, user string) ([]string, error) {
+	if !useCache {
+		return s.ListObjectsByUserAndRelation(ctx, objectType, relation, user)
+	}
+
+	lastInvalidation, err := s.getLastCacheInvalidation(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cacheKey := "list." + cacheKeyEncoder.EncodeToString([]byte(user+"#"+relation+"@"+objectType))
+	entry, errCache := s.cacheBucket.Get(ctx, cacheKey)
+	switch {
+	case errCache == jetstream.ErrKeyNotFound:
+		cacheMisses.Add(1)
+	case errCache != nil:
+		// Not expected, but log and fall through to a fresh OpenFGA query rather
+		// than failing the request.
+		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; bypassing cache")
+	case lastInvalidation.After(entry.Created()):
+		cacheStaleHits.Add(1)
+	default:
+		var objects []string
+		errUnmarshal := json.Unmarshal(entry.Value(), &objects)
+		if errUnmarshal == nil {
+			cacheHits.Add(1)
+			return objects, nil
+		}
+		logger.With(errKey, errUnmarshal).ErrorContext(ctx, "failed to unmarshal cached list objects entry")
+	}
+
+	objects, err := s.ListObjectsByUserAndRelation(ctx, objectType, relation, user)
+	if err != nil {
+		return nil, err
+	}
+
+	if data, errMarshal := json.Marshal(objects); errMarshal == nil {
+		if _, errPut := s.cacheBucket.Put(ctx, cacheKey, data); errPut != nil {
+			logger.With(errKey, errPut).ErrorContext(ctx, "failed to cache list objects result")
+		}
+	}
+
+	return objects, nil
 }
 
 func (s FgaService) getRelationsMap(object string, relations []ClientTupleKey) (map[string]ClientTupleKey, error) {

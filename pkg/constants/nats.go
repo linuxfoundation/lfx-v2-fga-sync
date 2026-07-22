@@ -19,6 +19,12 @@ const (
 	// ReadTuplesSubject is the subject for reading a user's direct tuples by object type.
 	// The subject is of the form: lfx.access_check.read_tuples
 	ReadTuplesSubject = "lfx.access_check.read_tuples"
+
+	// ListObjectsSubject is the subject for resolving which objects a user holds
+	// a given relation on, per (object_type, relation) query. Not limited to
+	// creation checks — any relation defined in the model can be queried.
+	// The subject is of the form: lfx.access_check.list_objects
+	ListObjectsSubject = "lfx.access_check.list_objects"
 )
 
 // NATS queue subjects that the FGA sync service handles messages about.

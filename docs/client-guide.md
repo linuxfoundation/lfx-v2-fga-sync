@@ -63,6 +63,69 @@ If no tuples are found:
 
 ---
 
+### List Objects
+
+**Subject:** `lfx.access_check.list_objects`
+
+Resolves, for a batch of `(object_type, relation)` query pairs, which objects a
+user holds each relation on. Uses OpenFGA `ListObjects`, so computed and
+hierarchical relations are included — unlike Read Tuples above, which only
+returns direct tuples. Not limited to any single relation; any relation
+defined in the model can be queried in the same request. Each returned target
+is annotated with `creatable_types`, the artifact types creatable given that
+relation on that object.
+
+**Request** (JSON):
+
+```json
+{
+  "user": "user:auth0|alice",
+  "queries": [
+    {"object_type": "project", "relation": "writer"},
+    {"object_type": "committee", "relation": "writer"}
+  ]
+}
+```
+
+**Response (success)** (JSON):
+
+```json
+{
+  "targets": [
+    {
+      "object": "project:uuid1",
+      "object_type": "project",
+      "relation": "writer",
+      "creatable_types": ["project", "committee", "meeting", "mailing_list", "survey", "vote"]
+    },
+    {
+      "object": "committee:abc",
+      "object_type": "committee",
+      "relation": "writer",
+      "creatable_types": ["meeting", "survey", "vote"]
+    }
+  ]
+}
+```
+
+If no objects are found:
+
+```json
+{"targets": []}
+```
+
+**Response (error)** (JSON):
+
+```json
+{"error": "failed to list objects"}
+```
+
+Targets are cached per `(user, relation, object_type)`, mirroring the access
+check cache. **Order is not guaranteed**; callers must match targets by field,
+not by index.
+
+---
+
 ## Sync API — Generic Handlers
 
 The FGA Sync service provides four universal NATS subjects that work with any
