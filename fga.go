@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -304,6 +305,14 @@ func (s FgaService) SyncObjectTuples(
 		).DebugContext(ctx, "will add relation in batch write")
 		writes = append(writes, relation)
 		if isUser := strings.HasPrefix(relation.User, "user:"); isUser {
+			// Seed any (direct) user relationships to the cache after this function
+			// returns (after the invalidation cache write, if there is one). Only
+			// user relationships are written, because we don't support explicit
+			// querying of resource-parent relationships (or similar) which don't
+			// resolve back to a user. TBD figure out a way to measure the impact
+			// this has on overall cache effectiveness, especially once we start
+			// updating large-scale relationships, like groups with over a thousand
+			// members.
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
 			cacheKeysByTuple[relationKey] = "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 		}
@@ -335,17 +344,35 @@ func (s FgaService) SyncObjectTuples(
 	return writes, deletes, nil
 }
 
+// seedPositiveCacheEntries writes each cacheKey and blocks until all writes
+// complete (or time out), rather than firing detached goroutines. The access
+// mutation consumer processes exactly one message at a time
+// (MaxAckPending: 1) and only ACKs after this call returns, so awaiting the
+// seed here guarantees it lands before any later message's invalidateCache
+// call. A detached seed could otherwise still be in flight when a later
+// message (e.g. a delete for the same relation) invalidates the cache first;
+// if the stale seed then landed after that invalidation's timestamp, the
+// staleness check in CheckRelationships (entry created after last
+// invalidation) would treat it as fresh and resurrect access the later
+// message had just revoked.
+//
+// Every cacheKey passed in corresponds to a direct user relationship that
+// SyncObjectTuples just wrote, so writing trueString is always correct here:
+// all such relations are "true" (allowed) access relations by construction.
 func (s FgaService) seedPositiveCacheEntries(ctx context.Context, cacheKeys []string) {
-	cacheCtx := context.WithoutCancel(ctx)
+	var wg sync.WaitGroup
 	for _, cacheKey := range cacheKeys {
+		wg.Add(1)
 		go func(key string) {
-			timeoutCtx, cancel := context.WithTimeout(cacheCtx, 5*time.Second)
+			defer wg.Done()
+			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
 			_, _ = s.cacheBucket.PutString(timeoutCtx, key, trueString)
 		}(cacheKey)
 	}
+	wg.Wait()
 }
 
 // invalidateCache invalidates the cache by writing a timestamp marker.

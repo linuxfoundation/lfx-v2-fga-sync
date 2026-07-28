@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/openfga/go-sdk/client"
@@ -67,18 +66,13 @@ func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T
 				require.NoError(t, err)
 			}
 
-			// The positive case waits for the async seeding goroutine, so it uses a
-			// longer deadline to avoid false failures on a busy CI worker. The
-			// negative case only needs to prove no write ever arrives, so it keeps a
-			// short bounded wait.
-			deadline := 100 * time.Millisecond
-			if tt.wantCacheSeed {
-				deadline = 2 * time.Second
-			}
+			// seedPositiveCacheEntries blocks until all cache writes complete, so by
+			// the time SyncObjectTuples returns the write has either already
+			// happened or will never happen; no wait is needed either way.
 			select {
 			case <-cache.writes:
 				assert.True(t, tt.wantCacheSeed, "cache was seeded after failed OpenFGA write")
-			case <-time.After(deadline):
+			default:
 				assert.False(t, tt.wantCacheSeed, "cache was not seeded after successful OpenFGA write")
 			}
 		})
@@ -127,17 +121,19 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 		[]byte("project:resource-1#viewer@user:bob"),
 	)
 
+	// seedPositiveCacheEntries blocks until all cache writes complete, so both
+	// checks below are deterministic by the time SyncObjectTuples has returned.
 	select {
 	case key := <-cache.writes:
 		assert.Equal(t, survivingCacheKey, key, "seeded cache key should be for the tuple OpenFGA actually stored")
-	case <-time.After(2 * time.Second):
+	default:
 		t.Fatal("expected the surviving tuple's cache entry to be seeded")
 	}
 
 	select {
 	case key := <-cache.writes:
 		t.Fatalf("unexpected second cache write for %q; the skipped invalid tuple must not be seeded", key)
-	case <-time.After(200 * time.Millisecond):
+	default:
 		// No further writes: the skipped tuple's cache key was correctly excluded.
 	}
 }

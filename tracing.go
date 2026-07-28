@@ -39,6 +39,10 @@ func startConsumerSpan(baseCtx context.Context, headers natsgo.Header, subject s
 // natsHeaderCarrier adapts nats.Header to propagation.TextMapCarrier.
 type natsHeaderCarrier natsgo.Header
 
+// Get reads a header value, tolerating a nil carrier: reading from a nil Go
+// map is well-defined and returns the zero value, so a message with no
+// headers (nil nats.Header) safely yields no propagated trace context
+// instead of panicking.
 func (c natsHeaderCarrier) Get(key string) string {
 	vals := c[key]
 	if len(vals) == 0 {
