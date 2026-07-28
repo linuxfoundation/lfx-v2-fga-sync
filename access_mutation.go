@@ -26,6 +26,13 @@ import (
 // own redelivery.
 const accessMutationProcessingTimeout = 90 * time.Second
 
+// accessMutationAdvisoryLookupTimeout bounds the Stream.GetMsg call used to
+// enrich a max-delivery advisory with its object context, so a JetStream
+// stall cannot block the advisory callback indefinitely. sync_max_deliver_exhausted
+// is incremented before this lookup, so a timeout here still records the
+// exhaustion; only the enrichment is best-effort.
+const accessMutationAdvisoryLookupTimeout = 5 * time.Second
+
 // accessMutationShutdownGrace bounds how long stopAccessMutationConsumer waits
 // for an in-flight delivery attempt to finish on its own before force-
 // canceling its context. OpenFGA writes normally complete in well under a
@@ -341,7 +348,9 @@ func handleMaxDeliveryAdvisory(
 	}
 
 	syncMaxDeliverExhausted.Add(1)
-	retainedMessage, err := stream.GetMsg(ctx, advisory.StreamSeq)
+	getMsgCtx, cancel := context.WithTimeout(ctx, accessMutationAdvisoryLookupTimeout)
+	defer cancel()
+	retainedMessage, err := stream.GetMsg(getMsgCtx, advisory.StreamSeq)
 	if err != nil {
 		logExhaustedAccessMutation(ctx, advisory, "", "", err)
 		return err

@@ -112,6 +112,11 @@ application:
   useCache: true
   # replicas is the number of pod replicas
   replicas: 1
+  # terminationGracePeriodSeconds must exceed the worst-case shutdown budget:
+  # the access-mutation consumer's shutdown grace (5s) plus the NATS drain
+  # timeout (25s), with margin for OpenTelemetry shutdown. The Kubernetes
+  # default of 30s no longer has enough margin once both are combined.
+  terminationGracePeriodSeconds: 60
   # resources is the resource configuration for the pods
   resources:
     requests:

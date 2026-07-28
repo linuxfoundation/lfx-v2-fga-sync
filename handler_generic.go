@@ -356,7 +356,7 @@ func (h *HandlerService) applyMemberPutChanges(
 	tuplesToDelete []client.ClientTupleKeyWithoutCondition,
 ) error {
 	if len(tuplesToWrite) > 0 || len(tuplesToDelete) > 0 {
-		err := h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
+		_, err := h.fgaService.WriteAndDeleteTuples(ctx, tuplesToWrite, tuplesToDelete)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to put member relations",
 				errKey, err,
@@ -508,7 +508,7 @@ func (h *HandlerService) genericMemberRemoveHandler(ctx context.Context, message
 		}
 
 		// Use WriteAndDeleteTuples with empty writes
-		err := h.fgaService.WriteAndDeleteTuples(ctx, nil, tuplesToDelete)
+		_, err := h.fgaService.WriteAndDeleteTuples(ctx, nil, tuplesToDelete)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to remove member relations",
 				errKey, err,

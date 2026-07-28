@@ -65,14 +65,18 @@ order-safe disposition.
 
 Preferred:
 
-1. Record the consumer's initial pending plus ACK-pending count, the
-   `sync_ack` value, and `sync_max_deliver_exhausted`.
+1. Record the consumer's initial pending plus ACK-pending count, and the
+   baseline values for `sync_ack`, `sync_terminal`, and
+   `sync_max_deliver_exhausted`.
 2. Leave the new consumer running and drain the stream backlog in sequence
    order.
-3. Confirm the consumer reports no pending or ACK-pending messages, `sync_ack`
-   increased by the recorded backlog count, and
-   `sync_max_deliver_exhausted` did not increase. Route any exhausted sequence
-   through the fallback procedure instead of treating it as drained.
+3. Confirm the consumer reports no pending or ACK-pending messages, and the
+   combined `sync_ack` and `sync_terminal` increase equals the recorded
+   backlog count. Terminally disposed messages (locally invalid payloads)
+   clear pending delivery without increasing `sync_ack`, so both counters must
+   be checked. Confirm `sync_max_deliver_exhausted` did not increase. Route any
+   exhausted sequence through the fallback procedure instead of treating it as
+   drained.
 4. Stop the consumer and all new fga-sync pods.
 5. Deploy the previous fga-sync version and confirm both core subscriptions are
    active without overlap.

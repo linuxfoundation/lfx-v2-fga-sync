@@ -121,10 +121,11 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
-				return svc.WriteAndDeleteTuples(ctx,
+				_, err := svc.WriteAndDeleteTuples(ctx,
 					[]ClientTupleKey{{User: "user:alice", Relation: "writer", Object: "project:123"}},
 					nil,
 				)
+				return err
 			},
 		},
 		{
@@ -198,10 +199,11 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				return FgaService{client: mc}
 			},
 			run: func(ctx context.Context, svc FgaService) error {
-				return svc.WriteAndDeleteTuples(ctx,
+				_, err := svc.WriteAndDeleteTuples(ctx,
 					[]ClientTupleKey{{User: "user:alice", Relation: "writer", Object: "project:123"}},
 					nil,
 				)
+				return err
 			},
 		},
 		{
