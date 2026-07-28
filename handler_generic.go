@@ -48,7 +48,7 @@ func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message
 		return newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "update_access" {
-		logger.ErrorContext(ctx, "invalid operation for update_access handler")
+		logger.ErrorContext(ctx, "invalid operation for update_access handler", "operation", genericMsg.Operation)
 		return newTerminalValidationError(errors.New("invalid operation for update_access handler"))
 	}
 
@@ -106,7 +106,7 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 		return newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "delete_access" {
-		logger.ErrorContext(ctx, "invalid operation for delete_access handler")
+		logger.ErrorContext(ctx, "invalid operation for delete_access handler", "operation", genericMsg.Operation)
 		return newTerminalValidationError(errors.New("invalid operation for delete_access handler"))
 	}
 
@@ -143,8 +143,8 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 
 	logger.With(
 		"object", object,
-		"writes_count", len(tuplesWrites),
-		"deletes_count", len(tuplesDeletes),
+		"writes", tuplesWrites,
+		"deletes", tuplesDeletes,
 	).InfoContext(ctx, "deleted publisher-managed access for "+genericMsg.ObjectType)
 
 	// Send reply

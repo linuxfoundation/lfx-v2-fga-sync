@@ -196,17 +196,17 @@ func (h *HandlerService) processStandardAccessUpdate(
 	if err != nil {
 		logger.With(
 			"error_type", safeErrorType(err),
+			"tuples", tuples,
 			"object", object,
-			"tuple_count", len(tuples),
 		).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
 	logger.With(
+		"tuples", tuples,
 		"object", object,
-		"tuple_count", len(tuples),
-		"writes_count", len(tuplesWrites),
-		"deletes_count", len(tuplesDeletes),
+		"writes", tuplesWrites,
+		"deletes", tuplesDeletes,
 	).InfoContext(ctx, "synced tuples")
 
 	if message.Reply() != "" {

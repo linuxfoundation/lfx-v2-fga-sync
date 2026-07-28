@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -254,17 +255,37 @@ func (s FgaService) SyncObjectTuples(
 			// Desired state matches current state. Remove the match from "desired
 			// state" since we won't need to write/insert it.
 			delete(relationsMap, key)
+			if isUser := strings.HasPrefix(tuple.Key.User, "user:") && tuple.Key.User != constants.UserWildcard; isUser {
+				// Save this for a later user-access notification.
+				msg := fmt.Sprintf("%s#%s@%s\ttrue\n", tuple.Key.Object, tuple.Key.Relation, tuple.Key.User)
+				logger.With("message", msg).DebugContext(ctx, "will send user access notification")
+			}
 		case false:
 			// Check if this relation should be excluded from deletion
 			if excludeMap[tuple.Key.Relation] {
+				logger.With(
+					"user", tuple.Key.User,
+					"relation", tuple.Key.Relation,
+					"object", object,
+				).DebugContext(ctx, "skipping deletion of excluded relation")
 				continue
 			}
 			// Preserve team member grant tuples (e.g. team:my-team#member) — these are
 			// managed by a separate workflow and must not be clobbered by resource
 			// service sync operations.
 			if strings.HasPrefix(tuple.Key.User, "team:") {
+				logger.With(
+					"user", tuple.Key.User,
+					"relation", tuple.Key.Relation,
+					"object", object,
+				).DebugContext(ctx, "skipping deletion of team member grant tuple")
 				continue
 			}
+			logger.With(
+				"user", tuple.Key.User,
+				"relation", tuple.Key.Relation,
+				"object", object,
+			).DebugContext(ctx, "will delete relation in batch write")
 			deletes = append(deletes, s.TupleKeyWithoutCondition(tuple.Key.User, tuple.Key.Relation, object))
 		}
 	}
@@ -276,6 +297,11 @@ func (s FgaService) SyncObjectTuples(
 	// skipped during invalid-tuple recovery can be excluded from seeding below.
 	cacheKeysByTuple := make(map[string]string, len(relationsMap))
 	for _, relation := range relationsMap {
+		logger.With(
+			"user", relation.User,
+			"relation", relation.Relation,
+			"object", object,
+		).DebugContext(ctx, "will add relation in batch write")
 		writes = append(writes, relation)
 		if isUser := strings.HasPrefix(relation.User, "user:"); isUser {
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
@@ -495,6 +521,8 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 	logger.With(
 		"writes_count", len(writes),
 		"deletes_count", len(deletes),
+		"writes", writes,
+		"deletes", deletes,
 	).InfoContext(ctx, "wrote and deleted tuples")
 
 	return skippedWrites, nil

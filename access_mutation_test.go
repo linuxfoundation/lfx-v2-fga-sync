@@ -21,13 +21,15 @@ import (
 )
 
 type testAccessMutationMessage struct {
-	data      []byte
-	headers   nats.Header
-	subject   string
-	ackErr    error
-	termErr   error
-	ackCalls  int
-	termCalls int
+	data        []byte
+	headers     nats.Header
+	subject     string
+	metadata    *jetstream.MsgMetadata
+	metadataErr error
+	ackErr      error
+	termErr     error
+	ackCalls    int
+	termCalls   int
 }
 
 type testRetainedMessageGetter struct {
@@ -71,6 +73,12 @@ func (m *testAccessMutationMessage) Subject() string {
 }
 
 func (m *testAccessMutationMessage) Metadata() (*jetstream.MsgMetadata, error) {
+	if m.metadataErr != nil {
+		return nil, m.metadataErr
+	}
+	if m.metadata != nil {
+		return m.metadata, nil
+	}
 	return &jetstream.MsgMetadata{}, nil
 }
 
@@ -425,4 +433,90 @@ func TestHandleMaxDeliveryAdvisoryRejectsMalformedPayload(t *testing.T) {
 	require.Error(t, err)
 	assert.Zero(t, syncMaxDeliverExhausted.Value()-before)
 	assert.Zero(t, getter.seq)
+}
+
+// attributesToMap converts the flat key/value slice passed to logger.With
+// into a map, so tests can assert on individual fields regardless of order.
+func attributesToMap(t *testing.T, attributes []any) map[string]any {
+	t.Helper()
+	require.Zero(t, len(attributes)%2, "attributes must be an even number of key/value entries")
+
+	result := make(map[string]any, len(attributes)/2)
+	for i := 0; i < len(attributes); i += 2 {
+		key, ok := attributes[i].(string)
+		require.True(t, ok, "attribute key at index %d must be a string", i)
+		result[key] = attributes[i+1]
+	}
+	return result
+}
+
+// TestAccessMutationDeliveryAttributesHappyPath covers the fields both
+// logAccessMutationOutcome (success) and logAccessMutationFailure (failure)
+// rely on to correlate a delivery attempt with the object it carried.
+func TestAccessMutationDeliveryAttributesHappyPath(t *testing.T) {
+	t.Parallel()
+
+	message := &testAccessMutationMessage{
+		data: []byte(
+			`{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`,
+		),
+		subject: constants.GenericUpdateAccessSubject,
+		metadata: &jetstream.MsgMetadata{
+			Sequence:     jetstream.SequencePair{Stream: 42},
+			NumDelivered: 3,
+		},
+	}
+
+	attributes := attributesToMap(t, accessMutationDeliveryAttributes(message))
+
+	assert.Equal(t, constants.GenericUpdateAccessSubject, attributes["subject"])
+	assert.Equal(t, uint64(42), attributes["stream_sequence"])
+	assert.Equal(t, uint64(3), attributes["delivery_count"])
+	assert.Equal(t, "committee", attributes["object_type"])
+	assert.Equal(t, "resource-1", attributes["uid"])
+	assert.NotContains(t, attributes, "metadata_error")
+	assert.NotContains(t, attributes, "object_context_error")
+}
+
+// TestAccessMutationDeliveryAttributesMetadataError confirms a
+// Metadata() failure is surfaced instead of a stream sequence and delivery
+// count, rather than silently omitting delivery context or panicking on a
+// nil metadata dereference.
+func TestAccessMutationDeliveryAttributesMetadataError(t *testing.T) {
+	t.Parallel()
+
+	message := &testAccessMutationMessage{
+		data: []byte(
+			`{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`,
+		),
+		subject:     constants.GenericUpdateAccessSubject,
+		metadataErr: assert.AnError,
+	}
+
+	attributes := attributesToMap(t, accessMutationDeliveryAttributes(message))
+
+	assert.Equal(t, assert.AnError, attributes["metadata_error"])
+	assert.NotContains(t, attributes, "stream_sequence")
+	assert.NotContains(t, attributes, "delivery_count")
+	assert.Equal(t, "committee", attributes["object_type"])
+	assert.Equal(t, "resource-1", attributes["uid"])
+}
+
+// TestAccessMutationDeliveryAttributesMalformedPayload confirms a payload
+// that cannot be decoded reports an object_context_error with empty object
+// fields rather than the delivery attempt's real (but undecodable) context.
+func TestAccessMutationDeliveryAttributesMalformedPayload(t *testing.T) {
+	t.Parallel()
+
+	message := &testAccessMutationMessage{
+		data:    []byte(`{`),
+		subject: constants.GenericDeleteAccessSubject,
+	}
+
+	attributes := attributesToMap(t, accessMutationDeliveryAttributes(message))
+
+	assert.Equal(t, "", attributes["object_type"])
+	assert.Equal(t, "", attributes["uid"])
+	require.Contains(t, attributes, "object_context_error")
+	assert.Error(t, attributes["object_context_error"].(error))
 }

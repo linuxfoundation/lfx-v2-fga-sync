@@ -238,6 +238,7 @@ func ackAccessMutation(ctx context.Context, message accessMutationMessage) {
 		return
 	}
 	syncAck.Add(1)
+	logAccessMutationOutcome(ctx, message, "acknowledged")
 }
 
 func terminateAccessMutation(ctx context.Context, message accessMutationMessage, processingErr error) {
@@ -258,17 +259,12 @@ func recordAccessMutationError(ctx context.Context, err error) {
 	span.SetStatus(codes.Error, errorType)
 }
 
-func logAccessMutationFailure(
-	ctx context.Context,
-	message accessMutationMessage,
-	classification string,
-	err error,
-) {
-	attributes := []any{
-		"error_type", safeErrorType(err),
-		"classification", classification,
-		"subject", message.Subject(),
-	}
+// accessMutationDeliveryAttributes returns the delivery-context log fields
+// shared by both the success and failure outcome logs, so an operator can
+// correlate a stream sequence and delivery attempt with the object it
+// carried regardless of how the delivery attempt concluded.
+func accessMutationDeliveryAttributes(message accessMutationMessage) []any {
+	attributes := []any{"subject", message.Subject()}
 	if metadata, metadataErr := message.Metadata(); metadataErr != nil {
 		attributes = append(attributes, "metadata_error", metadataErr)
 	} else {
@@ -279,12 +275,39 @@ func logAccessMutationFailure(
 		)
 	}
 
-	objectType, uid, objectErr := decodeExhaustedObject(message.Data())
+	objectType, uid, objectErr := decodeAccessMutationObject(message.Data())
 	attributes = append(attributes, "object_type", objectType, "uid", uid)
 	if objectErr != nil {
 		attributes = append(attributes, "object_context_error", objectErr)
 	}
+	return attributes
+}
+
+func logAccessMutationFailure(
+	ctx context.Context,
+	message accessMutationMessage,
+	classification string,
+	err error,
+) {
+	attributes := append([]any{
+		"error_type", safeErrorType(err),
+		"classification", classification,
+	}, accessMutationDeliveryAttributes(message)...)
 	logger.With(attributes...).ErrorContext(ctx, "access mutation delivery failure")
+}
+
+// logAccessMutationOutcome logs a successful delivery outcome (currently just
+// "acknowledged") with the same stream sequence, delivery count, and object
+// context as logAccessMutationFailure, so successful and failed deliveries
+// are equally traceable to a specific tuple sync. Kept at InfoContext (not
+// DebugContext) deliberately while the JetStream migration rolls out, to
+// make delivery-attempt correlation visible by default; revisit once the
+// rollout is proven stable.
+func logAccessMutationOutcome(ctx context.Context, message accessMutationMessage, classification string) {
+	attributes := append([]any{
+		"classification", classification,
+	}, accessMutationDeliveryAttributes(message)...)
+	logger.With(attributes...).InfoContext(ctx, "access mutation delivery outcome")
 }
 
 // maxDeliveryAdvisory is the JetStream $JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES
@@ -356,7 +379,7 @@ func handleMaxDeliveryAdvisory(
 		return err
 	}
 
-	objectType, uid, err := decodeExhaustedObject(retainedMessage.Data)
+	objectType, uid, err := decodeAccessMutationObject(retainedMessage.Data)
 	logExhaustedAccessMutation(ctx, advisory, objectType, uid, err)
 	return err
 }
@@ -374,7 +397,10 @@ func validateMaxDeliveryAdvisory(advisory maxDeliveryAdvisory) error {
 	}
 }
 
-func decodeExhaustedObject(data []byte) (string, string, error) {
+// decodeAccessMutationObject decodes the object type and UID from a raw
+// access mutation message payload, for attaching object context to delivery
+// outcome logs (success, failure, and max-delivery exhaustion).
+func decodeAccessMutationObject(data []byte) (string, string, error) {
 	var message fgatypes.GenericFGAMessage
 	if err := json.Unmarshal(data, &message); err != nil {
 		return "", "", fmt.Errorf("decode retained access mutation: %w", err)
