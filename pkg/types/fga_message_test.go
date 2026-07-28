@@ -91,3 +91,47 @@ func TestGenericFGAMessage_UnmarshalData_NilData(t *testing.T) {
 		t.Errorf("expected zero-value UID, got %q", decoded.UID)
 	}
 }
+
+func TestAccessMutationEnvelopeWireFormat(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		msg  GenericFGAMessage
+		want string
+	}{
+		{
+			name: "update access",
+			msg: GenericFGAMessage{
+				ObjectType: "committee",
+				Operation:  "update_access",
+				Data:       GenericAccessData{UID: "resource-1"},
+			},
+			want: `{"object_type":"committee","operation":"update_access","data":` +
+				`{"uid":"resource-1","public":false,"relations":null,"references":null,"exclude_relations":null}}`,
+		},
+		{
+			name: "delete access",
+			msg: GenericFGAMessage{
+				ObjectType: "committee",
+				Operation:  "delete_access",
+				Data:       GenericDeleteData{UID: "resource-1"},
+			},
+			want: `{"object_type":"committee","operation":"delete_access","data":{"uid":"resource-1"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := json.Marshal(tt.msg)
+			if err != nil {
+				t.Fatalf("marshal envelope: %v", err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("wire format changed:\ngot:  %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+}

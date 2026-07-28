@@ -67,8 +67,10 @@ If no tuples are found:
 
 The FGA Sync service provides four universal NATS subjects that work with any
 resource type defined in the OpenFGA model, such as projects, committees, and
-v1 meetings. If a reply subject is provided, the service responds with `OK`
-after processing, allowing callers to implement synchronous acknowledgement.
+v1 meetings. `update_access` and `delete_access` are asynchronous, ordered,
+at-least-once JetStream messages and never send application replies.
+`member_put` and `member_remove` remain core NATS operations that respond with
+`OK` after processing when a reply subject is provided.
 
 ### Benefits of Generic Handlers
 
@@ -85,7 +87,7 @@ after processing, allowing callers to implement synchronous acknowledgement.
 | Subject | Purpose |
 |---------|---------|
 | `lfx.fga-sync.update_access` | Create/update access control for a resource |
-| `lfx.fga-sync.delete_access` | Delete all access control for a resource |
+| `lfx.fga-sync.delete_access` | Delete publisher-managed access control for a resource |
 | `lfx.fga-sync.member_put` | Add member(s) with one or more relations |
 | `lfx.fga-sync.member_remove` | Remove member relations |
 
@@ -283,7 +285,9 @@ msg := GenericFGAMessage{
 }
 
 payload, _ := json.Marshal(msg)
-nc.Request("lfx.fga-sync.update_access", payload, 5*time.Second)
+if err := nc.Publish("lfx.fga-sync.update_access", payload); err != nil {
+    return err
+}
 ```
 
 ---
@@ -292,7 +296,8 @@ nc.Request("lfx.fga-sync.update_access", payload, 5*time.Second)
 
 **Subject:** `lfx.fga-sync.delete_access`
 
-Deletes **all** access control tuples for a resource. Typically used when a resource is deleted.
+Deletes publisher-managed access control tuples for a resource while preserving
+externally managed `team:*` grants. Typically used when a resource is deleted.
 
 ### Data Fields
 
@@ -352,7 +357,9 @@ msg := GenericFGAMessage{
 }
 
 payload, _ := json.Marshal(msg)
-nc.Request("lfx.fga-sync.delete_access", payload, 5*time.Second)
+if err := nc.Publish("lfx.fga-sync.delete_access", payload); err != nil {
+    return err
+}
 ```
 
 ---
@@ -799,17 +806,18 @@ Remove `attendee` if they didn't actually attend:
 
 ## Response Format
 
-Sync operations return a simple `"OK"` string on success when the request
-includes a reply subject:
+`member_put` and `member_remove` return a simple `"OK"` string on success when
+the request includes a reply subject:
 
 ```text
 OK
 ```
 
-Sync-operation failures are logged server-side by the subscription loop. They do
-not currently have a standardized NATS error response body, so callers using
-request/reply should treat a missing `OK` as failure and apply their normal
-timeout/retry handling.
+`update_access` and `delete_access` do not return `OK`. JetStream ACKs successful
+processing, redelivers transient failures, and terminates proven invalid
+payloads. Publishers receive no OpenFGA completion acknowledgement; `X-Sync`
+does not change that contract. Membership-operation failures are logged
+server-side and do not have a standardized NATS error response body.
 
 ---
 
@@ -906,7 +914,7 @@ The repo does not publish canonical latency numbers. In general:
 | Operation | Cost driver |
 |-----------|-------------|
 | `update_access` | Reads current object tuples, computes diff, writes/deletes changed tuples |
-| `delete_access` | Reads current object tuples, then deletes all tuples for the object |
+| `delete_access` | Reads current object tuples, then deletes publisher-managed tuples while retaining `team:*` grants |
 | `member_put` (new) | Reads current object tuples, writes missing relations |
 | `member_put` (existing) | Reads current object tuples, skips writes when relations already exist |
 | `member_put` (mutually exclusive) | Reads current object tuples, deletes mutually exclusive relations, writes desired relations |
@@ -993,10 +1001,10 @@ path; non-validation OpenFGA errors fail the operation.
 
 ```bash
 # Update Access
-nats request lfx.fga-sync.update_access '{"object_type":"committee","operation":"update_access","data":{"uid":"123","public":true,"relations":{"member":["alice"]}}}'
+nats pub lfx.fga-sync.update_access '{"object_type":"committee","operation":"update_access","data":{"uid":"123","public":true,"relations":{"member":["alice"]}}}'
 
 # Delete Access
-nats request lfx.fga-sync.delete_access '{"object_type":"committee","operation":"delete_access","data":{"uid":"123"}}'
+nats pub lfx.fga-sync.delete_access '{"object_type":"committee","operation":"delete_access","data":{"uid":"123"}}'
 
 # Add Member
 nats request lfx.fga-sync.member_put '{"object_type":"committee","operation":"member_put","data":{"uid":"123","username":"alice","relations":["member"]}}'

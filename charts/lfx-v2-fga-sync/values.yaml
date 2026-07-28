@@ -74,6 +74,19 @@ nats:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
+  # accessMutationStream persists ordered update_access and delete_access messages.
+  accessMutationStream:
+    creation: true
+    keep: true
+    name: fga-sync-events
+    subjects:
+      - lfx.fga-sync.update_access
+      - lfx.fga-sync.delete_access
+    retention: limits
+    maxAge: 24h
+    storage: file
+    replicas: 3
+
 # fga is the configuration for the OpenFGA server
 # These values come from the lfx-platform helm chart repo:
 # https://github.com/linuxfoundation/lfx-v2-helm/blob/main/docs/openfga.md

@@ -17,6 +17,7 @@ LFX Platform v2.
 ## 🚀 Features
 
 - **Real-time Authorization Sync**: Synchronizes resource access tuples between NATS and OpenFGA
+- **Durable Access Mutations**: Applies update and delete access messages in order through JetStream
 - **Cache-first Access Checks**: JetStream KV caching with global timestamp invalidation
 - **Batch Operations**: Efficient bulk relationship checking and updates
 - **Health Monitoring**: Kubernetes-ready health checks and observability
@@ -108,11 +109,12 @@ Dependencies you need but should get from [lfx-v2-helm](https://github.com/linux
    export DEBUG=false
    ```
 
-5. **Create the NATS KeyValue cache bucket**:
+5. **Create the NATS KeyValue cache bucket and access-mutation stream**:
 
    ```bash
    # Using NATS CLI (if available)
    nats kv add fga-sync-cache --history=20 --storage=file --max-value-size=10485760 --max-bucket-size=1073741824
+   nats stream add fga-sync-events --subjects=lfx.fga-sync.update_access --subjects=lfx.fga-sync.delete_access --storage=file --retention=limits --max-age=24h
 
    # Or using kubectl if running in Kubernetes
    kubectl exec -n lfx deploy/nats-box -- nats kv add fga-sync-cache --history=20 --storage=file --max-value-size=10485760 --max-bucket-size=1073741824 --ttl=3h
@@ -204,7 +206,8 @@ Returns `200 OK` if the service is running.
 GET /readyz
 ```
 
-Returns `200 OK` if the service is ready to handle requests (NATS connected).
+Returns `200 OK` when NATS is connected and not draining. It does not attest to
+JetStream consumer-loop health.
 
 ### NATS API
 
@@ -222,8 +225,8 @@ formats, examples, and integration guidance.
 
 | Subject | Description |
 |---------|-------------|
-| `lfx.fga-sync.update_access` | Create/update access control for a resource |
-| `lfx.fga-sync.delete_access` | Delete all access control for a resource |
+| `lfx.fga-sync.update_access` | Asynchronously create/update access control for a resource |
+| `lfx.fga-sync.delete_access` | Asynchronously delete publisher-managed access control for a resource |
 | `lfx.fga-sync.member_put` | Add member(s) with one or more relations |
 | `lfx.fga-sync.member_remove` | Remove member relations |
 
@@ -302,6 +305,15 @@ The service exposes metrics via expvar at `/debug/vars`:
 - `cache_hits` - Number of successful cache lookups
 - `cache_stale_hits` - Number of stale cache entries detected and rechecked
 - `cache_misses` - Number of cache misses requiring OpenFGA queries
+- `sync_ack` - Access mutations successfully acknowledged
+- `sync_transient_attempts` - Access mutation attempts left for redelivery
+- `sync_terminal` - Invalid access mutations successfully terminated
+- `sync_max_deliver_exhausted` - Access mutations that exhausted redelivery
+
+The exhaustion counter is updated from a best-effort core NATS advisory
+subscription while a replica is connected. Platform monitoring must also alert
+on the consumer's max-delivery advisory subject to cover expiry while all
+replicas are disconnected.
 
 ### Logging
 

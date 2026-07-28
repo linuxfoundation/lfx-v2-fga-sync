@@ -1,0 +1,428 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
+package main
+
+import (
+	"context"
+	"errors"
+	"net"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+	nats "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/openfga/go-sdk/client"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+)
+
+type testAccessMutationMessage struct {
+	data      []byte
+	headers   nats.Header
+	subject   string
+	ackErr    error
+	termErr   error
+	ackCalls  int
+	termCalls int
+}
+
+type testRetainedMessageGetter struct {
+	message *jetstream.RawStreamMsg
+	err     error
+	seq     uint64
+}
+
+type testAccessMutationConsumeContext struct {
+	closed <-chan struct{}
+	events *[]string
+}
+
+func (c *testAccessMutationConsumeContext) Stop() {
+	*c.events = append(*c.events, "stop")
+}
+
+func (c *testAccessMutationConsumeContext) Closed() <-chan struct{} {
+	return c.closed
+}
+
+func (g *testRetainedMessageGetter) GetMsg(
+	_ context.Context,
+	seq uint64,
+	_ ...jetstream.GetMsgOpt,
+) (*jetstream.RawStreamMsg, error) {
+	g.seq = seq
+	return g.message, g.err
+}
+
+func (m *testAccessMutationMessage) Data() []byte {
+	return m.data
+}
+
+func (m *testAccessMutationMessage) Headers() nats.Header {
+	return m.headers
+}
+
+func (m *testAccessMutationMessage) Subject() string {
+	return m.subject
+}
+
+func (m *testAccessMutationMessage) Metadata() (*jetstream.MsgMetadata, error) {
+	return &jetstream.MsgMetadata{}, nil
+}
+
+func (m *testAccessMutationMessage) Ack() error {
+	m.ackCalls++
+	return m.ackErr
+}
+
+func (m *testAccessMutationMessage) Term() error {
+	m.termCalls++
+	return m.termErr
+}
+
+func TestAccessMutationConsumerConfig(t *testing.T) {
+	t.Parallel()
+
+	config := accessMutationConsumerConfig()
+
+	assert.Equal(t, constants.FgaSyncAccessMutationConsumerName, config.Name)
+	assert.Equal(t, constants.FgaSyncAccessMutationConsumerName, config.Durable)
+	assert.Equal(t, jetstream.DeliverAllPolicy, config.DeliverPolicy)
+	assert.Equal(t, jetstream.AckExplicitPolicy, config.AckPolicy)
+	assert.Equal(t, 1, config.MaxAckPending)
+	assert.Equal(t, 7, config.MaxDeliver)
+	assert.Zero(t, config.AckWait)
+	assert.Equal(t, []time.Duration{
+		2 * time.Minute,
+		2 * time.Minute,
+		5 * time.Minute,
+		10 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+	}, config.BackOff)
+	assert.Empty(t, config.FilterSubjects)
+}
+
+func TestAccessMutationAttemptContextUsesNinetySecondDeadline(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := accessMutationAttemptContext(context.Background())
+	defer cancel()
+
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	assert.WithinDuration(t, time.Now().Add(90*time.Second), deadline, time.Second)
+}
+
+func TestProcessAccessMutationMessageOutcomes(t *testing.T) {
+	tests := []struct {
+		name           string
+		payload        string
+		subject        string
+		fgaErr         error
+		ackErr         error
+		termErr        error
+		wantAckCalls   int
+		wantTermCalls  int
+		ackDelta       int64
+		transientDelta int64
+		terminalDelta  int64
+	}{
+		{
+			name:         "success ACKs",
+			payload:      `{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`,
+			subject:      constants.GenericUpdateAccessSubject,
+			wantAckCalls: 1,
+			ackDelta:     1,
+		},
+		{
+			name:         "ACK failure stays unacknowledged",
+			payload:      `{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`,
+			subject:      constants.GenericUpdateAccessSubject,
+			ackErr:       errors.New("ack failed"),
+			wantAckCalls: 1,
+		},
+		{
+			name:          "terminal payload terminates",
+			payload:       `{`,
+			subject:       constants.GenericDeleteAccessSubject,
+			wantTermCalls: 1,
+			terminalDelta: 1,
+		},
+		{
+			name:          "TERM failure stays unacknowledged",
+			payload:       `{`,
+			subject:       constants.GenericDeleteAccessSubject,
+			termErr:       errors.New("term failed"),
+			wantTermCalls: 1,
+		},
+		{
+			name:           "FGA failure stays transient",
+			payload:        `{"object_type":"committee","operation":"delete_access","data":{"uid":"resource-1"}}`,
+			subject:        constants.GenericDeleteAccessSubject,
+			fgaErr:         assert.AnError,
+			transientDelta: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := setupService()
+			fgaClient := service.fgaService.client.(*MockFgaClient)
+			fgaClient.
+				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
+				Return(&client.ClientReadResponse{}, tt.fgaErr)
+
+			message := &testAccessMutationMessage{
+				data:    []byte(tt.payload),
+				subject: tt.subject,
+				ackErr:  tt.ackErr,
+				termErr: tt.termErr,
+			}
+			ackBefore := syncAck.Value()
+			transientBefore := syncTransientAttempts.Value()
+			terminalBefore := syncTerminal.Value()
+
+			processAccessMutationMessage(context.Background(), service, message)
+
+			assert.Equal(t, tt.wantAckCalls, message.ackCalls)
+			assert.Equal(t, tt.wantTermCalls, message.termCalls)
+			assert.Equal(t, tt.ackDelta, syncAck.Value()-ackBefore)
+			assert.Equal(t, tt.transientDelta, syncTransientAttempts.Value()-transientBefore)
+			assert.Equal(t, tt.terminalDelta, syncTerminal.Value()-terminalBefore)
+		})
+	}
+}
+
+// TestProcessAccessMutationMessageFgaErrorsStayTransient does not run its
+// subtests in parallel: they assert on deltas to the package-level expvar
+// counters, which would race against each other under t.Parallel().
+func TestProcessAccessMutationMessageFgaErrorsStayTransient(t *testing.T) {
+	fgaErrors := []struct {
+		name string
+		err  error
+	}{
+		{name: "unknown SDK error", err: assert.AnError},
+		{
+			name: "connection refused",
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED},
+		},
+		{name: "context deadline", err: context.DeadlineExceeded},
+		{name: "propagated validation error", err: makeValidationError("request validation failed")},
+		{name: "HTTP 400", err: fakeStatusErr{code: 400}},
+		{name: "HTTP 401", err: fakeStatusErr{code: 401}},
+		{name: "HTTP 403", err: fakeStatusErr{code: 403}},
+		{name: "HTTP 408", err: fakeStatusErr{code: 408}},
+		{name: "HTTP 409", err: fakeStatusErr{code: 409}},
+		{name: "HTTP 429", err: fakeStatusErr{code: 429}},
+		{name: "HTTP 500", err: fakeStatusErr{code: 500}},
+	}
+
+	for _, tt := range fgaErrors {
+		t.Run(tt.name, func(t *testing.T) {
+			service := setupService()
+			service.fgaService.client.(*MockFgaClient).
+				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
+				Return((*client.ClientReadResponse)(nil), tt.err)
+
+			message := &testAccessMutationMessage{
+				data:    []byte(`{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`),
+				subject: constants.GenericUpdateAccessSubject,
+			}
+			transientBefore := syncTransientAttempts.Value()
+
+			processAccessMutationMessage(context.Background(), service, message)
+
+			assert.Zero(t, message.ackCalls, "must not ACK on an FGA error")
+			assert.Zero(t, message.termCalls, "must not TERM on an FGA error")
+			assert.Equal(t, int64(1), syncTransientAttempts.Value()-transientBefore)
+		})
+	}
+}
+
+// TestProcessAccessMutationMessagePersistentErrorStaysTransientAcrossRedeliveries
+// confirms that a message whose OpenFGA write repeatedly fails with a
+// propagated validation error is never ACKed or TERMed on any delivery
+// attempt. Combined with the pinned consumer config (MaxAckPending: 1,
+// MaxDeliver: 7), this is what makes such a message occupy the single
+// global in-flight slot for the full BackOff schedule rather than being
+// terminated early or displaced by another message.
+func TestProcessAccessMutationMessagePersistentErrorStaysTransientAcrossRedeliveries(t *testing.T) {
+	service := setupService()
+	service.fgaService.client.(*MockFgaClient).
+		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
+		Return((*client.ClientReadResponse)(nil), makeValidationError("request validation failed"))
+
+	config := accessMutationConsumerConfig()
+	transientBefore := syncTransientAttempts.Value()
+
+	for attempt := 1; attempt <= config.MaxDeliver; attempt++ {
+		message := &testAccessMutationMessage{
+			data:    []byte(`{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`),
+			subject: constants.GenericUpdateAccessSubject,
+		}
+
+		processAccessMutationMessage(context.Background(), service, message)
+
+		assert.Zero(t, message.ackCalls, "attempt %d must not ACK", attempt)
+		assert.Zero(t, message.termCalls, "attempt %d must not TERM", attempt)
+	}
+
+	assert.Equal(t, int64(config.MaxDeliver), syncTransientAttempts.Value()-transientBefore,
+		"every delivery attempt up to MaxDeliver must be counted transient")
+}
+
+func TestProcessAccessMutationMessageAcksCacheInvalidationWarning(t *testing.T) {
+	service := setupService()
+	fgaClient := service.fgaService.client.(*MockFgaClient)
+	fgaClient.
+		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
+		Return(&client.ClientReadResponse{}, nil)
+	fgaClient.
+		On("Write", mock.Anything, mock.Anything).
+		Return(&client.ClientWriteResponse{}, nil)
+	service.fgaService.cacheBucket.(*MockKeyValue).SetError(assert.AnError)
+	message := &testAccessMutationMessage{
+		data: []byte(
+			`{"object_type":"committee","operation":"update_access",` +
+				`"data":{"uid":"resource-1","public":true}}`,
+		),
+		subject: constants.GenericUpdateAccessSubject,
+	}
+	before := syncAck.Value()
+
+	processAccessMutationMessage(context.Background(), service, message)
+
+	assert.Equal(t, 1, message.ackCalls)
+	assert.Equal(t, int64(1), syncAck.Value()-before)
+}
+
+func TestStopAccessMutationConsumerAwaitsInFlightAttemptWithinGrace(t *testing.T) {
+	restoreGrace := setAccessMutationShutdownGrace(time.Minute)
+	defer restoreGrace()
+
+	events := make([]string, 0, 2)
+	closed := make(chan struct{})
+	consumer := &testAccessMutationConsumeContext{closed: closed, events: &events}
+
+	// Simulate an in-flight delivery attempt finishing on its own, well
+	// within the grace period, without needing a forced cancellation. Only
+	// the channel itself is touched from this goroutine so the two
+	// goroutines synchronize solely through the channel close/receive.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		close(closed)
+	}()
+
+	cancelCalls := 0
+	start := time.Now()
+	stopAccessMutationConsumer(consumer, func() {
+		cancelCalls++
+		events = append(events, "cancel")
+	})
+	elapsed := time.Since(start)
+
+	assert.Equal(t, []string{"stop", "cancel"}, events)
+	assert.Equal(t, 1, cancelCalls, "cancel must run exactly once, after the attempt finished on its own")
+	assert.Less(t, elapsed, 500*time.Millisecond, "must not wait out the full grace period when Closed() fires promptly")
+}
+
+func TestStopAccessMutationConsumerForceCancelsAfterGraceTimeout(t *testing.T) {
+	restoreGrace := setAccessMutationShutdownGrace(10 * time.Millisecond)
+	defer restoreGrace()
+
+	events := make([]string, 0, 3)
+	closed := make(chan struct{})
+	consumer := &testAccessMutationConsumeContext{closed: closed, events: &events}
+
+	cancelCalls := 0
+	stopAccessMutationConsumer(consumer, func() {
+		cancelCalls++
+		events = append(events, "cancel")
+		// Simulate cancellation aborting the stuck in-flight attempt,
+		// letting the consume loop finally close.
+		if cancelCalls == 1 {
+			close(closed)
+		}
+	})
+
+	assert.Equal(t, []string{"stop", "cancel"}, events)
+	assert.Equal(t, 1, cancelCalls, "cancel must run exactly once, to force the stuck attempt to abort")
+}
+
+// setAccessMutationShutdownGrace overrides the package-level shutdown grace
+// for a single test and returns a function that restores the original value.
+func setAccessMutationShutdownGrace(d time.Duration) func() {
+	original := accessMutationShutdownGrace
+	accessMutationShutdownGrace = d
+	return func() { accessMutationShutdownGrace = original }
+}
+
+func TestCoreSubscriptionsExcludeMigratedAccessSubjects(t *testing.T) {
+	t.Parallel()
+
+	configs := queueSubscriptionConfigs(*setupService())
+	subjects := make(map[string]bool, len(configs))
+	for _, config := range configs {
+		subjects[config.subject] = true
+	}
+
+	assert.False(t, subjects[constants.GenericUpdateAccessSubject])
+	assert.False(t, subjects[constants.GenericDeleteAccessSubject])
+	assert.True(t, subjects[constants.AccessCheckSubject])
+	assert.True(t, subjects[constants.ReadTuplesSubject])
+	assert.True(t, subjects[constants.GenericMemberPutSubject])
+	assert.True(t, subjects[constants.GenericMemberRemoveSubject])
+	assert.Len(t, subjects, 4)
+}
+
+func TestHandleMaxDeliveryAdvisoryEnrichesObjectContext(t *testing.T) {
+	getter := &testRetainedMessageGetter{
+		message: &jetstream.RawStreamMsg{
+			Subject: constants.GenericUpdateAccessSubject,
+			Data: []byte(
+				`{"object_type":"committee","operation":"update_access","data":{"uid":"resource-1"}}`,
+			),
+		},
+	}
+	advisory := []byte(
+		`{"id":"event-1","stream":"fga-sync-events","consumer":"fga-sync-access-mutation-consumer",` +
+			`"stream_seq":42,"deliveries":7}`,
+	)
+	before := syncMaxDeliverExhausted.Value()
+
+	err := handleMaxDeliveryAdvisory(context.Background(), getter, advisory)
+
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), getter.seq)
+	assert.Equal(t, int64(1), syncMaxDeliverExhausted.Value()-before)
+}
+
+func TestHandleMaxDeliveryAdvisoryCountsEnrichmentFailure(t *testing.T) {
+	getter := &testRetainedMessageGetter{err: assert.AnError}
+	advisory := []byte(
+		`{"id":"event-2","stream":"fga-sync-events","consumer":"fga-sync-access-mutation-consumer",` +
+			`"stream_seq":43,"deliveries":7}`,
+	)
+	before := syncMaxDeliverExhausted.Value()
+
+	err := handleMaxDeliveryAdvisory(context.Background(), getter, advisory)
+
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, int64(1), syncMaxDeliverExhausted.Value()-before)
+}
+
+func TestHandleMaxDeliveryAdvisoryRejectsMalformedPayload(t *testing.T) {
+	getter := &testRetainedMessageGetter{}
+	before := syncMaxDeliverExhausted.Value()
+
+	err := handleMaxDeliveryAdvisory(context.Background(), getter, []byte(`{`))
+
+	require.Error(t, err)
+	assert.Zero(t, syncMaxDeliverExhausted.Value()-before)
+	assert.Zero(t, getter.seq)
+}

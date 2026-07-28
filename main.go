@@ -22,10 +22,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	slogotel "github.com/remychantenay/slog-otel"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -158,9 +155,11 @@ func run(bind, port string) error {
 
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
+	var natsCloseOnce sync.Once
 	natsConn, err = nats.Connect(
 		natsURL,
 		nats.DrainTimeout(gracefulShutdownSeconds*time.Second),
+		nats.MaxReconnects(-1),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			if err != nil {
 				logger.With(errKey, err).Warn("NATS disconnected with error")
@@ -179,26 +178,20 @@ func run(bind, port string) error {
 			}
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
+			natsCloseOnce.Do(gracefulCloseWG.Done)
 			if ctx.Err() != nil {
-				// If our parent background context has already been canceled, this is
-				// a graceful shutdown. Decrement the wait group but do not exit, to
-				// allow other graceful shutdown steps to complete.
 				logger.Info("NATS closed handler called during graceful shutdown")
-				gracefulCloseWG.Done()
 				return
 			}
-			// Otherwise, this handler means that max reconnect attempts have been
-			// exhausted.
+
 			logger.With(
 				"lastError", nc.LastError(),
 				"stats", nc.Stats(),
-			).Error("NATS max-reconnects exhausted; connection closed")
-			// Send a synthetic interrupt and give any graceful-shutdown tasks 5
-			// seconds to clean up.
-			done <- os.Interrupt
-			time.Sleep(5 * time.Second)
-			// Exit with an error instead of decrementing the wait group.
-			os.Exit(1)
+			).Error("NATS connection closed unexpectedly")
+			select {
+			case done <- os.Interrupt:
+			default:
+			}
 		}),
 	)
 	if err != nil {
@@ -226,11 +219,19 @@ func run(bind, port string) error {
 		return fmt.Errorf("error creating queue subscriptions: %w", err)
 	}
 
-	// This next line blocks until SIGINT or SIGTERM is received, or NATS disconnects.
+	if err = startMaxDeliveryAdvisorySubscription(ctx, natsConn, jetstreamConn); err != nil {
+		return fmt.Errorf("error starting max-delivery advisory subscription: %w", err)
+	}
+
+	accessMutationConsumer, err := startAccessMutationConsumer(ctx, jetstreamConn, handlerService)
+	if err != nil {
+		return fmt.Errorf("error starting access mutation consumer: %w", err)
+	}
+
+	// This next line blocks until SIGINT or SIGTERM is received, or NATS closes.
 	<-done
 
-	// Cancel the background context.
-	cancel()
+	stopAccessMutationConsumer(accessMutationConsumer, cancel)
 
 	// Drain the connection, which will drain all subscriptions, then close the
 	// connection when complete.
@@ -288,10 +289,9 @@ func startHTTPListener(bind, port string) {
 func createHTTPHandlers() {
 	// Support GET/POST monitoring "ping".
 	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
-		// This always returns as long as the service is still running. As this
-		// endpoint is expected to be used as a Kubernetes liveness check, this
-		// service must likewise self-detect non-recoverable errors and
-		// self-terminate.
+		// This always returns OK as long as the process is running. NATS
+		// reconnects indefinitely rather than exiting on connection loss, so
+		// connectivity health is reported via /readyz instead.
 		_, err := fmt.Fprintf(w, "OK\n")
 		if err != nil {
 			logger.With(errKey, err).Error("error writing to response writer")
@@ -328,20 +328,10 @@ type subscriptionConfig struct {
 // subscribeToSubject subscribes to a single NATS subject with error handling and logging.
 func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
 	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
-		// Extract trace context from message headers, handling nil header gracefully
-		var hdr nats.Header
-		if msg.Header != nil {
-			hdr = msg.Header
-		}
-		msgCtx := otel.GetTextMapPropagator().Extract(context.Background(), natsHeaderCarrier(hdr))
-		msgCtx, span := tracer.Start(msgCtx, "nats.process",
-			trace.WithSpanKind(trace.SpanKindConsumer),
-			trace.WithAttributes(
-				attribute.String("messaging.system", "nats"),
-				attribute.String("messaging.destination.name", subject),
-				attribute.String("messaging.operation.type", "process"),
-			),
-		)
+		// A fresh background context is used as the extraction base, not the
+		// service context, since this callback must not inherit shutdown
+		// cancellation ahead of any explicit handling of that signal.
+		msgCtx, span := startConsumerSpan(context.Background(), msg.Header, subject)
 		defer span.End()
 		if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
 			span.RecordError(errHandler)
@@ -371,8 +361,17 @@ func subscribeToSubject(subject, description, queue string, handler HandlerFunc)
 func createQueueSubscriptions(handlerService HandlerService) error {
 	queue := constants.FgaSyncQueue
 
-	// Define all subscriptions in a slice for easy maintenance
-	subscriptions := []subscriptionConfig{
+	for _, config := range queueSubscriptionConfigs(handlerService) {
+		if err := subscribeToSubject(config.subject, config.description, queue, config.handler); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfig {
+	return []subscriptionConfig{
 		{
 			subject:     constants.AccessCheckSubject,
 			handler:     handlerService.accessCheckHandler,
@@ -382,17 +381,6 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			subject:     constants.ReadTuplesSubject,
 			handler:     handlerService.readTuplesHandler,
 			description: "read tuples",
-		},
-		// Generic handlers (resource-agnostic)
-		{
-			subject:     constants.GenericUpdateAccessSubject,
-			handler:     handlerService.genericUpdateAccessHandler,
-			description: "generic update access",
-		},
-		{
-			subject:     constants.GenericDeleteAccessSubject,
-			handler:     handlerService.genericDeleteAccessHandler,
-			description: "generic delete access",
 		},
 		{
 			subject:     constants.GenericMemberPutSubject,
@@ -405,13 +393,4 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 			description: "generic member remove",
 		},
 	}
-
-	// Subscribe to each subject using the helper function
-	for _, config := range subscriptions {
-		if err := subscribeToSubject(config.subject, config.description, queue, config.handler); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }

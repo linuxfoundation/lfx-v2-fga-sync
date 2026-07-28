@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -73,6 +74,55 @@ func (m *NatsMsg) Header() nats.Header {
 	return m.Msg.Header
 }
 
+// jetStreamMessage is the subset of [jetstream.Msg] needed to adapt a JetStream
+// message to [INatsMsg]. It is satisfied by [jetstream.Msg] and by test doubles.
+type jetStreamMessage interface {
+	Data() []byte
+	Headers() nats.Header
+	Subject() string
+}
+
+// jetStreamNatsMsg adapts a JetStream message to [INatsMsg]. Unlike [NatsMsg], it
+// hides the ACK reply subject: JetStream acknowledgment is handled explicitly by
+// the access mutation consumer, not via a reply-subject publish, so Reply always
+// returns empty and Respond is a no-op.
+type jetStreamNatsMsg struct {
+	message jetStreamMessage
+}
+
+var _ INatsMsg = (*jetStreamNatsMsg)(nil)
+
+// newJetStreamNatsMsg wraps a JetStream message as an [INatsMsg].
+func newJetStreamNatsMsg(message jetStreamMessage) INatsMsg {
+	return &jetStreamNatsMsg{message: message}
+}
+
+// Data implements [INatsMsg.Data].
+func (m *jetStreamNatsMsg) Data() []byte {
+	return m.message.Data()
+}
+
+// Header implements [INatsMsg.Header].
+func (m *jetStreamNatsMsg) Header() nats.Header {
+	return m.message.Headers()
+}
+
+// Reply implements [INatsMsg.Reply]. JetStream access mutations send no reply.
+func (m *jetStreamNatsMsg) Reply() string {
+	return ""
+}
+
+// Respond implements [INatsMsg.Respond] as a no-op; acknowledgment happens via
+// Ack/Term on the underlying JetStream message, not a reply-subject publish.
+func (m *jetStreamNatsMsg) Respond(_ []byte) error {
+	return nil
+}
+
+// Subject implements [INatsMsg.Subject].
+func (m *jetStreamNatsMsg) Subject() string {
+	return m.message.Subject()
+}
+
 // processStandardAccessUpdate handles the default access control update logic
 func (h *HandlerService) processStandardAccessUpdate(
 	ctx context.Context,
@@ -81,14 +131,14 @@ func (h *HandlerService) processStandardAccessUpdate(
 	excludeRelations ...string,
 ) error {
 
-	logger.With("message", string(message.Data())).InfoContext(
+	logger.With("object_type", obj.ObjectType, "uid", obj.UID).InfoContext(
 		ctx,
 		fmt.Sprintf("handling %s access control update", obj.ObjectType),
 	)
 
 	if obj.UID == "" {
 		logger.ErrorContext(ctx, fmt.Sprintf("%s ID not found", obj.ObjectType))
-		return fmt.Errorf("%s ID not found", obj.ObjectType)
+		return newTerminalValidationError(fmt.Errorf("%s ID not found", obj.ObjectType))
 	}
 
 	object := buildObjectID(obj.ObjectType, obj.UID)
@@ -118,9 +168,10 @@ func (h *HandlerService) processStandardAccessUpdate(
 				if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 					logger.ErrorContext(ctx, "invalid reference format: must be 'type:id' with both parts non-empty",
 						"reference", reference,
-						"value", value,
 					)
-					return fmt.Errorf("invalid reference format '%s': must be 'type:id' with both parts non-empty", value)
+					return newTerminalValidationError(
+						errors.New("invalid reference format: must be 'type:id' with both parts non-empty"),
+					)
 				}
 				// Value already has valid type:id format, use as-is
 				key = value
@@ -143,15 +194,19 @@ func (h *HandlerService) processStandardAccessUpdate(
 
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, tuples, excludeRelations...)
 	if err != nil {
-		logger.With(errKey, err, "tuples", tuples, "object", object).ErrorContext(ctx, "failed to sync tuples")
+		logger.With(
+			"error_type", safeErrorType(err),
+			"object", object,
+			"tuple_count", len(tuples),
+		).ErrorContext(ctx, "failed to sync tuples")
 		return err
 	}
 
 	logger.With(
-		"tuples", tuples,
 		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
+		"tuple_count", len(tuples),
+		"writes_count", len(tuplesWrites),
+		"deletes_count", len(tuplesDeletes),
 	).InfoContext(ctx, "synced tuples")
 
 	if message.Reply() != "" {

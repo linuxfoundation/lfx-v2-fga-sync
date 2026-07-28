@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -255,37 +254,17 @@ func (s FgaService) SyncObjectTuples(
 			// Desired state matches current state. Remove the match from "desired
 			// state" since we won't need to write/insert it.
 			delete(relationsMap, key)
-			if isUser := strings.HasPrefix(tuple.Key.User, "user:") && tuple.Key.User != constants.UserWildcard; isUser {
-				// Save this for a later user-access notification.
-				msg := fmt.Sprintf("%s#%s@%s\ttrue\n", tuple.Key.Object, tuple.Key.Relation, tuple.Key.User)
-				logger.With("message", msg).DebugContext(ctx, "will send user access notification")
-			}
 		case false:
 			// Check if this relation should be excluded from deletion
 			if excludeMap[tuple.Key.Relation] {
-				logger.With(
-					"user", tuple.Key.User,
-					"relation", tuple.Key.Relation,
-					"object", object,
-				).DebugContext(ctx, "skipping deletion of excluded relation")
 				continue
 			}
 			// Preserve team member grant tuples (e.g. team:my-team#member) — these are
 			// managed by a separate workflow and must not be clobbered by resource
 			// service sync operations.
 			if strings.HasPrefix(tuple.Key.User, "team:") {
-				logger.With(
-					"user", tuple.Key.User,
-					"relation", tuple.Key.Relation,
-					"object", object,
-				).DebugContext(ctx, "skipping deletion of team member grant tuple")
 				continue
 			}
-			logger.With(
-				"user", tuple.Key.User,
-				"relation", tuple.Key.Relation,
-				"object", object,
-			).DebugContext(ctx, "will delete relation in batch write")
 			deletes = append(deletes, s.TupleKeyWithoutCondition(tuple.Key.User, tuple.Key.Relation, object))
 		}
 	}
@@ -293,36 +272,13 @@ func (s FgaService) SyncObjectTuples(
 	// Any remaining relationships in the "map" version of the desired state are
 	// new (not found in live OpenFGA) and therefore will be added to the "write"
 	// list for the batch-write request.
+	cacheKeys := make([]string, 0, len(relationsMap))
 	for _, relation := range relationsMap {
-		logger.With(
-			"user", relation.User,
-			"relation", relation.Relation,
-			"object", object,
-		).DebugContext(ctx, "will add relation in batch write")
 		writes = append(writes, relation)
 		if isUser := strings.HasPrefix(relation.User, "user:"); isUser {
-			// Seed any (direct) user relationships to the cache after this function
-			// returns (after the invalidation cache write, if there is one). Only
-			// user relationships are written, because we don't support explicit
-			// querying of resource-parent relationships (or similar) which don't
-			// resolve back to a user. TBD figure out a way to measure the impact
-			// this has on overall cache effectiveness, especially once we start
-			// updating large-scale relationships, like groups with over a thousand
-			// members.
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-			// Execute cache update asynchronously without defer to avoid resource leak
-			go func(cacheKey string) {
-				// Define a timeout context for the cache update operation.
-				timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel() // Ensure the context is cleaned up after the operation.
-
-				// All direct relations handled in this function correspond to "true"
-				// access relations. This happens asynchronously so we are not checking
-				// for errors or logging anything.
-				//nolint:errcheck // This happens asynchronously so we are not checking for errors.
-				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, trueString)
-			}(cacheKey)
+			cacheKeys = append(cacheKeys, cacheKey)
 		}
 	}
 
@@ -337,7 +293,21 @@ func (s FgaService) SyncObjectTuples(
 		return writes, deletes, err
 	}
 
+	s.seedPositiveCacheEntries(ctx, cacheKeys)
 	return writes, deletes, nil
+}
+
+func (s FgaService) seedPositiveCacheEntries(ctx context.Context, cacheKeys []string) {
+	cacheCtx := context.WithoutCancel(ctx)
+	for _, cacheKey := range cacheKeys {
+		go func(key string) {
+			timeoutCtx, cancel := context.WithTimeout(cacheCtx, 5*time.Second)
+			defer cancel()
+
+			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
+			_, _ = s.cacheBucket.PutString(timeoutCtx, key, trueString)
+		}(cacheKey)
+	}
 }
 
 // invalidateCache invalidates the cache by writing a timestamp marker.
@@ -423,7 +393,7 @@ func (s FgaService) WriteAndDeleteTuples(
 		).DebugContext(ctx, "executing batch")
 
 		if err := s.writeAndDeleteTuplesBatch(ctx, batchWrites, batchDeletes); err != nil {
-			logger.With(errKey, err,
+			logger.With("error_type", safeErrorType(err),
 				"batch_number", batchNumber,
 				"total_operations", totalOperations,
 				"batch_writes", len(batchWrites),
@@ -499,8 +469,6 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 	logger.With(
 		"writes_count", len(writes),
 		"deletes_count", len(deletes),
-		"writes", writes,
-		"deletes", deletes,
 	).InfoContext(ctx, "wrote and deleted tuples")
 
 	return nil

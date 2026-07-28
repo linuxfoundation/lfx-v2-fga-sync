@@ -39,24 +39,24 @@ func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message
 	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	// Validate
 	if genericMsg.ObjectType == "" {
 		logger.ErrorContext(ctx, "object_type is required")
-		return errors.New("object_type is required")
+		return newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "update_access" {
-		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
-		return errors.New("invalid operation for update_access handler")
+		logger.ErrorContext(ctx, "invalid operation for update_access handler")
+		return newTerminalValidationError(errors.New("invalid operation for update_access handler"))
 	}
 
 	// Parse data field
 	data := new(fgatypes.GenericAccessData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse access data")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	logger.With(
@@ -78,7 +78,7 @@ func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message
 }
 
 // genericDeleteAccessHandler handles universal delete_access operations.
-// This removes all tuples for a resource (typically used when a resource is deleted).
+// This removes publisher-managed tuples while preserving externally managed team grants.
 //
 // NATS Subject: lfx.fga-sync.delete_access
 //
@@ -97,30 +97,30 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	// Validate
 	if genericMsg.ObjectType == "" {
 		logger.ErrorContext(ctx, "object_type is required")
-		return errors.New("object_type is required")
+		return newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "delete_access" {
-		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
-		return errors.New("invalid operation for delete_access handler")
+		logger.ErrorContext(ctx, "invalid operation for delete_access handler")
+		return newTerminalValidationError(errors.New("invalid operation for delete_access handler"))
 	}
 
 	// Parse data field
 	data := new(fgatypes.GenericDeleteData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse delete data")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	// Validate UID is non-empty
 	if data.UID == "" {
 		logger.ErrorContext(ctx, "uid is required")
-		return errors.New("uid is required")
+		return newTerminalValidationError(errors.New("uid is required"))
 	}
 
 	logger.With(
@@ -131,18 +131,21 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 	// Build object identifier using standard helper
 	object := buildObjectID(genericMsg.ObjectType, data.UID)
 
-	// Use existing generic sync with empty tuples (deletes all)
+	// Use existing generic sync with empty tuples. SyncObjectTuples preserves team grants.
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, nil)
 	if err != nil {
-		logger.With(errKey, err, "object", object).ErrorContext(ctx, "failed to delete access")
+		logger.With(
+			"error_type", safeErrorType(err),
+			"object", object,
+		).ErrorContext(ctx, "failed to delete access")
 		return err
 	}
 
 	logger.With(
 		"object", object,
-		"writes", tuplesWrites,
-		"deletes", tuplesDeletes,
-	).InfoContext(ctx, "deleted all access for "+genericMsg.ObjectType)
+		"writes_count", len(tuplesWrites),
+		"deletes_count", len(tuplesDeletes),
+	).InfoContext(ctx, "deleted publisher-managed access for "+genericMsg.ObjectType)
 
 	// Send reply
 	if message.Reply() != "" {
