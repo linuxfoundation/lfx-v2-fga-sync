@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -99,7 +100,7 @@ func TestAccessMutationConsumerConfig(t *testing.T) {
 
 	assert.Equal(t, constants.FgaSyncAccessMutationConsumerName, config.Name)
 	assert.Equal(t, constants.FgaSyncAccessMutationConsumerName, config.Durable)
-	assert.Equal(t, jetstream.DeliverAllPolicy, config.DeliverPolicy)
+	assert.Equal(t, jetstream.DeliverNewPolicy, config.DeliverPolicy)
 	assert.Equal(t, jetstream.AckExplicitPolicy, config.AckPolicy)
 	assert.Equal(t, 1, config.MaxAckPending)
 	assert.Equal(t, 7, config.MaxDeliver)
@@ -370,6 +371,12 @@ func setAccessMutationShutdownGrace(d time.Duration) func() {
 	return func() { accessMutationShutdownGrace = original }
 }
 
+func setAccessMutationRecoveryInterval(d time.Duration) func() {
+	original := accessMutationRecoveryInterval
+	accessMutationRecoveryInterval = d
+	return func() { accessMutationRecoveryInterval = original }
+}
+
 func TestCoreSubscriptionsExcludeMigratedAccessSubjects(t *testing.T) {
 	t.Parallel()
 
@@ -519,4 +526,316 @@ func TestAccessMutationDeliveryAttributesMalformedPayload(t *testing.T) {
 	assert.Equal(t, "", attributes["uid"])
 	require.Contains(t, attributes, "object_context_error")
 	assert.Error(t, attributes["object_context_error"].(error))
+}
+
+type testManagedConsumeContext struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newTestManagedConsumeContext(closed bool) *testManagedConsumeContext {
+	ctx := &testManagedConsumeContext{closed: make(chan struct{})}
+	if closed {
+		ctx.once.Do(func() { close(ctx.closed) })
+	}
+	return ctx
+}
+
+func (c *testManagedConsumeContext) Stop() {
+	c.once.Do(func() { close(c.closed) })
+}
+
+func (c *testManagedConsumeContext) Drain() {
+	c.Stop()
+}
+
+func (c *testManagedConsumeContext) Closed() <-chan struct{} {
+	return c.closed
+}
+
+type testManagedConsumer struct {
+	jetstream.Consumer
+	consumeContext jetstream.ConsumeContext
+}
+
+func (c *testManagedConsumer) Consume(
+	_ jetstream.MessageHandler,
+	_ ...jetstream.PullConsumeOpt,
+) (jetstream.ConsumeContext, error) {
+	return c.consumeContext, nil
+}
+
+type testAccessMutationConsumerFactory struct {
+	jetstream.JetStream
+	mu        sync.Mutex
+	consumers []jetstream.Consumer
+	errs      []error
+	calls     chan int
+	callCount int
+	blockCall map[int]<-chan struct{}
+}
+
+func (f *testAccessMutationConsumerFactory) CreateOrUpdateConsumer(
+	_ context.Context,
+	_ string,
+	_ jetstream.ConsumerConfig,
+) (jetstream.Consumer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.callCount++
+	f.calls <- f.callCount
+	if block := f.blockCall[f.callCount]; block != nil {
+		<-block
+	}
+	if err := f.errs[f.callCount-1]; err != nil {
+		return nil, err
+	}
+	return f.consumers[f.callCount-1], nil
+}
+
+func TestAccessMutationConsumerManagerRecoversDeletedConsumer(t *testing.T) {
+	restoreInterval := setAccessMutationRecoveryInterval(time.Millisecond)
+	defer restoreInterval()
+
+	first := newTestManagedConsumeContext(true)
+	second := newTestManagedConsumeContext(false)
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: first},
+			&testManagedConsumer{consumeContext: second},
+		},
+		errs:  make([]error, 2),
+		calls: make(chan int, 2),
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+
+	manager := consumer.(*accessMutationConsumerManager)
+	manager.handleConsumeError(context.Background(), jetstream.ErrConsumerDeleted)
+
+	select {
+	case call := <-factory.calls:
+		assert.Equal(t, 2, call)
+	case <-time.After(time.Second):
+		t.Fatal("consumer was not recreated after ErrConsumerDeleted")
+	}
+
+	consumer.Stop()
+	select {
+	case <-consumer.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("consumer manager did not stop")
+	}
+}
+
+func TestAccessMutationConsumerManagerCoalescesRecoverySignals(t *testing.T) {
+	manager := &accessMutationConsumerManager{recover: make(chan struct{}, 1)}
+
+	manager.requestRecovery(1)
+	manager.requestRecovery(1)
+
+	assert.Len(t, manager.recover, 1)
+}
+
+func TestAccessMutationConsumerManagerIgnoresStaleRecoverySignal(t *testing.T) {
+	first := newTestManagedConsumeContext(true)
+	second := newTestManagedConsumeContext(false)
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: first},
+			&testManagedConsumer{consumeContext: second},
+		},
+		errs:  make([]error, 2),
+		calls: make(chan int, 3),
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+	manager := consumer.(*accessMutationConsumerManager)
+
+	manager.handleConsumeErrorForGeneration(
+		context.Background(),
+		jetstream.ErrConsumerDeleted,
+		1,
+	)
+	assert.Equal(t, 2, <-factory.calls)
+
+	manager.handleConsumeErrorForGeneration(
+		context.Background(),
+		jetstream.ErrConsumerDeleted,
+		1,
+	)
+	select {
+	case call := <-factory.calls:
+		t.Fatalf("stale deletion signal triggered recreation call %d", call)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	consumer.Stop()
+	<-consumer.Closed()
+}
+
+func TestAccessMutationConsumerManagerDoesNotRecreateAfterStop(t *testing.T) {
+	for range 100 {
+		current := newTestManagedConsumeContext(true)
+		stop := make(chan struct{})
+		close(stop)
+		factory := &testAccessMutationConsumerFactory{
+			consumers: []jetstream.Consumer{
+				&testManagedConsumer{consumeContext: newTestManagedConsumeContext(false)},
+			},
+			errs:  []error{nil},
+			calls: make(chan int, 1),
+		}
+		manager := &accessMutationConsumerManager{
+			ctx:     context.Background(),
+			factory: factory,
+			current: current,
+			stop:    stop,
+		}
+
+		assert.False(t, manager.recoverCurrent())
+		select {
+		case call := <-factory.calls:
+			t.Fatalf("shutdown triggered recreation call %d", call)
+		default:
+		}
+	}
+}
+
+func TestAccessMutationConsumerManagerStopsCreationAlreadyInFlight(t *testing.T) {
+	first := newTestManagedConsumeContext(true)
+	second := newTestManagedConsumeContext(false)
+	releaseCreate := make(chan struct{})
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: first},
+			&testManagedConsumer{consumeContext: second},
+		},
+		errs:      make([]error, 2),
+		calls:     make(chan int, 2),
+		blockCall: map[int]<-chan struct{}{2: releaseCreate},
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+	consumer.(*accessMutationConsumerManager).
+		handleConsumeError(context.Background(), jetstream.ErrConsumerDeleted)
+	assert.Equal(t, 2, <-factory.calls)
+
+	consumer.Stop()
+	close(releaseCreate)
+
+	select {
+	case <-consumer.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("consumer manager did not stop an in-flight recreation")
+	}
+	select {
+	case <-second.Closed():
+	default:
+		t.Fatal("consume context created during shutdown was not stopped")
+	}
+}
+
+func TestAccessMutationConsumerManagerRetriesRecreation(t *testing.T) {
+	restoreInterval := setAccessMutationRecoveryInterval(time.Millisecond)
+	defer restoreInterval()
+
+	first := newTestManagedConsumeContext(true)
+	second := newTestManagedConsumeContext(false)
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: first},
+			nil,
+			&testManagedConsumer{consumeContext: second},
+		},
+		errs:  []error{nil, assert.AnError, nil},
+		calls: make(chan int, 3),
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+
+	consumer.(*accessMutationConsumerManager).
+		handleConsumeError(context.Background(), jetstream.ErrConsumerDeleted)
+
+	assert.Equal(t, 2, <-factory.calls)
+	select {
+	case call := <-factory.calls:
+		assert.Equal(t, 3, call)
+	case <-time.After(time.Second):
+		t.Fatal("consumer recreation was not retried")
+	}
+
+	consumer.Stop()
+	<-consumer.Closed()
+}
+
+func TestAccessMutationConsumerManagerDoesNotRecoverOtherErrors(t *testing.T) {
+	current := newTestManagedConsumeContext(false)
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: current},
+		},
+		errs:  []error{nil},
+		calls: make(chan int, 2),
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+
+	consumer.(*accessMutationConsumerManager).
+		handleConsumeError(context.Background(), jetstream.ErrNoHeartbeat)
+
+	select {
+	case call := <-factory.calls:
+		t.Fatalf("unexpected consumer recreation call %d", call)
+	case <-time.After(10 * time.Millisecond):
+	}
+
+	consumer.Stop()
+	<-consumer.Closed()
+}
+
+func TestAccessMutationConsumerManagerStopsDuringRecovery(t *testing.T) {
+	restoreInterval := setAccessMutationRecoveryInterval(time.Minute)
+	defer restoreInterval()
+
+	first := newTestManagedConsumeContext(true)
+	factory := &testAccessMutationConsumerFactory{
+		consumers: []jetstream.Consumer{
+			&testManagedConsumer{consumeContext: first},
+			nil,
+		},
+		errs:  []error{nil, assert.AnError},
+		calls: make(chan int, 3),
+	}
+
+	consumer, err := startAccessMutationConsumer(context.Background(), factory, HandlerService{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, <-factory.calls)
+
+	consumer.(*accessMutationConsumerManager).
+		handleConsumeError(context.Background(), jetstream.ErrConsumerDeleted)
+	assert.Equal(t, 2, <-factory.calls)
+
+	consumer.Stop()
+	select {
+	case <-consumer.Closed():
+	case <-time.After(time.Second):
+		t.Fatal("consumer manager did not stop while waiting to retry")
+	}
+
+	select {
+	case call := <-factory.calls:
+		t.Fatalf("unexpected recreation call %d after stop", call)
+	default:
+	}
 }

@@ -10,6 +10,8 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -41,6 +43,10 @@ const accessMutationAdvisoryLookupTimeout = 5 * time.Second
 // bounding total shutdown time if an attempt is genuinely stuck. It is a var,
 // not a const, so tests can shorten it instead of waiting out the real value.
 var accessMutationShutdownGrace = 5 * time.Second
+
+// accessMutationRecoveryInterval avoids a hot loop while keeping recovery from
+// a deleted durable consumer quick. It is a var so tests can shorten it.
+var accessMutationRecoveryInterval = 2 * time.Second
 
 var (
 	syncAck                 = expvar.NewInt("sync_ack")
@@ -108,16 +114,46 @@ type accessMutationConsumeContext interface {
 	Closed() <-chan struct{}
 }
 
+type accessMutationConsumerFactory interface {
+	CreateOrUpdateConsumer(
+		context.Context,
+		string,
+		jetstream.ConsumerConfig,
+	) (jetstream.Consumer, error)
+}
+
+// accessMutationConsumerManager owns the current consume context and recreates
+// it if the shared durable consumer is deleted while the service is running.
+type accessMutationConsumerManager struct {
+	ctx            context.Context
+	factory        accessMutationConsumerFactory
+	handlerService HandlerService
+	current        jetstream.ConsumeContext
+	recover        chan struct{}
+	stop           chan struct{}
+	closed         chan struct{}
+	stopOnce       sync.Once
+	generation     atomic.Uint64
+	deleted        atomic.Uint64
+}
+
 // accessMutationConsumerConfig returns the durable pull consumer configuration
 // shared by update_access and delete_access. MaxAckPending of 1 serializes
 // delivery so full-state updates for an object are never applied out of order;
 // BackOff spaces redelivery attempts over roughly 94 minutes before the
 // max-delivery advisory fires.
+//
+// DeliverNewPolicy is equivalent to DeliverAllPolicy for the empty stream used
+// at the initial cutover. On normal restarts the existing durable resumes from
+// its stored cursor. If the durable state is ever lost, recreating it starts at
+// the current stream tail instead of replaying retained history whose prior
+// disposition is unknown. This favors availability and avoids stale updates
+// recreating authorization after a later deletion.
 func accessMutationConsumerConfig() jetstream.ConsumerConfig {
 	return jetstream.ConsumerConfig{
 		Name:          constants.FgaSyncAccessMutationConsumerName,
 		Durable:       constants.FgaSyncAccessMutationConsumerName,
-		DeliverPolicy: jetstream.DeliverAllPolicy,
+		DeliverPolicy: jetstream.DeliverNewPolicy,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		MaxDeliver:    7,
 		BackOff: []time.Duration{
@@ -136,26 +172,142 @@ func accessMutationConsumerConfig() jetstream.ConsumerConfig {
 // begins consuming access mutation messages.
 func startAccessMutationConsumer(
 	ctx context.Context,
-	js jetstream.JetStream,
+	factory accessMutationConsumerFactory,
 	handlerService HandlerService,
-) (jetstream.ConsumeContext, error) {
-	consumer, err := js.CreateOrUpdateConsumer(
-		ctx,
+) (accessMutationConsumeContext, error) {
+	manager := &accessMutationConsumerManager{
+		ctx:            ctx,
+		factory:        factory,
+		handlerService: handlerService,
+		recover:        make(chan struct{}, 1),
+		stop:           make(chan struct{}),
+		closed:         make(chan struct{}),
+	}
+	if err := manager.startCurrent(); err != nil {
+		return nil, err
+	}
+	go manager.run()
+	return manager, nil
+}
+
+func (m *accessMutationConsumerManager) startCurrent() error {
+	generation := m.generation.Add(1)
+	consumer, err := m.factory.CreateOrUpdateConsumer(
+		m.ctx,
 		constants.FgaSyncStreamName,
 		accessMutationConsumerConfig(),
 	)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return consumer.Consume(
+	m.current, err = consumer.Consume(
 		func(message jetstream.Msg) {
-			processAccessMutationMessage(ctx, &handlerService, message)
+			processAccessMutationMessage(m.ctx, &m.handlerService, message)
 		},
 		jetstream.ConsumeErrHandler(func(_ jetstream.ConsumeContext, consumeErr error) {
-			logger.With(errKey, consumeErr).ErrorContext(ctx, "JetStream consumer error")
+			m.handleConsumeErrorForGeneration(m.ctx, consumeErr, generation)
 		}),
 	)
+	return err
+}
+
+func (m *accessMutationConsumerManager) handleConsumeError(ctx context.Context, err error) {
+	m.handleConsumeErrorForGeneration(ctx, err, m.generation.Load())
+}
+
+func (m *accessMutationConsumerManager) handleConsumeErrorForGeneration(
+	ctx context.Context,
+	err error,
+	generation uint64,
+) {
+	logger.With(errKey, err).ErrorContext(ctx, "JetStream consumer error")
+	if errors.Is(err, jetstream.ErrConsumerDeleted) {
+		m.requestRecovery(generation)
+	}
+}
+
+func (m *accessMutationConsumerManager) requestRecovery(generation uint64) {
+	for deleted := m.deleted.Load(); deleted < generation; deleted = m.deleted.Load() {
+		if m.deleted.CompareAndSwap(deleted, generation) {
+			break
+		}
+	}
+	select {
+	case m.recover <- struct{}{}:
+	default:
+	}
+}
+
+func (m *accessMutationConsumerManager) run() {
+	defer close(m.closed)
+	for {
+		select {
+		case <-m.stop:
+			m.stopCurrent()
+			return
+		case <-m.recover:
+			if m.deleted.Load() < m.generation.Load() {
+				continue
+			}
+			if !m.recoverCurrent() {
+				return
+			}
+		}
+	}
+}
+
+func (m *accessMutationConsumerManager) recoverCurrent() bool {
+	select {
+	case <-m.current.Closed():
+	case <-m.stop:
+		m.stopCurrent()
+		return false
+	}
+
+	for {
+		select {
+		case <-m.stop:
+			return false
+		default:
+		}
+
+		if err := m.startCurrent(); err == nil {
+			select {
+			case <-m.stop:
+				m.stopCurrent()
+				return false
+			default:
+			}
+			return true
+		} else {
+			logger.With(errKey, err).ErrorContext(m.ctx, "failed to recreate JetStream consumer")
+		}
+
+		timer := time.NewTimer(accessMutationRecoveryInterval)
+		select {
+		case <-timer.C:
+		case <-m.stop:
+			timer.Stop()
+			return false
+		}
+	}
+}
+
+func (m *accessMutationConsumerManager) stopCurrent() {
+	if m.current == nil {
+		return
+	}
+	m.current.Stop()
+	<-m.current.Closed()
+}
+
+func (m *accessMutationConsumerManager) Stop() {
+	m.stopOnce.Do(func() { close(m.stop) })
+}
+
+func (m *accessMutationConsumerManager) Closed() <-chan struct{} {
+	return m.closed
 }
 
 // accessMutationAttemptContext bounds a single delivery attempt.

@@ -41,6 +41,19 @@ backoff intervals. The final interval repeats, so authoritative max-delivery
 exhaustion occurs after approximately 94 minutes. During that window one
 transient failure blocks later access mutations across all resources by design.
 
+The consumer is first created with `DeliverNewPolicy`. The production cutover
+creates it only after the stream is verified empty, so no cutover message is
+skipped. Ordinary service or NATS outages preserve the durable and resume its
+stored cursor. If the durable state itself is lost, automatic recreation starts
+at the current stream tail: retained pre-recreation history is not replayed or
+purged, new messages process immediately without manual intervention, and the
+skipped history expires under the 24-hour stream retention. This explicit
+availability-over-completeness boundary prevents an older retained update from
+recreating authorization after a later deletion. If deletion occurs while
+replicas are running, `ErrConsumerDeleted` closes the affected `Consume()` loop;
+fga-sync keeps unrelated handlers available and retries creation/binding every
+two seconds until local consumption restarts.
+
 Max-delivery advisories received by a connected replica increment
 `sync_max_deliver_exhausted` and are enriched from the retained stream message.
 Phase 1 uses a best-effort core advisory subscription; external platform
@@ -48,6 +61,13 @@ monitoring must capture the same advisory subject when all replicas are
 disconnected. Recovery is manual: the owning service must re-read current
 database state and publish a fresh update or deletion. Never blindly replay an
 exhausted full-state payload.
+
+If OpenFGA remains unavailable or persistently misconfigured, each message can
+occupy the one global slot until max-delivery exhaustion before the next
+sequence advances. Continued publication may therefore outpace processing, and
+messages can expire after 24 hours without being applied. Monitor max-delivery
+advisories, consumer lag, and oldest-message age; recovery publishes fresh
+authoritative state rather than replaying expired snapshots.
 
 ## Tuple Format
 

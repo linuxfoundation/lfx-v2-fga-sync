@@ -89,7 +89,13 @@
     "cutover",
     "Cutover",
     "LFXV",
-    "undispositioned"
+    "undispositioned",
+    "acks",
+    "acked",
+    "unacked",
+    "callsite",
+    "callsites",
+    "openspec"
   ],
   "overrides": [
     {

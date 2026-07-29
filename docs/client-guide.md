@@ -819,6 +819,16 @@ payloads. Publishers receive no OpenFGA completion acknowledgement; `X-Sync`
 does not change that contract. Membership-operation failures are logged
 server-side and do not have a standardized NATS error response body.
 
+The shared durable consumer normally preserves pending messages across service
+or NATS outages. If the durable consumer state itself is lost, fga-sync
+automatically recreates it with `DeliverNewPolicy`: messages published after
+recreation process immediately, while ambiguous retained history from before
+recreation is not replayed and expires within 24 hours. Publishers do not need
+to intervene to restore delivery; running replicas keep unrelated handlers
+available and retry consumer creation/binding every two seconds. An owning
+service may publish fresh current state if separate monitoring identifies a
+reconciliation need.
+
 ---
 
 ## Best Practices

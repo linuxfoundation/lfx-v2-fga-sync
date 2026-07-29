@@ -40,7 +40,7 @@ newer deletion.
 4. Purge the core-processed duplicate backlog, then verify the stream is empty.
    Record the purge and resulting empty stream state in the change log.
 5. Deploy the new fga-sync version. It creates the durable consumer with
-   `DeliverAllPolicy`; because the stream is empty, no pre-cutover message is
+   `DeliverNewPolicy`; because the stream is empty, no pre-cutover message is
    replayed.
 6. Confirm one durable consumer is active and update/delete subjects are absent
    from the core subscription set.
@@ -95,3 +95,36 @@ Fallback when the consumer cannot drain safely:
 Never release the maintenance window with undispositioned durable messages.
 Never blindly replay retained payloads: an old full-state update can overwrite a
 newer update or recreate publisher-managed authorization after deletion.
+
+## Consumer state loss (disaster recovery)
+
+The stream retains messages for 24 hours regardless of ACK state, so if the
+`fga-sync-access-mutation-consumer` durable's state is ever lost (deleted by
+mistake, or otherwise absent) while the stream is non-empty, letting
+`DeliverAllPolicy` auto-create a replacement would replay the full retained
+backlog, including stale updates a later deletion already superseded.
+
+fga-sync uses `DeliverNewPolicy`, so this state recovers automatically:
+
+1. A running replica that receives `jetstream.ErrConsumerDeleted` keeps the
+   process and unrelated handlers available while retrying durable
+   creation/binding every two seconds. Startup follows the same creation path
+   when the durable is already missing.
+2. Retained pre-recreation messages are not replayed or purged; they age out
+   under the existing 24-hour `maxAge`.
+3. Messages published after recreation begin processing immediately. No pod,
+   access-check handler, or core NATS subscription waits for manual consumer
+   recovery.
+
+This is an explicit availability-over-completeness boundary. Ordinary pod or
+NATS outages do **not** trigger it: when the durable still exists, replicas bind
+its stored cursor and resume pending messages. Only loss of the durable state
+skips retained history. If monitoring detects such a loss and the skipped
+window matters, owning services may re-read current database state and publish
+fresh updates/deletions; never replay the retained snapshots blindly.
+
+Do not add an application-side stream purge for this case. Multiple replicas
+can observe a missing consumer concurrently, and a delayed purge from one
+replica could delete a fresh message after another replica has already created
+the replacement consumer. `DeliverNewPolicy` establishes the new start boundary
+atomically during consumer creation without destructive stream operations.
