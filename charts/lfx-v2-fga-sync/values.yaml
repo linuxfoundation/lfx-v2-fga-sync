@@ -76,16 +76,37 @@ nats:
 
   # accessMutationStream persists ordered update_access and delete_access messages.
   accessMutationStream:
+    # creation controls whether the stream CRD is provisioned by this chart
     creation: true
+    # keep preserves the stream during helm uninstall to avoid message loss
     keep: true
+    # name is the NATS stream name
     name: fga-sync-events
+    # subjects captures both access mutation subjects on one stream so a single
+    # ordered consumer applies updates and deletions for an object in publish
+    # order. Splitting them across transports would let a delayed update recreate
+    # tuples a later deletion already removed.
     subjects:
       - lfx.fga-sync.update_access
       - lfx.fga-sync.delete_access
+    # retention keeps messages up to maxAge; they are not accumulated indefinitely
     retention: limits
+    # maxAge must cover queue wait plus retry, not just the ~94 minute retry
+    # horizon: MaxAckPending of 1 means a stuck message holds the only in-flight
+    # slot for its whole retry cycle, so messages behind it wait far longer than
+    # their own budget. 24h also spans fga-sync downtime and leaves an operator
+    # window to re-derive exhausted updates from the owning service.
     maxAge: 24h
+    # storage is the storage backend for the stream
     storage: file
+    # maxBytes is unlimited; maxAge is the primary eviction mechanism
+    maxBytes: -1
+    # maxMsgs is unlimited; maxAge is the primary eviction mechanism
+    maxMsgs: -1
+    # replicas matches the NATS cluster size for durability
     replicas: 3
+    # compression reduces storage cost for JSON payloads
+    compression: s2
 
 # fga is the configuration for the OpenFGA server
 # These values come from the lfx-platform helm chart repo:

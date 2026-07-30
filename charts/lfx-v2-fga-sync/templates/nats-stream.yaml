@@ -19,6 +19,9 @@ spec:
     {{- toYaml .Values.nats.accessMutationStream.subjects | nindent 4 }}
   retention: {{ .Values.nats.accessMutationStream.retention }}
   maxAge: {{ .Values.nats.accessMutationStream.maxAge }}
+  maxBytes: {{ .Values.nats.accessMutationStream.maxBytes }}
+  maxMsgs: {{ .Values.nats.accessMutationStream.maxMsgs }}
   storage: {{ .Values.nats.accessMutationStream.storage }}
   replicas: {{ .Values.nats.accessMutationStream.replicas }}
+  compression: {{ .Values.nats.accessMutationStream.compression }}
 {{- end }}

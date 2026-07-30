@@ -149,6 +149,16 @@ type accessMutationConsumerManager struct {
 // the current stream tail instead of replaying retained history whose prior
 // disposition is unknown. This favors availability and avoids stale updates
 // recreating authorization after a later deletion.
+//
+// These settings intentionally diverge from other platform consumers, which use
+// MaxDeliver 3, a short AckWait, and the default MaxAckPending. Those retry
+// horizons are measured in seconds and suit independent or key-idempotent
+// events. Access mutations instead must survive an OpenFGA outage lasting
+// minutes to hours, and must stay ordered across both subjects, so they trade
+// throughput for a longer horizon and a single in-flight message. Redelivery
+// uses server-side BackOff rather than a client-side jittered Nak: with one
+// message in flight there are no concurrent retries to spread apart, and a
+// server-held schedule survives a pod restart mid-wait.
 func accessMutationConsumerConfig() jetstream.ConsumerConfig {
 	return jetstream.ConsumerConfig{
 		Name:          constants.FgaSyncAccessMutationConsumerName,
