@@ -89,7 +89,7 @@ nats:
     # Splitting them across transports would let a delayed update recreate
     # tuples a later deletion already removed. Do not apply the membership
     # subjects below until the release-2 gate in
-    # openspec/changes/fga-sync-jetstream-membership/tasks.md (group 6) is
+    # docs/runbooks/fga-sync-jetstream-cutover.md (Phase 2 preconditions) is
     # cleared: all four publisher services must be asynchronous-only for
     # member_put/member_remove first, because stream capture — not core
     # subscription removal — is the point of no return for a request/reply

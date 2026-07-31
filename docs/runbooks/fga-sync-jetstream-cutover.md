@@ -165,18 +165,39 @@ messages per minute, so an unattended window accumulates duplicate work
 quickly. Watch consumer ack lag for the whole window, not just at the end;
 rising ack lag is the signal to proceed to release 3 immediately or roll back.
 
+**What the no-op guarantee does and does not cover.** `on_duplicate: ignore` /
+`on_missing: ignore` only make an *exact-match* redundant write or delete a
+no-op — the same tuple applied twice ends up in the same state either way.
+They do not impose any ordering between two *different* messages for the same
+user/object. The core path is not serialized by the JetStream consumer's
+`MaxAckPending: 1`, so an older `member_put` delivered via core can finish
+after the JetStream consumer has already applied that same put and a
+subsequent `member_remove` or `delete_access`. In that case the tuple is
+absent when the late core `member_put` runs, so it is a legitimate write
+rather than a duplicate, and it recreates access the newer message removed.
+This residual reordering risk is not closed by this change and is bounded
+only by keeping the window short and watching for it, not eliminated. If a
+suspiciously recent grant reappears on an object with intervening membership
+or deletion activity, treat it as this scenario and have the owning service
+re-read current state and republish rather than assuming it is legitimate.
+
 ### Post-cutover checks (Phase 2)
 
 - `sync_terminal` rises to a new floor once membership's proven-invalid
-  payloads (missing `username`/`uid`, malformed JSON, wrong operation, empty
-  relation entries) start terminating through the shared consumer instead of
-  being silently dropped by the old core handler. **This floor increase is
-  expected** and traces to LFXV2-2907 publisher-side payload gaps — do not
-  read it as a fga-sync regression.
-- After release 3, confirm double processing has stopped: each membership
-  message is applied once, and `sync_terminal`'s membership contribution
-  matches the LFXV2-2907 rate rather than twice it (the release-2 overlap
-  rate).
+  payloads (missing `username`/`uid`, malformed JSON, wrong operation, or an
+  empty relation entry on `member_put` specifically — `member_remove` drops
+  empty relation entries rather than terminating on them) start terminating
+  through the shared consumer instead of being silently dropped by the old
+  core handler. **This floor increase is expected** and traces to LFXV2-2907
+  publisher-side payload gaps — do not read it as a fga-sync regression.
+- `sync_terminal` does **not** double during the release-2 overlap window:
+  the core-path handler only logs its error and does not touch this counter,
+  so only the JetStream-side termination increments it, both during and
+  after release 3. It is therefore not a usable signal for confirming double
+  processing has stopped. To confirm that, compare OpenFGA write/delete
+  volume (or handler-invocation logs) for membership objects before and
+  after release 3 instead — it should roughly halve once the core path is
+  removed.
 - A terminated `member_remove` leaves the tuple(s) in place — fga-sync does
   not retry or repair on the publisher's behalf. Attribution and repair of a
   terminated message belong to the owning publisher, not to a fga-sync
@@ -185,12 +206,14 @@ rising ack lag is the signal to proceed to release 3 immediately or roll back.
 ### Rollback (Phase 2)
 
 Restoring the core subscriptions after release 3 recreates the overlap
-window described above (double delivery, no-op collisions) — this is
-expected and safe on its own. The unsafe action is blindly replaying retained
-JetStream membership payloads after a rollback: retained pre-rollback history
-can be stale relative to what the restored core path has since processed, so
-never replay it wholesale. If specific membership state is suspect, have the
-owning service re-read current database state and republish.
+window described above, including its residual reordering risk (see "What
+the no-op guarantee does and does not cover" above) — this is expected, not
+a new failure mode introduced by rollback. The unsafe action is blindly
+replaying retained JetStream membership payloads after a rollback: retained
+pre-rollback history can be stale relative to what the restored core path
+has since processed, so never replay it wholesale. If specific membership
+state is suspect, have the owning service re-read current database state and
+republish.
 
 ## Consumer state loss (disaster recovery)
 

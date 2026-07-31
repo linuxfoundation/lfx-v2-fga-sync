@@ -39,11 +39,13 @@ Membership delivery carries the same guarantees as access mutations: durable,
 at-least-once, ordered with the rest of the stream, and bounded to the retry
 ladder below before max-delivery exhaustion. A `member_put` or `member_remove`
 with a proven-invalid payload (missing `username`, missing `uid`, malformed
-JSON, wrong operation, or an empty relation entry in the array) is terminated
-immediately rather than retried; a terminated `member_remove` leaves the
-tuple(s) in place — fga-sync does not repair or retry on the publisher's
-behalf, and correcting the underlying data is the owning publisher's
-responsibility.
+JSON, or wrong operation) is terminated immediately rather than retried.
+`member_put` additionally terminates on an empty relation entry within the
+array; `member_remove` does not — it silently drops empty relation entries
+and, if none remain, removes all relations for that user (see the
+`relations` row below). A terminated `member_remove` leaves the tuple(s) in
+place — fga-sync does not repair or retry on the publisher's behalf, and
+correcting the underlying data is the owning publisher's responsibility.
 
 The durable consumer permits one globally pending message, attempts each
 message at most seven times, and uses `2m`, `2m`, `5m`, `10m`, `15m`, and `30m`
@@ -104,8 +106,10 @@ logs and `/debug/vars`.
 | --- | --- |
 | `username` missing/empty on `member_put` or `member_remove` | Terminated (proven invalid, not retried) |
 | `uid` missing/empty on any sync operation | Terminated (proven invalid, not retried) |
-| `relations` empty on `member_put` | Terminated (proven invalid, not retried) |
-| `relations` empty on `member_remove` | Removes ALL relations for that user (intentional) |
+| `relations` empty (`[]`) on `member_put` | Terminated (proven invalid, not retried) |
+| `relations` contains an empty string entry on `member_put` | Terminated (proven invalid, not retried) |
+| `relations` empty (`[]`) on `member_remove` | Removes ALL relations for that user (intentional) |
+| `relations` contains an empty string entry on `member_remove` | Entry is silently dropped; remaining non-empty relations are removed, or ALL relations if none remain |
 | `object_type` empty in envelope | Terminated (proven invalid, not retried) |
 | Unknown `operation` value | Terminated (proven invalid, not retried) |
 | `references` value with an empty `type` or empty `id` in `type:id` format | Message rejected |
