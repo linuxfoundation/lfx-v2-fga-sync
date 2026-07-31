@@ -372,11 +372,12 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 
 // queueSubscriptionConfigs lists core NATS (non-JetStream) subscriptions only.
 // member_put and member_remove moved to the shared JetStream access-mutation
-// consumer in release 2/3 of the fga-sync-jetstream-membership change; do not
-// add them back here. See docs/runbooks/fga-sync-jetstream-cutover.md
-// (Phase 2, release 3) — this change must not deploy before release 2
-// (stream widening) is applied and verified live, or membership messages are
-// lost permanently.
+// consumer in the fga-sync-jetstream-membership change and are deployed
+// together with the widened stream subjects (see values.yaml
+// accessMutationStream.subjects) in the same release; do not add them back
+// here. See docs/runbooks/fga-sync-jetstream-cutover.md (Phase 2) for the
+// preconditions that gate this deploy and the accepted risk of shipping the
+// stream widening and this removal together.
 func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfig {
 	return []subscriptionConfig{
 		{

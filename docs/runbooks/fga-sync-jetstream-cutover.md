@@ -105,51 +105,70 @@ newer update or recreate publisher-managed authorization after deletion.
 ## Phase 2: membership (`member_put` / `member_remove`)
 
 Phase 2 moves `lfx.fga-sync.member_put` and `lfx.fga-sync.member_remove` onto
-the same stream and shared durable consumer as Phase 1, in three ordered
-releases. Unlike Phase 1, the stream and consumer already exist and are live;
-there is no fresh-stream purge and no "consumer does not yet exist"
-precondition. Do not reuse the Phase 1 cutover steps above for this phase.
+the same stream and shared durable consumer as Phase 1. Unlike Phase 1, the
+stream and consumer already exist and are live; there is no fresh-stream
+purge and no "consumer does not yet exist" precondition. Do not reuse the
+Phase 1 cutover steps above for this phase.
 
-### Preconditions (release 2 gate)
+### Deployment shape: one combined release, not three
 
-Before release 2 (stream widening), confirm all four owning publisher services
-— project-service, committee-service, meeting-service, and member-service —
-are asynchronous-only (`Publish`, never `Request`/`Reply`) for `member_put` and
-`member_remove`. This must be verified per-service because widening the
-stream, not removing the core subscription, is the actual point of no return
-for a request/reply caller: the moment membership subjects join the stream,
-the stream acknowledges the publish and a surviving `nc.Request` caller reads
-that JetStream storage ack as completion, even though fga-sync has not
-processed the message yet and core subscription removal (release 3) has not
-happened. Also confirm the release-1 shared-consumer binary (with
-`FilterSubjects` covering all four subjects and the write-collision-ignore
-options) is fully rolled out and confirmed live first.
+The fga-sync-jetstream-membership change ships the shared-consumer code, the
+Helm stream-widening (adding `member_put`/`member_remove` to the stream's
+`subjects`), and the core-subscription removal in the same binary and chart
+version — they deploy together as a single `helm upgrade`, not as three
+separately-timed releases. This means the moment the new version is live: the
+stream is already widened and the old core subscriptions are already gone,
+with no observable window in between where only one of the two has happened.
 
-### The three ordered releases
+This trades a design goal (verify stream-widening is capturing traffic before
+removing the fallback) for simplicity: there is no core-NATS fallback the
+instant this deploys, and no scripted gate confirms the stream capture
+succeeded before that happens. That risk is accepted deliberately — see
+"Accepted risk" below — rather than mitigated by splitting the rollout.
 
-1. **Release 1 — shared consumer code.** Deploy the fga-sync binary that
-   dispatches `member_put`/`member_remove` through the shared JetStream
-   consumer and passes `on_duplicate: ignore` / `on_missing: ignore` to
-   OpenFGA writes. At this point membership subjects are still core NATS only
-   (not yet in the stream), so this release is inert for membership traffic.
-2. **Release 2 — stream widening.** Add `lfx.fga-sync.member_put` and
-   `lfx.fga-sync.member_remove` to the stream's `subjects` list via the Helm
-   chart. From this point until release 3, every membership message is
-   delivered twice: once via the pre-existing core NATS subscription (still
-   running) and once via the JetStream consumer.
-3. **Release 3 — core subscription removal.** Remove the core NATS
-   subscriptions for `member_put`/`member_remove` so JetStream is the only
-   delivery path. Do not deploy this release before release 2 has been
-   applied and verified: doing so briefly removes the *only* delivery path
-   for membership messages (core), before the stream capture that would carry
-   them, and those messages are lost permanently.
+### Preconditions
 
-### The overlap window (between release 2 and release 3)
+Before deploying this change to an environment, confirm both:
 
-During the overlap window, expect **each membership message applied twice —
-but no collision errors**, because `on_duplicate: ignore` / `on_missing:
-ignore` (shipped in release 1 as part of write-collision handling) makes the
-second application a no-op rather than a write error. Concretely:
+1. All four owning publisher services — committee-service, meeting-service,
+   mailing-list-service, and member-service — are asynchronous-only
+   (`Publish`, never `Request`/`Reply`) for `member_put` and `member_remove`,
+   and that deployment is live in that environment. Project-service only
+   issues `update_access`/`delete_access` and is not affected. This must be
+   verified per-service: the moment membership subjects join the stream, the
+   stream acknowledges the publish and a surviving `nc.Request` caller reads
+   that JetStream storage ack as completion, even though fga-sync has not
+   actually processed the message yet.
+2. Phase 1 (`update_access`/`delete_access` on JetStream) has been live and
+   stable in that environment for a soak period, since Phase 2 shares the
+   same stream and durable consumer and a Phase 1 regression would now also
+   affect membership traffic.
+
+### Accepted risk: no verification pause before the core fallback disappears
+
+Because stream-widening and core-subscription-removal land in the same
+deploy, if the widened stream silently fails to capture membership traffic
+(a Helm value not applied, a replica still on old config, a consumer
+`FilterSubjects` mismatch), there is no fallback path left to catch those
+messages — core no longer has a subscription for them. Immediately after
+deploying, manually check that `sync_ack` is increasing and
+`sync_max_deliver_exhausted` is not (see "Post-cutover checks" below), the
+same way Phase 1's cutover is verified above. Do not treat the deploy as
+successful until that check has been done; there is no automated gate doing
+it for you.
+
+### The no-op guarantee, for the rollback case
+
+`on_duplicate: ignore` / `on_missing: ignore` (write-collision handling)
+exists primarily for the rollback path, not for a normal deploy: a normal
+deploy has no window where the same membership message is delivered via both
+core and JetStream, because core disappears in the same step the stream
+widens. The window this guards against arises if the core subscriptions are
+*restored* later (see "Rollback" below), which recreates double delivery
+against a stream that is still widened. During that restored-core window,
+expect **each membership message applied twice — but no collision errors**,
+because the no-op options make the second application a no-op rather than a
+write error. Concretely:
 
 - A duplicate `member_put` re-adds the same relation tuple; OpenFGA reports
   success on the redundant write instead of a duplicate-write error.
@@ -158,31 +177,34 @@ second application a no-op rather than a write error. Concretely:
   error.
 
 If a collision-driven error burst appears instead, the write-collision-ignore
-options from release 1 are not in effect — treat that as a signal to remove
-the stream subjects (roll back release 2) rather than riding out the window.
-Keep the window short and attended: membership arrives at roughly 2.25
-messages per minute, so an unattended window accumulates duplicate work
-quickly. Watch consumer ack lag for the whole window, not just at the end;
-rising ack lag is the signal to proceed to release 3 immediately or roll back.
+options are not in effect — treat that as a signal to roll back (see
+"Rollback" below) rather than riding out the window. Keep any such window
+short and attended: membership arrives at roughly 2.25 messages per minute,
+so an unattended window accumulates duplicate work quickly.
 
 **What the no-op guarantee does and does not cover.** `on_duplicate: ignore` /
 `on_missing: ignore` only make an *exact-match* redundant write or delete a
 no-op — the same tuple applied twice ends up in the same state either way.
 They do not impose any ordering between two *different* messages for the same
-user/object. The core path is not serialized by the JetStream consumer's
-`MaxAckPending: 1`, so an older `member_put` delivered via core can finish
-after the JetStream consumer has already applied that same put and a
-subsequent `member_remove` or `delete_access`. In that case the tuple is
-absent when the late core `member_put` runs, so it is a legitimate write
-rather than a duplicate, and it recreates access the newer message removed.
-This residual reordering risk is not closed by this change and is bounded
-only by keeping the window short and watching for it, not eliminated. If a
-suspiciously recent grant reappears on an object with intervening membership
-or deletion activity, treat it as this scenario and have the owning service
-re-read current state and republish rather than assuming it is legitimate.
+user/object. If core subscriptions are ever restored while the stream is
+still widened (the rollback scenario), the core path is not serialized by the
+JetStream consumer's `MaxAckPending: 1`, so an older `member_put` delivered
+via core can finish after the JetStream consumer has already applied that
+same put and a subsequent `member_remove` or `delete_access`. In that case
+the tuple is absent when the late core `member_put` runs, so it is a
+legitimate write rather than a duplicate, and it recreates access the newer
+message removed. This residual reordering risk is not closed by this change
+and is bounded only by keeping any restored-core window short and watching
+for it, not eliminated. If a suspiciously recent grant reappears on an object
+with intervening membership or deletion activity, treat it as this scenario
+and have the owning service re-read current state and republish rather than
+assuming it is legitimate.
 
 ### Post-cutover checks (Phase 2)
 
+- `sync_ack` should increase and `sync_max_deliver_exhausted` should not,
+  within minutes of the deploy (see "Accepted risk" above) — do this check
+  manually right after deploying, the same way Phase 1's cutover is checked.
 - `sync_terminal` rises to a new floor once membership's proven-invalid
   payloads (missing `username`/`uid`, malformed JSON, wrong operation, or an
   empty relation entry on `member_put` specifically — `member_remove` drops
@@ -190,14 +212,6 @@ re-read current state and republish rather than assuming it is legitimate.
   through the shared consumer instead of being silently dropped by the old
   core handler. **This floor increase is expected** and traces to LFXV2-2907
   publisher-side payload gaps — do not read it as a fga-sync regression.
-- `sync_terminal` does **not** double during the release-2 overlap window:
-  the core-path handler only logs its error and does not touch this counter,
-  so only the JetStream-side termination increments it, both during and
-  after release 3. It is therefore not a usable signal for confirming double
-  processing has stopped. To confirm that, compare OpenFGA write/delete
-  volume (or handler-invocation logs) for membership objects before and
-  after release 3 instead — it should roughly halve once the core path is
-  removed.
 - A terminated `member_remove` leaves the tuple(s) in place — fga-sync does
   not retry or repair on the publisher's behalf. Attribution and repair of a
   terminated message belong to the owning publisher, not to a fga-sync
@@ -205,15 +219,15 @@ re-read current state and republish rather than assuming it is legitimate.
 
 ### Rollback (Phase 2)
 
-Restoring the core subscriptions after release 3 recreates the overlap
-window described above, including its residual reordering risk (see "What
-the no-op guarantee does and does not cover" above) — this is expected, not
-a new failure mode introduced by rollback. The unsafe action is blindly
-replaying retained JetStream membership payloads after a rollback: retained
-pre-rollback history can be stale relative to what the restored core path
-has since processed, so never replay it wholesale. If specific membership
-state is suspect, have the owning service re-read current database state and
-republish.
+Restoring the core subscriptions after this change is live recreates the
+overlap window described above, including its residual reordering risk (see
+"What the no-op guarantee does and does not cover" above) — this is
+expected, not a new failure mode introduced by rollback. The unsafe action is
+blindly replaying retained JetStream membership payloads after a rollback:
+retained pre-rollback history can be stale relative to what the restored
+core path has since processed, so never replay it wholesale. If specific
+membership state is suspect, have the owning service re-read current
+database state and republish.
 
 ## Consumer state loss (disaster recovery)
 
