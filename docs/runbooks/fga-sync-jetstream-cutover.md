@@ -157,16 +157,48 @@ same way Phase 1's cutover is verified above. Do not treat the deploy as
 successful until that check has been done; there is no automated gate doing
 it for you.
 
-### The no-op guarantee, for the rollback case
+### Rolling-upgrade pod version skew
+
+The consumer-plus-chart bundling above assumes the deploy is instantaneous.
+It is not: prod runs 3 replicas (PDB `minAvailable: 2`) and staging runs 2
+(PDB `minAvailable: 1`), on Kubernetes' default `RollingUpdate` strategy —
+there is no `Recreate` override anywhere in this chart or in the
+environment-specific `lfx-v2-argocd` values. A new pod is started and must
+become healthy before an old one is stopped, so for the practical duration of
+every rollout (observed as roughly the time for each pod to cycle,
+one-at-a-time, times the replica count), old-binary and new-binary pods are
+both running.
+
+This matters because the durable consumer's `FilterSubjects` is shared,
+server-side state, not per-pod: the instant the *first* new pod calls
+`CreateOrUpdateConsumer` on startup (`access_mutation.go`), the durable
+widens for every pod pulling from it, including old pods still running the
+previous binary. The old binary's `dispatchAccessMutation` switch has no case
+for `member_put`/`member_remove` and falls through to
+`newTerminalValidationError` for any unrecognized subject — so if an old pod
+happens to pull a newly-admitted membership message during that window, it
+terminates a perfectly valid message. Old pods also keep their core-NATS
+subscriptions active until they actually stop, so the core-vs-JetStream
+double-delivery window described below also reappears transiently during
+every rollout of this change, not only during an explicit rollback.
+
+**Mitigation:** watch the rollout manually (`kubectl get pods -o wide` with
+the image tag, or the equivalent ArgoCD view) and do not treat the deploy as
+finished until every pod reports the new image. If an old pod is slow to
+terminate, delete it manually rather than waiting for a graceful drain, to
+shrink the coexistence window. This is an accepted, monitored risk, not a
+solved one: a message terminated during this specific window is lost the
+same way any other terminated message is (see "Post-cutover checks" above),
+and the owning publisher would need to notice and republish.
+
+### The no-op guarantee, for rollback and rolling-upgrade skew
 
 `on_duplicate: ignore` / `on_missing: ignore` (write-collision handling)
-exists primarily for the rollback path, not for a normal deploy: a normal
-deploy has no window where the same membership message is delivered via both
-core and JetStream, because core disappears in the same step the stream
-widens. The window this guards against arises if the core subscriptions are
-*restored* later (see "Rollback" below), which recreates double delivery
-against a stream that is still widened. During that restored-core window,
-expect **each membership message applied twice — but no collision errors**,
+covers two windows, not one: the rolling-upgrade skew above, and an explicit
+rollback that restores core subscriptions while the stream is still widened
+(see "Rollback" below). Both recreate the same double-delivery shape. During
+either window, expect **each membership message applied twice — but no
+collision errors**,
 because the no-op options make the second application a no-op rather than a
 write error. Concretely:
 
@@ -186,8 +218,9 @@ so an unattended window accumulates duplicate work quickly.
 `on_missing: ignore` only make an *exact-match* redundant write or delete a
 no-op — the same tuple applied twice ends up in the same state either way.
 They do not impose any ordering between two *different* messages for the same
-user/object. If core subscriptions are ever restored while the stream is
-still widened (the rollback scenario), the core path is not serialized by the
+user/object. Whenever core subscriptions are active while the stream is
+widened — during rolling-upgrade skew or after a rollback — the core path is
+not serialized by the
 JetStream consumer's `MaxAckPending: 1`, so an older `member_put` delivered
 via core can finish after the JetStream consumer has already applied that
 same put and a subsequent `member_remove` or `delete_access`. In that case
