@@ -483,6 +483,21 @@ func (s FgaService) WriteAndDeleteTuples(
 	return skippedWrites, nil
 }
 
+// writeCollisionIgnoreOptions instructs OpenFGA to treat a write of an
+// already-existing tuple, or a delete of an already-absent tuple, as a
+// server-side no-op instead of a failed transaction. Both fields must be set
+// together: a request mixing ignore and error semantics reverts to error for
+// the whole request, so setting only one has no effect on a batch carrying
+// both writes and deletes. This applies to every writeAndDeleteTuplesBatch
+// call, including the two Phase 1 access subjects, because the same
+// collision can occur on a retry after a partially applied batch.
+var writeCollisionIgnoreOptions = ClientWriteOptions{
+	Conflict: ClientWriteConflictOptions{
+		OnDuplicateWrites: CLIENT_WRITE_REQUEST_ON_DUPLICATE_WRITES_IGNORE,
+		OnMissingDeletes:  CLIENT_WRITE_REQUEST_ON_MISSING_DELETES_IGNORE,
+	},
+}
+
 // writeAndDeleteTuplesBatch performs a single write/delete operation to OpenFGA.
 // If OpenFGA returns a validation_error for an invalid tuple, that tuple is
 // removed and the batch is retried with the remaining tuples. It returns the
@@ -502,7 +517,7 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 			Deletes: deletes,
 		}
 
-		_, err := s.client.Write(ctx, req)
+		_, err := s.client.Write(ctx, req, writeCollisionIgnoreOptions)
 		if err != nil {
 			tupleStr, ok := extractInvalidTuple(err)
 			if !ok {

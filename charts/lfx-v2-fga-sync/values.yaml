@@ -74,7 +74,8 @@ nats:
     # compression is a boolean to determine if the KV bucket should be compressed
     compression: true
 
-  # accessMutationStream persists ordered update_access and delete_access messages.
+  # accessMutationStream persists ordered update_access, delete_access,
+  # member_put, and member_remove messages.
   accessMutationStream:
     # creation controls whether the stream CRD is provisioned by this chart
     creation: true
@@ -82,13 +83,22 @@ nats:
     keep: true
     # name is the NATS stream name
     name: fga-sync-events
-    # subjects captures both access mutation subjects on one stream so a single
-    # ordered consumer applies updates and deletions for an object in publish
-    # order. Splitting them across transports would let a delayed update recreate
-    # tuples a later deletion already removed.
+    # subjects captures all four access-mutation and membership subjects on one
+    # stream so a single ordered consumer applies updates, deletions, and
+    # membership changes for an object in publish order across both families.
+    # Splitting them across transports would let a delayed update recreate
+    # tuples a later deletion already removed. Do not apply the membership
+    # subjects below until the release-2 gate in
+    # openspec/changes/fga-sync-jetstream-membership/tasks.md (group 6) is
+    # cleared: all four publisher services must be asynchronous-only for
+    # member_put/member_remove first, because stream capture — not core
+    # subscription removal — is the point of no return for a request/reply
+    # caller.
     subjects:
       - lfx.fga-sync.update_access
       - lfx.fga-sync.delete_access
+      - lfx.fga-sync.member_put
+      - lfx.fga-sync.member_remove
     # retention keeps messages up to maxAge; they are not accumulated indefinitely
     retention: limits
     # maxAge must cover queue wait plus retry, not just the ~94 minute retry

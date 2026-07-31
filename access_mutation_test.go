@@ -113,7 +113,12 @@ func TestAccessMutationConsumerConfig(t *testing.T) {
 		15 * time.Minute,
 		30 * time.Minute,
 	}, config.BackOff)
-	assert.Empty(t, config.FilterSubjects)
+	assert.Equal(t, []string{
+		constants.GenericUpdateAccessSubject,
+		constants.GenericDeleteAccessSubject,
+		constants.GenericMemberPutSubject,
+		constants.GenericMemberRemoveSubject,
+	}, config.FilterSubjects)
 }
 
 func TestAccessMutationAttemptContextUsesNinetySecondDeadline(t *testing.T) {
@@ -176,6 +181,35 @@ func TestProcessAccessMutationMessageOutcomes(t *testing.T) {
 			fgaErr:         assert.AnError,
 			transientDelta: 1,
 		},
+		{
+			name: "member_put dispatches to its handler and ACKs",
+			payload: `{"object_type":"committee","operation":"member_put",` +
+				`"data":{"uid":"resource-1","username":"user-1","relations":["member"]}}`,
+			subject:      constants.GenericMemberPutSubject,
+			wantAckCalls: 1,
+			ackDelta:     1,
+		},
+		{
+			name:         "member_remove dispatches to its handler and ACKs",
+			payload:      `{"object_type":"committee","operation":"member_remove","data":{"uid":"resource-1","username":"user-1"}}`,
+			subject:      constants.GenericMemberRemoveSubject,
+			wantAckCalls: 1,
+			ackDelta:     1,
+		},
+		{
+			name:          "member_put malformed payload terminates",
+			payload:       `{`,
+			subject:       constants.GenericMemberPutSubject,
+			wantTermCalls: 1,
+			terminalDelta: 1,
+		},
+		{
+			name:          "member_remove malformed payload terminates",
+			payload:       `{`,
+			subject:       constants.GenericMemberRemoveSubject,
+			wantTermCalls: 1,
+			terminalDelta: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -185,6 +219,9 @@ func TestProcessAccessMutationMessageOutcomes(t *testing.T) {
 			fgaClient.
 				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 				Return(&client.ClientReadResponse{}, tt.fgaErr)
+			fgaClient.
+				On("Write", mock.Anything, mock.Anything, mock.Anything).
+				Return(&client.ClientWriteResponse{}, nil)
 
 			message := &testAccessMutationMessage{
 				data:    []byte(tt.payload),
@@ -292,7 +329,7 @@ func TestProcessAccessMutationMessageAcksCacheInvalidationWarning(t *testing.T) 
 		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 		Return(&client.ClientReadResponse{}, nil)
 	fgaClient.
-		On("Write", mock.Anything, mock.Anything).
+		On("Write", mock.Anything, mock.Anything, mock.Anything).
 		Return(&client.ClientWriteResponse{}, nil)
 	service.fgaService.cacheBucket.(*MockKeyValue).SetError(assert.AnError)
 	message := &testAccessMutationMessage{
@@ -388,11 +425,11 @@ func TestCoreSubscriptionsExcludeMigratedAccessSubjects(t *testing.T) {
 
 	assert.False(t, subjects[constants.GenericUpdateAccessSubject])
 	assert.False(t, subjects[constants.GenericDeleteAccessSubject])
+	assert.False(t, subjects[constants.GenericMemberPutSubject])
+	assert.False(t, subjects[constants.GenericMemberRemoveSubject])
 	assert.True(t, subjects[constants.AccessCheckSubject])
 	assert.True(t, subjects[constants.ReadTuplesSubject])
-	assert.True(t, subjects[constants.GenericMemberPutSubject])
-	assert.True(t, subjects[constants.GenericMemberRemoveSubject])
-	assert.Len(t, subjects, 4)
+	assert.Len(t, subjects, 2)
 }
 
 func TestHandleMaxDeliveryAdvisoryEnrichesObjectContext(t *testing.T) {

@@ -37,8 +37,9 @@ func (m *MockFgaClient) Read(
 func (m *MockFgaClient) Write(
 	ctx context.Context,
 	req ClientWriteRequest,
+	options ClientWriteOptions,
 ) (*ClientWriteResponse, error) {
-	args := m.Called(ctx, req)
+	args := m.Called(ctx, req, options)
 	//nolint:errcheck // the error is passed through to the caller
 	return args.Get(0).(*ClientWriteResponse), args.Error(1)
 }

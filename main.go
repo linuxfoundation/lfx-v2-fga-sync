@@ -370,6 +370,13 @@ func createQueueSubscriptions(handlerService HandlerService) error {
 	return nil
 }
 
+// queueSubscriptionConfigs lists core NATS (non-JetStream) subscriptions only.
+// member_put and member_remove moved to the shared JetStream access-mutation
+// consumer in release 2/3 of the fga-sync-jetstream-membership change; do not
+// add them back here. See
+// openspec/changes/fga-sync-jetstream-membership/tasks.md group 7 — this
+// change must not deploy before group 6 (stream widening) is applied and
+// verified live, or membership messages are lost permanently.
 func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfig {
 	return []subscriptionConfig{
 		{
@@ -381,16 +388,6 @@ func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfi
 			subject:     constants.ReadTuplesSubject,
 			handler:     handlerService.readTuplesHandler,
 			description: "read tuples",
-		},
-		{
-			subject:     constants.GenericMemberPutSubject,
-			handler:     handlerService.genericMemberPutHandler,
-			description: "generic member put",
-		},
-		{
-			subject:     constants.GenericMemberRemoveSubject,
-			handler:     handlerService.genericMemberRemoveHandler,
-			description: "generic member remove",
 		},
 	}
 }

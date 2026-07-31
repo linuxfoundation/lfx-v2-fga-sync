@@ -67,10 +67,9 @@ If no tuples are found:
 
 The FGA Sync service provides four universal NATS subjects that work with any
 resource type defined in the OpenFGA model, such as projects, committees, and
-v1 meetings. `update_access` and `delete_access` are asynchronous, ordered,
-at-least-once JetStream messages and never send application replies.
-`member_put` and `member_remove` remain core NATS operations that respond with
-`OK` after processing when a reply subject is provided.
+v1 meetings. All four — `update_access`, `delete_access`, `member_put`, and
+`member_remove` — are asynchronous, ordered, at-least-once JetStream messages
+and never send application replies.
 
 ### Benefits of Generic Handlers
 
@@ -494,7 +493,7 @@ msg := GenericFGAMessage{
 }
 
 payload, _ := json.Marshal(msg)
-nc.Request("lfx.fga-sync.member_put", payload, 5*time.Second)
+nc.Publish("lfx.fga-sync.member_put", payload)
 ```
 
 ---
@@ -609,7 +608,7 @@ msg := GenericFGAMessage{
 }
 
 payload, _ := json.Marshal(msg)
-nc.Request("lfx.fga-sync.member_remove", payload, 5*time.Second)
+nc.Publish("lfx.fga-sync.member_remove", payload)
 ```
 
 ---
@@ -806,18 +805,13 @@ Remove `attendee` if they didn't actually attend:
 
 ## Response Format
 
-`member_put` and `member_remove` return a simple `"OK"` string on success when
-the request includes a reply subject:
-
-```text
-OK
-```
-
-`update_access` and `delete_access` do not return `OK`. JetStream ACKs successful
-processing, redelivers transient failures, and terminates proven invalid
-payloads. Publishers receive no OpenFGA completion acknowledgement; `X-Sync`
-does not change that contract. Membership-operation failures are logged
-server-side and do not have a standardized NATS error response body.
+None of the four generic sync subjects (`update_access`, `delete_access`,
+`member_put`, `member_remove`) return an application reply. JetStream ACKs
+successful processing, redelivers transient failures, and terminates proven
+invalid payloads (missing `username`/`uid`, malformed JSON, wrong operation).
+Publishers receive no OpenFGA completion acknowledgement; `X-Sync` does not
+change that contract. Sync failures are logged server-side and do not have a
+standardized NATS error response body.
 
 The shared durable consumer normally preserves pending messages across service
 or NATS outages. If the durable consumer state itself is lost, fga-sync

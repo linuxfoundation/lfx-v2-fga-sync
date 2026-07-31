@@ -116,7 +116,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				// fakeStatusErr{code:500} is not a validation error, so the retry
 				// path is not taken and the error is returned immediately.
-				mc.On("Write", mock.Anything, mock.Anything).
+				mc.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), fakeStatusErr{code: 500})
 				return FgaService{client: mc}
 			},
@@ -194,7 +194,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 			wantSpan: false,
 			setup: func() FgaService {
 				mc := new(MockFgaClient)
-				mc.On("Write", mock.Anything, mock.Anything).
+				mc.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), fakeStatusErr{code: 422})
 				return FgaService{client: mc}
 			},
