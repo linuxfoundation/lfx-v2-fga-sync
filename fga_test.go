@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	. "github.com/openfga/go-sdk/client"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
 
@@ -1570,6 +1571,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 		deletes     []ClientTupleKeyWithoutCondition
 		mockSetup   func(*MockFgaClient)
 		expectError bool
+		wantSkipped []string
 		description string
 	}{
 		{
@@ -1592,6 +1594,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				})).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
+			wantSkipped: []string{"project:5e88f157#executive_director@user:alice"},
 			description: "invalid write tuple should be removed and batch retried",
 		},
 		{
@@ -1628,6 +1631,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				).Once()
 			},
 			expectError: false,
+			wantSkipped: []string{"project:123#executive_director@user:alice"},
 			description: "when all tuples are invalid the batch should succeed with no writes",
 		},
 		{
@@ -1670,6 +1674,10 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				})).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
+			wantSkipped: []string{
+				"project:abc#executive_director@user:alice",
+				"project:abc#technical_advisor@user:bob",
+			},
 			description: "multiple invalid tuples should each be removed and batch retried",
 		},
 	}
@@ -1685,7 +1693,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				cacheBucket: mockCache,
 			}
 
-			err := service.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
+			skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
 
 			if tt.expectError && err == nil {
 				t.Errorf("%s: expected error but got nil", tt.description)
@@ -1693,6 +1701,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 			if !tt.expectError && err != nil {
 				t.Errorf("%s: unexpected error: %v", tt.description, err)
 			}
+			assert.ElementsMatch(t, tt.wantSkipped, skipped, "%s: unexpected skipped write tuples", tt.description)
 
 			mockClient.AssertExpectations(t)
 		})

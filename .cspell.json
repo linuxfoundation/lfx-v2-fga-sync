@@ -83,7 +83,13 @@
     "tracecontext",
     "traceidratio",
     "parentbased",
-    "GOTOOLCHAIN"
+    "GOTOOLCHAIN",
+    "runbook",
+    "runbooks",
+    "cutover",
+    "Cutover",
+    "LFXV",
+    "undispositioned"
   ],
   "overrides": [
     {
@@ -124,7 +130,9 @@
         "noctx",
         "natsgo",
         "tracetest",
-        "sdktrace"
+        "sdktrace",
+        "subtests",
+        "Acks"
       ]
     },
     {

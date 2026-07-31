@@ -1,0 +1,27 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+---
+{{- if .Values.nats.accessMutationStream.creation }}
+apiVersion: jetstream.nats.io/v1beta2
+kind: Stream
+metadata:
+  name: {{ .Values.nats.accessMutationStream.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- if .Values.nats.accessMutationStream.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  {{- end }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+spec:
+  name: {{ .Values.nats.accessMutationStream.name }}
+  subjects:
+    {{- toYaml .Values.nats.accessMutationStream.subjects | nindent 4 }}
+  retention: {{ .Values.nats.accessMutationStream.retention }}
+  maxAge: {{ .Values.nats.accessMutationStream.maxAge }}
+  maxBytes: {{ .Values.nats.accessMutationStream.maxBytes }}
+  maxMsgs: {{ .Values.nats.accessMutationStream.maxMsgs }}
+  storage: {{ .Values.nats.accessMutationStream.storage }}
+  replicas: {{ .Values.nats.accessMutationStream.replicas }}
+  compression: {{ .Values.nats.accessMutationStream.compression }}
+{{- end }}

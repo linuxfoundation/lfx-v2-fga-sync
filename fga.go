@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
@@ -292,7 +293,10 @@ func (s FgaService) SyncObjectTuples(
 
 	// Any remaining relationships in the "map" version of the desired state are
 	// new (not found in live OpenFGA) and therefore will be added to the "write"
-	// list for the batch-write request.
+	// list for the batch-write request. cacheKeysByTuple is keyed by the same
+	// tuple-string format OpenFGA reports for a rejected write, so a tuple
+	// skipped during invalid-tuple recovery can be excluded from seeding below.
+	cacheKeysByTuple := make(map[string]string, len(relationsMap))
 	for _, relation := range relationsMap {
 		logger.With(
 			"user", relation.User,
@@ -310,19 +314,7 @@ func (s FgaService) SyncObjectTuples(
 			// updating large-scale relationships, like groups with over a thousand
 			// members.
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
-			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-			// Execute cache update asynchronously without defer to avoid resource leak
-			go func(cacheKey string) {
-				// Define a timeout context for the cache update operation.
-				timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				defer cancel() // Ensure the context is cleaned up after the operation.
-
-				// All direct relations handled in this function correspond to "true"
-				// access relations. This happens asynchronously so we are not checking
-				// for errors or logging anything.
-				//nolint:errcheck // This happens asynchronously so we are not checking for errors.
-				_, _ = s.cacheBucket.PutString(timeoutCtx, cacheKey, trueString)
-			}(cacheKey)
+			cacheKeysByTuple[relationKey] = "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 		}
 	}
 
@@ -332,12 +324,55 @@ func (s FgaService) SyncObjectTuples(
 	}
 
 	// Use the shared write and delete function
-	err = s.WriteAndDeleteTuples(ctx, writes, deletes)
+	skippedWrites, err := s.WriteAndDeleteTuples(ctx, writes, deletes)
 	if err != nil {
 		return writes, deletes, err
 	}
 
+	// A tuple OpenFGA rejected as invalid and skipped was never stored, even
+	// though the overall batch succeeded; do not seed a false-positive cache
+	// entry for it.
+	for _, tupleStr := range skippedWrites {
+		delete(cacheKeysByTuple, tupleStr)
+	}
+
+	cacheKeys := make([]string, 0, len(cacheKeysByTuple))
+	for _, cacheKey := range cacheKeysByTuple {
+		cacheKeys = append(cacheKeys, cacheKey)
+	}
+	s.seedPositiveCacheEntries(ctx, cacheKeys)
 	return writes, deletes, nil
+}
+
+// seedPositiveCacheEntries writes each cacheKey and blocks until all writes
+// complete (or time out), rather than firing detached goroutines. The access
+// mutation consumer processes exactly one message at a time
+// (MaxAckPending: 1) and only ACKs after this call returns, so awaiting the
+// seed here guarantees it lands before any later message's invalidateCache
+// call. A detached seed could otherwise still be in flight when a later
+// message (e.g. a delete for the same relation) invalidates the cache first;
+// if the stale seed then landed after that invalidation's timestamp, the
+// staleness check in CheckRelationships (entry created after last
+// invalidation) would treat it as fresh and resurrect access the later
+// message had just revoked.
+//
+// Every cacheKey passed in corresponds to a direct user relationship that
+// SyncObjectTuples just wrote, so writing trueString is always correct here:
+// all such relations are "true" (allowed) access relations by construction.
+func (s FgaService) seedPositiveCacheEntries(ctx context.Context, cacheKeys []string) {
+	var wg sync.WaitGroup
+	for _, cacheKey := range cacheKeys {
+		wg.Add(1)
+		go func(key string) {
+			defer wg.Done()
+			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+
+			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
+			_, _ = s.cacheBucket.PutString(timeoutCtx, key, trueString)
+		}(cacheKey)
+	}
+	wg.Wait()
 }
 
 // invalidateCache invalidates the cache by writing a timestamp marker.
@@ -354,15 +389,18 @@ func (s FgaService) invalidateCache(ctx context.Context) error {
 // WriteAndDeleteTuples writes and/or deletes the given tuples to/from OpenFGA.
 // This is a general-purpose method for modifying tuples without reading existing state.
 // OpenFGA has a limit of 100 total operations (writes + deletes combined) per request,
-// so this function will automatically batch operations if needed.
+// so this function will automatically batch operations if needed. It returns
+// the tuple strings of any write tuples OpenFGA rejected as invalid and
+// skipped rather than storing, so callers that pre-computed cache keys from
+// the original write list can exclude those tuples before seeding.
 func (s FgaService) WriteAndDeleteTuples(
 	ctx context.Context,
 	writes []ClientTupleKey,
 	deletes []ClientTupleKeyWithoutCondition,
-) error {
+) ([]string, error) {
 	// Return early if there's nothing to do
 	if len(writes) == 0 && len(deletes) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// This max operations limit is set by the OpenFGA Write API
@@ -385,6 +423,7 @@ func (s FgaService) WriteAndDeleteTuples(
 	writeIdx := 0
 	deleteIdx := 0
 	batchNumber := 0
+	var skippedWrites []string
 
 	for writeIdx < len(writes) || deleteIdx < len(deletes) {
 		batchNumber++
@@ -422,14 +461,16 @@ func (s FgaService) WriteAndDeleteTuples(
 			"batch_deletes", len(batchDeletes),
 		).DebugContext(ctx, "executing batch")
 
-		if err := s.writeAndDeleteTuplesBatch(ctx, batchWrites, batchDeletes); err != nil {
-			logger.With(errKey, err,
+		batchSkipped, err := s.writeAndDeleteTuplesBatch(ctx, batchWrites, batchDeletes)
+		skippedWrites = append(skippedWrites, batchSkipped...)
+		if err != nil {
+			logger.With("error_type", safeErrorType(err),
 				"batch_number", batchNumber,
 				"total_operations", totalOperations,
 				"batch_writes", len(batchWrites),
 				"batch_deletes", len(batchDeletes),
 			).ErrorContext(ctx, "failed to execute batch")
-			return err
+			return skippedWrites, err
 		}
 	}
 
@@ -439,18 +480,22 @@ func (s FgaService) WriteAndDeleteTuples(
 		"total_deletes", len(deletes),
 	).InfoContext(ctx, "completed batched write operations")
 
-	return nil
+	return skippedWrites, nil
 }
 
 // writeAndDeleteTuplesBatch performs a single write/delete operation to OpenFGA.
 // If OpenFGA returns a validation_error for an invalid tuple, that tuple is
-// removed and the batch is retried with the remaining tuples.
+// removed and the batch is retried with the remaining tuples. It returns the
+// tuple strings (e.g. "object:id#relation@user:id") of any write tuples
+// skipped this way, so callers that pre-computed cache keys from the original
+// write list can exclude tuples OpenFGA never actually stored.
 // This is an internal helper function that should not be called directly.
 func (s FgaService) writeAndDeleteTuplesBatch(
 	ctx context.Context,
 	writes []ClientTupleKey,
 	deletes []ClientTupleKeyWithoutCondition,
-) error {
+) ([]string, error) {
+	var skippedWrites []string
 	for {
 		req := ClientWriteRequest{
 			Writes:  writes,
@@ -462,17 +507,21 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 			tupleStr, ok := extractInvalidTuple(err)
 			if !ok {
 				recordSpanError(ctx, err)
-				return err
+				return skippedWrites, err
 			}
 
-			removed := false
-			writes, removed = removeInvalidWriteTuple(writes, tupleStr)
+			removedWrite := false
+			writes, removedWrite = removeInvalidWriteTuple(writes, tupleStr)
+			removed := removedWrite
 			if !removed {
 				deletes, removed = removeInvalidDeleteTuple(deletes, tupleStr)
 			}
 			if !removed {
 				recordSpanError(ctx, err)
-				return err
+				return skippedWrites, err
+			}
+			if removedWrite {
+				skippedWrites = append(skippedWrites, tupleStr)
 			}
 
 			logger.With(
@@ -482,7 +531,7 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 			).WarnContext(ctx, "skipping invalid tuple and retrying batch write")
 
 			if len(writes) == 0 && len(deletes) == 0 {
-				return nil
+				return skippedWrites, nil
 			}
 			continue
 		}
@@ -503,7 +552,7 @@ func (s FgaService) writeAndDeleteTuplesBatch(
 		"deletes", deletes,
 	).InfoContext(ctx, "wrote and deleted tuples")
 
-	return nil
+	return skippedWrites, nil
 }
 
 // fgaStatusCoder is implemented by all OpenFGA SDK API error types. It exposes
@@ -586,13 +635,15 @@ func removeInvalidDeleteTuple(
 // WriteTuples writes the given tuples to OpenFGA without reading or comparing existing tuples.
 // This is useful for adding specific relations without affecting other relations on the object.
 func (s FgaService) WriteTuples(ctx context.Context, tuples []ClientTupleKey) error {
-	return s.WriteAndDeleteTuples(ctx, tuples, nil)
+	_, err := s.WriteAndDeleteTuples(ctx, tuples, nil)
+	return err
 }
 
 // DeleteTuples deletes the given tuples from OpenFGA without reading or comparing existing tuples.
 // This is useful for removing specific relations without affecting other relations on the object.
 func (s FgaService) DeleteTuples(ctx context.Context, tuples []ClientTupleKeyWithoutCondition) error {
-	return s.WriteAndDeleteTuples(ctx, nil, tuples)
+	_, err := s.WriteAndDeleteTuples(ctx, nil, tuples)
+	return err
 }
 
 // WriteTuple writes a single tuple to OpenFGA using simple string parameters.

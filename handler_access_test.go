@@ -11,11 +11,13 @@ import (
 	"strings"
 	"testing"
 
+	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func init() {
@@ -682,4 +684,41 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 			handlerService.fgaService.client.(*MockFgaClient).AssertExpectations(t)
 		})
 	}
+}
+
+type testJetStreamMessage struct {
+	data    []byte
+	headers nats.Header
+	subject string
+}
+
+func (m *testJetStreamMessage) Data() []byte {
+	return m.data
+}
+
+func (m *testJetStreamMessage) Headers() nats.Header {
+	return m.headers
+}
+
+func (m *testJetStreamMessage) Subject() string {
+	return m.subject
+}
+
+func TestJetStreamNatsMsgHidesAckReplySubject(t *testing.T) {
+	t.Parallel()
+
+	headers := nats.Header{"traceparent": []string{"trace-value"}}
+	message := &testJetStreamMessage{
+		data:    []byte(`{"operation":"update_access"}`),
+		headers: headers,
+		subject: "lfx.fga-sync.update_access",
+	}
+
+	adapter := newJetStreamNatsMsg(message)
+
+	assert.Equal(t, message.data, adapter.Data())
+	assert.Equal(t, message.subject, adapter.Subject())
+	assert.Equal(t, headers, adapter.Header())
+	assert.Empty(t, adapter.Reply())
+	require.NoError(t, adapter.Respond([]byte("OK")))
 }

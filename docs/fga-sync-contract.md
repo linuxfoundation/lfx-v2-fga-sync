@@ -15,8 +15,8 @@ this service (`lfx-v2-fga-sync`).
 
 | Subject | Purpose | Reply |
 | --- | --- | --- |
-| `lfx.fga-sync.update_access` | Create/update access tuples for a resource | `OK` on success if reply subject is provided |
-| `lfx.fga-sync.delete_access` | Delete all tuples for a resource (on delete) | `OK` on success if reply subject is provided |
+| `lfx.fga-sync.update_access` | Create/update access tuples for a resource | none; asynchronous |
+| `lfx.fga-sync.delete_access` | Delete publisher-managed tuples for a resource | none; asynchronous |
 | `lfx.fga-sync.member_put` | Add a user to a resource with one or more relations | `OK` on success if reply subject is provided |
 | `lfx.fga-sync.member_remove` | Remove specific or all relations for a user | `OK` on success if reply subject is provided |
 | `lfx.access_check.request` | Batch authorization check (used by query-service) | text body |
@@ -25,6 +25,49 @@ this service (`lfx-v2-fga-sync`).
 Handlers are generic: **publishers do not need fga-sync code changes when adding a
 new resource type that is defined in the OpenFGA model**. Use the generic
 envelope below.
+
+`update_access` and `delete_access` are persisted together in the
+`fga-sync-events` JetStream stream and consumed in one global order. Delivery is
+at least once: successful processing is ACKed, proven local validation failures
+are terminated, and every other error remains unacknowledged for bounded
+server-managed redelivery. Publishers must not use request/reply for these two
+subjects and an HTTP `X-Sync` option does not wait for OpenFGA convergence.
+`member_put`, `member_remove`, access checks, and tuple reads remain on core
+NATS.
+
+The durable consumer permits one globally pending message, attempts each
+message at most seven times, and uses `2m`, `2m`, `5m`, `10m`, `15m`, and `30m`
+backoff intervals. The final interval repeats, so authoritative max-delivery
+exhaustion occurs after approximately 94 minutes. During that window one
+transient failure blocks later access mutations across all resources by design.
+
+The consumer is first created with `DeliverNewPolicy`. The production cutover
+creates it only after the stream is verified empty, so no cutover message is
+skipped. Ordinary service or NATS outages preserve the durable and resume its
+stored cursor. If the durable state itself is lost, automatic recreation starts
+at the current stream tail: retained pre-recreation history is not replayed or
+purged, new messages process immediately without manual intervention, and the
+skipped history expires under the 24-hour stream retention. This explicit
+availability-over-completeness boundary prevents an older retained update from
+recreating authorization after a later deletion. If deletion occurs while
+replicas are running, `ErrConsumerDeleted` closes the affected `Consume()` loop;
+fga-sync keeps unrelated handlers available and retries creation/binding every
+two seconds until local consumption restarts.
+
+Max-delivery advisories received by a connected replica increment
+`sync_max_deliver_exhausted` and are enriched from the retained stream message.
+Phase 1 uses a best-effort core advisory subscription; external platform
+monitoring must capture the same advisory subject when all replicas are
+disconnected. Recovery is manual: the owning service must re-read current
+database state and publish a fresh update or deletion. Never blindly replay an
+exhausted full-state payload.
+
+If OpenFGA remains unavailable or persistently misconfigured, each message can
+occupy the one global slot until max-delivery exhaustion before the next
+sequence advances. Continued publication may therefore outpace processing, and
+messages can expire after 24 hours without being applied. Monitor max-delivery
+advisories, consumer lag, and oldest-message age; recovery publishes fresh
+authoritative state rather than replaying expired snapshots.
 
 ## Tuple Format
 
@@ -42,10 +85,11 @@ Examples:
 ### Tuple-format rejection conditions
 
 fga-sync rejects malformed envelopes before writing to OpenFGA, and the
-subscription loop logs the returned error with subject and queue context. Sync
-subjects only send `OK` after successful processing; they do not currently send a
-standardized error reply body. Agents debugging missing access should grep
-service logs first.
+subscription loop logs the returned error. `update_access` and `delete_access`
+do not send application replies. Membership sync subjects only send `OK` after
+successful processing and do not currently send a standardized error reply
+body. Agents debugging missing access should inspect service logs and
+`/debug/vars`.
 
 | Condition | Behavior |
 | --- | --- |
@@ -111,7 +155,8 @@ type GenericFGAMessage struct {
 }
 ```
 
-Purges **all** OpenFGA tuples for that object across all relations.
+Removes publisher-managed OpenFGA tuples for that object while preserving
+externally managed `team:*` grants.
 
 ### `member_put` / `member_remove`
 
@@ -257,7 +302,9 @@ payload, err := json.Marshal(msg)
 if err != nil {
     return err
 }
-nc.Publish("lfx.fga-sync.update_access", payload)
+if err := nc.Publish("lfx.fga-sync.update_access", payload); err != nil {
+    return err
+}
 ```
 
 ## Debugging Access Issues

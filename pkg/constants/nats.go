@@ -28,6 +28,14 @@ const (
 	FgaSyncQueue = "lfx.fga-sync.queue"
 )
 
+// JetStream resource names for durable FGA access mutation delivery.
+const (
+	FgaSyncStreamName                 = "fga-sync-events"
+	FgaSyncAccessMutationConsumerName = "fga-sync-access-mutation-consumer"
+	FgaSyncMaxDeliveryAdvisorySubject = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES." +
+		FgaSyncStreamName + "." + FgaSyncAccessMutationConsumerName
+)
+
 // Generic NATS subjects for resource-agnostic FGA operations.
 // These subjects accept a GenericFGAMessage envelope and route based on object_type.
 const (
