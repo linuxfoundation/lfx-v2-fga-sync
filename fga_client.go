@@ -15,7 +15,7 @@ import (
 // IFgaClient is an interface for OpenFGA client operations used in this service.
 type IFgaClient interface {
 	Read(ctx context.Context, req ClientReadRequest, options ClientReadOptions) (*ClientReadResponse, error)
-	Write(ctx context.Context, req ClientWriteRequest) (*ClientWriteResponse, error)
+	Write(ctx context.Context, req ClientWriteRequest, options ClientWriteOptions) (*ClientWriteResponse, error)
 	BatchCheck(ctx context.Context, request ClientBatchCheckRequest) (*openfga.BatchCheckResponse, error)
 	ListObjects(
 		ctx context.Context,
@@ -50,8 +50,9 @@ func (c FgaAdapter) Read(
 func (c FgaAdapter) Write(
 	ctx context.Context,
 	req ClientWriteRequest,
+	options ClientWriteOptions,
 ) (*ClientWriteResponse, error) {
-	return c.OpenFgaClient.Write(ctx).Body(req).Execute()
+	return c.OpenFgaClient.Write(ctx).Body(req).Options(options).Execute()
 }
 
 // ListObjects executes a list objects request.

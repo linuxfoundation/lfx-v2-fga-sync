@@ -8,9 +8,10 @@ Read `lfx-skills:lfx-platform-architecture` for cross-repo NATS and KV ownership
 ## Subscriptions
 
 Core subscriptions are wired in `createQueueSubscriptions` in `main.go` and
-share `constants.FgaSyncQueue`. Access mutations use one durable JetStream
-consumer with `MaxAckPending: 1`, so only one update or delete is pending
-globally.
+share `constants.FgaSyncQueue`. All four generic sync subjects
+(`update_access`, `delete_access`, `member_put`, `member_remove`) share one
+durable JetStream consumer with `MaxAckPending: 1`, so only one message is
+pending globally.
 
 | Subject (constant) | Value | Handler | Purpose |
 | --- | --- | --- | --- |
@@ -18,8 +19,8 @@ globally.
 | `ReadTuplesSubject` | `lfx.access_check.read_tuples` | `readTuplesHandler` | Read direct tuples for a user + object type |
 | `GenericUpdateAccessSubject` | `lfx.fga-sync.update_access` | `genericUpdateAccessHandler` | JetStream full sync of publisher-managed relations |
 | `GenericDeleteAccessSubject` | `lfx.fga-sync.delete_access` | `genericDeleteAccessHandler` | JetStream removal of publisher-managed relations; preserves `team:*` grants |
-| `GenericMemberPutSubject` | `lfx.fga-sync.member_put` | `genericMemberPutHandler` | Add or update a per-user relation |
-| `GenericMemberRemoveSubject` | `lfx.fga-sync.member_remove` | `genericMemberRemoveHandler` | Remove a per-user relation |
+| `GenericMemberPutSubject` | `lfx.fga-sync.member_put` | `genericMemberPutHandler` | JetStream add or update of a per-user relation |
+| `GenericMemberRemoveSubject` | `lfx.fga-sync.member_remove` | `genericMemberRemoveHandler` | JetStream removal of a per-user relation |
 
 Subject strings live in `pkg/constants/nats.go`. Do not hardcode them at call sites.
 
@@ -27,11 +28,11 @@ Subject strings live in `pkg/constants/nats.go`. Do not hardcode them at call si
 
 - `lfx.access_check.request`: plain text, one line per requested check, tab-delimited `{object}#{relation}@user:{principal}\t{true|false}`. Missing lines mean denied. Replies are not ordered; callers must match by request token.
 - `lfx.access_check.read_tuples`: JSON. Success is `{"results": ["object#relation@user:{principal}", ...]}`. Failure is `{"error": "..."}`.
-- `update_access` and `delete_access`: no application reply. The consumer ACKs
-  success, leaves transient failures unacknowledged, and terminates proven local
-  validation failures.
-- `member_put` and `member_remove`: `OK` on success only when
-  `message.Reply() != ""`; failures have no standardized NATS error body.
+- None of the four generic sync subjects (`update_access`, `delete_access`,
+  `member_put`, `member_remove`) send an application reply. The shared
+  consumer ACKs success, leaves transient failures unacknowledged, and
+  terminates proven local validation failures; JetStream ACK/terminate/
+  redeliver is the only delivery signal.
 
 ## When adding a new subscription
 

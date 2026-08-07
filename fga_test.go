@@ -944,7 +944,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 						req.Deletes[0].User == "user:123" &&
 						req.Deletes[0].Relation == "participant" &&
 						req.Deletes[0].Object == "meeting:456"
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			description: "should delete single tuple for user on object",
@@ -988,7 +988,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 						relations[del.Relation] = true
 					}
 					return relations["host"] && relations["invitee"] && relations["attendee"]
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			description: "should delete all tuples for user on object",
@@ -1043,7 +1043,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 				}, nil).Once()
 
 				// Mock DeleteTuples to return an error
-				m.On("Write", mock.Anything, mock.Anything).
+				m.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), errors.New("delete error")).Once()
 			},
 			expectError: true,
@@ -1080,7 +1080,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 					return len(req.Deletes) == 2 &&
 						req.Deletes[0].User == "user:paginated" &&
 						req.Deletes[1].User == "user:paginated"
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			description: "should handle paginated results when reading tuples",
@@ -1375,7 +1375,7 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 					writesCount := len(req.Writes)
 					deletesCount := len(req.Deletes)
 					return writesCount == tt.expectedWrites && deletesCount == tt.expectedDeletes
-				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
+				}), mock.Anything, mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
 			}
 
 			// Create mock cache bucket
@@ -1519,7 +1519,7 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 						}
 					}
 					return true
-				}), mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
+				}), mock.Anything, mock.Anything).Return((*ClientWriteResponse)(nil), nil).Once()
 			}
 
 			mockCache := new(MockNatsKeyValue)
@@ -1585,13 +1585,13 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				// First call fails with invalid tuple error for executive_director
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Writes) == 2
-				})).Return((*ClientWriteResponse)(nil),
+				}), mock.Anything).Return((*ClientWriteResponse)(nil),
 					makeValidationError("Invalid tuple 'project:5e88f157#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
 				).Once()
 				// Retry with only the valid tuple succeeds
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Writes) == 1 && req.Writes[0].Relation == "viewer"
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			wantSkipped: []string{"project:5e88f157#executive_director@user:alice"},
@@ -1608,13 +1608,13 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				// First call fails with invalid tuple error
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Deletes) == 2
-				})).Return((*ClientWriteResponse)(nil),
+				}), mock.Anything).Return((*ClientWriteResponse)(nil),
 					makeValidationError("Invalid tuple 'vote_response:abc#project@project:123'. Reason: relation 'vote_response#project' not found"),
 				).Once()
 				// Retry with only the valid delete tuple succeeds
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Deletes) == 1 && req.Deletes[0].Relation == "viewer"
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			description: "invalid delete tuple should be removed and batch retried",
@@ -1626,7 +1626,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 			},
 			deletes: nil,
 			mockSetup: func(m *MockFgaClient) {
-				m.On("Write", mock.Anything, mock.Anything).Return((*ClientWriteResponse)(nil),
+				m.On("Write", mock.Anything, mock.Anything, mock.Anything).Return((*ClientWriteResponse)(nil),
 					makeValidationError("Invalid tuple 'project:123#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
 				).Once()
 			},
@@ -1641,7 +1641,7 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 			},
 			deletes: nil,
 			mockSetup: func(m *MockFgaClient) {
-				m.On("Write", mock.Anything, mock.Anything).
+				m.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), errors.New("network error")).Once()
 			},
 			expectError: true,
@@ -1659,19 +1659,19 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 				// First call: 3 writes, fail on executive_director
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Writes) == 3
-				})).Return((*ClientWriteResponse)(nil),
+				}), mock.Anything).Return((*ClientWriteResponse)(nil),
 					makeValidationError("Invalid tuple 'project:abc#executive_director@user:alice'. Reason: relation 'project#executive_director' not found"),
 				).Once()
 				// Second call: 2 writes, fail on technical_advisor
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Writes) == 2
-				})).Return((*ClientWriteResponse)(nil),
+				}), mock.Anything).Return((*ClientWriteResponse)(nil),
 					makeValidationError("Invalid tuple 'project:abc#technical_advisor@user:bob'. Reason: relation 'project#technical_advisor' not found"),
 				).Once()
 				// Third call: 1 write (viewer), succeeds
 				m.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 					return len(req.Writes) == 1 && req.Writes[0].Relation == "viewer"
-				})).Return(&ClientWriteResponse{}, nil).Once()
+				}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 			},
 			expectError: false,
 			wantSkipped: []string{
@@ -1706,4 +1706,59 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 			mockClient.AssertExpectations(t)
 		})
 	}
+}
+
+// TestWriteCollisionIgnoreOptions asserts that the collision options value
+// sets both OnDuplicateWrites and OnMissingDeletes to ignore. Per D15, a
+// request mixing ignore and error semantics reverts to error for the whole
+// request, so both fields must be set together.
+func TestWriteCollisionIgnoreOptions(t *testing.T) {
+	options := writeCollisionIgnoreOptions
+
+	assert.Equal(t, CLIENT_WRITE_REQUEST_ON_DUPLICATE_WRITES_IGNORE, options.Conflict.OnDuplicateWrites)
+	assert.Equal(t, CLIENT_WRITE_REQUEST_ON_MISSING_DELETES_IGNORE, options.Conflict.OnMissingDeletes)
+}
+
+// TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions asserts every
+// Write call carries the collision-ignore options, including on a batch that
+// mixes a genuinely new tuple with one OpenFGA reports as invalid.
+func TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions(t *testing.T) {
+	mockClient := new(MockFgaClient)
+	mockCache := NewMockKeyValue()
+	wantOptions := writeCollisionIgnoreOptions
+
+	mockClient.On("Write", mock.Anything, mock.Anything, wantOptions).
+		Return(&ClientWriteResponse{}, nil).Once()
+
+	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
+
+	_, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, nil)
+
+	assert.NoError(t, err)
+	mockClient.AssertExpectations(t)
+}
+
+// TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp asserts that when
+// OpenFGA (via the collision-ignore options) reports success for a batch
+// that would otherwise collide, the batch is not treated as an error and no
+// tuple is skipped: the collision never reaches this code as an error at
+// all, so extractInvalidTuple's skip path is not exercised.
+func TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp(t *testing.T) {
+	mockClient := new(MockFgaClient)
+	mockCache := NewMockKeyValue()
+
+	mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
+		return len(req.Writes) == 1 && len(req.Deletes) == 1
+	}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
+
+	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
+	deletes := []ClientTupleKeyWithoutCondition{{Object: "project:1", Relation: "writer", User: "user:bob"}}
+
+	skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, deletes)
+
+	assert.NoError(t, err)
+	assert.Empty(t, skipped)
+	mockClient.AssertExpectations(t)
 }

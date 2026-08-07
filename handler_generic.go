@@ -244,44 +244,44 @@ func (h *HandlerService) parseAndValidateMemberPutMessage(
 	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
-		return nil, nil, err
+		return nil, nil, newTerminalValidationError(err)
 	}
 
 	// Validate object_type
 	if genericMsg.ObjectType == "" {
 		logger.ErrorContext(ctx, "object_type is required")
-		return nil, nil, errors.New("object_type is required")
+		return nil, nil, newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "member_put" {
 		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
-		return nil, nil, errors.New("invalid operation for member_put handler")
+		return nil, nil, newTerminalValidationError(errors.New("invalid operation for member_put handler"))
 	}
 
 	// Parse data field
 	data := new(fgatypes.GenericMemberData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
-		return nil, nil, err
+		return nil, nil, newTerminalValidationError(err)
 	}
 
 	// Validate required fields
 	if data.Username == "" {
 		logger.ErrorContext(ctx, "username is required")
-		return nil, nil, errors.New("username is required")
+		return nil, nil, newTerminalValidationError(errors.New("username is required"))
 	}
 	if data.UID == "" {
 		logger.ErrorContext(ctx, "uid is required")
-		return nil, nil, errors.New("uid is required")
+		return nil, nil, newTerminalValidationError(errors.New("uid is required"))
 	}
 	if len(data.Relations) == 0 {
 		logger.ErrorContext(ctx, "relations array cannot be empty")
-		return nil, nil, errors.New("relations array cannot be empty")
+		return nil, nil, newTerminalValidationError(errors.New("relations array cannot be empty"))
 	}
 	// Validate each relation is non-empty
 	for _, relation := range data.Relations {
 		if relation == "" {
 			logger.ErrorContext(ctx, "relation value cannot be empty")
-			return nil, nil, errors.New("relation value cannot be empty")
+			return nil, nil, newTerminalValidationError(errors.New("relation value cannot be empty"))
 		}
 	}
 
@@ -431,34 +431,34 @@ func (h *HandlerService) genericMemberRemoveHandler(ctx context.Context, message
 	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse generic message")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	// Validate
 	if genericMsg.ObjectType == "" {
 		logger.ErrorContext(ctx, "object_type is required")
-		return errors.New("object_type is required")
+		return newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != "member_remove" {
 		logger.ErrorContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
-		return errors.New("invalid operation for member_remove handler")
+		return newTerminalValidationError(errors.New("invalid operation for member_remove handler"))
 	}
 
 	// Parse data field
 	data := new(fgatypes.GenericMemberData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to parse member data")
-		return err
+		return newTerminalValidationError(err)
 	}
 
 	// Validate required fields
 	if data.Username == "" {
 		logger.ErrorContext(ctx, "username is required")
-		return errors.New("username is required")
+		return newTerminalValidationError(errors.New("username is required"))
 	}
 	if data.UID == "" {
 		logger.ErrorContext(ctx, "uid is required")
-		return errors.New("uid is required")
+		return newTerminalValidationError(errors.New("uid is required"))
 	}
 
 	logger.With(

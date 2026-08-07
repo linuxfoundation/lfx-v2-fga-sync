@@ -282,7 +282,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 					// Should have: public viewer, parent relation, 2 writers = 4 tuples
 					return len(req.Writes) == 4 && len(req.Deletes) == 0
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -312,7 +312,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 					// Should have: 3 references + 7 relations (no public) = 10 tuples
 					return len(req.Writes) == 10 && len(req.Deletes) == 0
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -342,7 +342,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return true
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -378,7 +378,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// Mock FGA service to return error
-				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything).Return((*client.ClientWriteResponse)(nil), assert.AnError)
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything, mock.Anything).Return((*client.ClientWriteResponse)(nil), assert.AnError)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  true,
@@ -400,7 +400,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 					// Should have only 1 tuple: public viewer
 					return len(req.Writes) == 1 && len(req.Deletes) == 0 &&
 						req.Writes[0].User == "user:*" && req.Writes[0].Relation == "viewer"
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -418,7 +418,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 			replySubject: "",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				// Should not call Respond
-				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -436,7 +436,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 			replySubject: "reply.subject",
 			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
 				msg.On("Respond", []byte("OK")).Return(assert.AnError).Once()
-				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  true,
@@ -471,7 +471,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 					// Should have: 1 public + 5 references + 15 relations = 21 tuples
 					return len(req.Writes) == 21 && len(req.Deletes) == 0
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -497,7 +497,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				service.fgaService.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 					// Should have: 1 parent + 3 relations = 4 tuples (no public)
 					return len(req.Writes) == 4 && len(req.Deletes) == 0
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -536,7 +536,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return parentCount == 3
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -570,7 +570,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return committeeCount == 4
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -610,7 +610,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 					}
 					return counts["parent"] == 2 && counts["project"] == 3 &&
 						counts["committee"] == 1 && counts["team"] == 4
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,
@@ -644,7 +644,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return true
-				})).Return(&client.ClientWriteResponse{}, nil)
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
 			expectedError:  false,

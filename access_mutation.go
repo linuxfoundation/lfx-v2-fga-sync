@@ -138,10 +138,18 @@ type accessMutationConsumerManager struct {
 }
 
 // accessMutationConsumerConfig returns the durable pull consumer configuration
-// shared by update_access and delete_access. MaxAckPending of 1 serializes
-// delivery so full-state updates for an object are never applied out of order;
-// BackOff spaces redelivery attempts over roughly 94 minutes before the
-// max-delivery advisory fires.
+// shared by update_access, delete_access, member_put, and member_remove.
+// MaxAckPending of 1 serializes delivery so full-state updates for an object
+// are never applied out of order, and so a member_put cannot be applied ahead
+// of a delete_access for the same object; BackOff spaces redelivery attempts
+// over roughly 94 minutes before the max-delivery advisory fires.
+//
+// FilterSubjects is set explicitly rather than left empty so the consumer's
+// scope is a declared property of the deployed binary instead of an implicit
+// consequence of whatever subjects the stream happens to carry. An empty
+// filter would let a Helm-only stream change (widening to the membership
+// subjects) silently change what this consumer receives, ahead of a service
+// version that knows how to route them.
 //
 // DeliverNewPolicy is equivalent to DeliverAllPolicy for the empty stream used
 // at the initial cutover. On normal restarts the existing durable resumes from
@@ -175,6 +183,12 @@ func accessMutationConsumerConfig() jetstream.ConsumerConfig {
 			30 * time.Minute,
 		},
 		MaxAckPending: 1,
+		FilterSubjects: []string{
+			constants.GenericUpdateAccessSubject,
+			constants.GenericDeleteAccessSubject,
+			constants.GenericMemberPutSubject,
+			constants.GenericMemberRemoveSubject,
+		},
 	}
 }
 
@@ -388,6 +402,10 @@ func dispatchAccessMutation(
 		return handlerService.genericUpdateAccessHandler(ctx, message)
 	case constants.GenericDeleteAccessSubject:
 		return handlerService.genericDeleteAccessHandler(ctx, message)
+	case constants.GenericMemberPutSubject:
+		return handlerService.genericMemberPutHandler(ctx, message)
+	case constants.GenericMemberRemoveSubject:
+		return handlerService.genericMemberRemoveHandler(ctx, message)
 	default:
 		return newTerminalValidationError(errors.New("unsupported access mutation subject"))
 	}

@@ -17,8 +17,8 @@ this service (`lfx-v2-fga-sync`).
 | --- | --- | --- |
 | `lfx.fga-sync.update_access` | Create/update access tuples for a resource | none; asynchronous |
 | `lfx.fga-sync.delete_access` | Delete publisher-managed tuples for a resource | none; asynchronous |
-| `lfx.fga-sync.member_put` | Add a user to a resource with one or more relations | `OK` on success if reply subject is provided |
-| `lfx.fga-sync.member_remove` | Remove specific or all relations for a user | `OK` on success if reply subject is provided |
+| `lfx.fga-sync.member_put` | Add a user to a resource with one or more relations | none; asynchronous |
+| `lfx.fga-sync.member_remove` | Remove specific or all relations for a user | none; asynchronous |
 | `lfx.access_check.request` | Batch authorization check (used by query-service) | text body |
 | `lfx.access_check.read_tuples` | Read all direct tuples for a user + object_type | JSON body |
 
@@ -26,14 +26,26 @@ Handlers are generic: **publishers do not need fga-sync code changes when adding
 new resource type that is defined in the OpenFGA model**. Use the generic
 envelope below.
 
-`update_access` and `delete_access` are persisted together in the
-`fga-sync-events` JetStream stream and consumed in one global order. Delivery is
-at least once: successful processing is ACKed, proven local validation failures
-are terminated, and every other error remains unacknowledged for bounded
-server-managed redelivery. Publishers must not use request/reply for these two
-subjects and an HTTP `X-Sync` option does not wait for OpenFGA convergence.
-`member_put`, `member_remove`, access checks, and tuple reads remain on core
-NATS.
+`update_access`, `delete_access`, `member_put`, and `member_remove` are
+persisted together in the `fga-sync-events` JetStream stream and consumed in
+one global order by a single shared durable consumer. Delivery is at least
+once: successful processing is ACKed, proven local validation failures are
+terminated, and every other error remains unacknowledged for bounded
+server-managed redelivery. Publishers must not use request/reply for any of
+these four subjects and an HTTP `X-Sync` option does not wait for OpenFGA
+convergence. Access checks and tuple reads remain on core NATS.
+
+Membership delivery carries the same guarantees as access mutations: durable,
+at-least-once, ordered with the rest of the stream, and bounded to the retry
+ladder below before max-delivery exhaustion. A `member_put` or `member_remove`
+with a proven-invalid payload (missing `username`, missing `uid`, malformed
+JSON, or wrong operation) is terminated immediately rather than retried.
+`member_put` additionally terminates on an empty relation entry within the
+array; `member_remove` does not — it silently drops empty relation entries
+and, if none remain, removes all relations for that user (see the
+`relations` row below). A terminated `member_remove` leaves the tuple(s) in
+place — fga-sync does not repair or retry on the publisher's behalf, and
+correcting the underlying data is the owning publisher's responsibility.
 
 The durable consumer permits one globally pending message, attempts each
 message at most seven times, and uses `2m`, `2m`, `5m`, `10m`, `15m`, and `30m`
@@ -85,23 +97,24 @@ Examples:
 ### Tuple-format rejection conditions
 
 fga-sync rejects malformed envelopes before writing to OpenFGA, and the
-subscription loop logs the returned error. `update_access` and `delete_access`
-do not send application replies. Membership sync subjects only send `OK` after
-successful processing and do not currently send a standardized error reply
-body. Agents debugging missing access should inspect service logs and
-`/debug/vars`.
+subscription loop logs the returned error. None of the four generic sync
+subjects send application replies; JetStream ACK/terminate/redeliver is the
+only delivery signal. Agents debugging missing access should inspect service
+logs and `/debug/vars`.
 
 | Condition | Behavior |
 | --- | --- |
-| `username` missing/empty on `member_put` or `member_remove` | Message rejected |
-| `uid` missing/empty on any sync operation | Message rejected |
-| `relations` empty on `member_put` | Message rejected |
-| `relations` empty on `member_remove` | Removes ALL relations for that user (intentional) |
-| `object_type` empty in envelope | Message rejected |
-| Unknown `operation` value | Message rejected |
+| `username` missing/empty on `member_put` or `member_remove` | Terminated (proven invalid, not retried) |
+| `uid` missing/empty on any sync operation | Terminated (proven invalid, not retried) |
+| `relations` empty (`[]`) on `member_put` | Terminated (proven invalid, not retried) |
+| `relations` contains an empty string entry on `member_put` | Terminated (proven invalid, not retried) |
+| `relations` empty (`[]`) on `member_remove` | Removes ALL relations for that user (intentional) |
+| `relations` contains an empty string entry on `member_remove` | Entry is silently dropped; remaining non-empty relations are removed, or ALL relations if none remain |
+| `object_type` empty in envelope | Terminated (proven invalid, not retried) |
+| Unknown `operation` value | Terminated (proven invalid, not retried) |
 | `references` value with an empty `type` or empty `id` in `type:id` format | Message rejected |
 | Tuple rejected by OpenFGA with `validation_error` | Invalid tuple is logged, removed from the batch, and the remaining batch is retried |
-| Non-validation OpenFGA write/read error | Operation fails and is logged |
+| Non-validation OpenFGA write/read error | Transient: message is left unacknowledged for redelivery, not terminated |
 
 ## Access Message Envelope: `GenericFGAMessage`
 
@@ -346,8 +359,12 @@ Common causes:
   publish errors).
 - Wrong `references` in the access message (wrong parent project UID).
 - User's LFID in the JWT doesn't match the username stored in the tuple.
-- Member payload was missing `username`. fga-sync rejects `member_put` and
-  `member_remove` when username is empty.
+- Member payload was missing `username` or `uid`. fga-sync terminates
+  `member_put` and `member_remove` immediately in this case rather than
+  retrying; a terminated message never reaches OpenFGA, so no tuple is
+  written or removed. Fixing the publisher and republishing corrected data is
+  the only recovery path — see LFXV2-2907 for the publisher-side root cause
+  and its ownership of the fix.
 - Cache is stale. Any successful OpenFGA write re-invalidates, or manually write to
   the `inv` KV key.
 

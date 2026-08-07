@@ -114,11 +114,11 @@ Dependencies you need but should get from [lfx-v2-helm](https://github.com/linux
    ```bash
    # Using NATS CLI (if available)
    nats kv add fga-sync-cache --history=20 --storage=file --max-value-size=10485760 --max-bucket-size=1073741824
-   nats stream add fga-sync-events --subjects=lfx.fga-sync.update_access --subjects=lfx.fga-sync.delete_access --storage=file --retention=limits --max-age=24h
+   nats stream add fga-sync-events --subjects=lfx.fga-sync.update_access --subjects=lfx.fga-sync.delete_access --subjects=lfx.fga-sync.member_put --subjects=lfx.fga-sync.member_remove --storage=file --retention=limits --max-age=24h
 
    # Or using kubectl if running in Kubernetes
    kubectl exec -n lfx deploy/nats-box -- nats kv add fga-sync-cache --history=20 --storage=file --max-value-size=10485760 --max-bucket-size=1073741824 --ttl=3h
-   kubectl exec -n lfx deploy/nats-box -- nats stream add fga-sync-events --subjects=lfx.fga-sync.update_access --subjects=lfx.fga-sync.delete_access --storage=file --retention=limits --max-age=24h
+   kubectl exec -n lfx deploy/nats-box -- nats stream add fga-sync-events --subjects=lfx.fga-sync.update_access --subjects=lfx.fga-sync.delete_access --subjects=lfx.fga-sync.member_put --subjects=lfx.fga-sync.member_remove --storage=file --retention=limits --max-age=24h
    ```
 
 6. **Run the service**:

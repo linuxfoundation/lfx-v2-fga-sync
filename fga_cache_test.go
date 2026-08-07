@@ -48,7 +48,7 @@ func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T
 				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 				Return(&client.ClientReadResponse{}, nil)
 			fgaClient.
-				On("Write", mock.Anything, mock.Anything).
+				On("Write", mock.Anything, mock.Anything, mock.Anything).
 				Return(&client.ClientWriteResponse{}, tt.writeErr)
 			cache := &cacheWriteRecorder{writes: make(chan string, 1)}
 			service := FgaService{client: fgaClient, cacheBucket: cache}
@@ -93,7 +93,7 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 	fgaClient.
 		On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 			return len(req.Writes) == 2
-		})).
+		}), mock.Anything).
 		Return((*client.ClientWriteResponse)(nil), makeValidationError(
 			"Invalid tuple 'project:resource-1#writer@user:alice'. Reason: relation 'project#writer' not found",
 		)).
@@ -102,7 +102,7 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 	fgaClient.
 		On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
 			return len(req.Writes) == 1 && req.Writes[0].User == "user:bob"
-		})).
+		}), mock.Anything).
 		Return(&client.ClientWriteResponse{}, nil).
 		Once()
 
