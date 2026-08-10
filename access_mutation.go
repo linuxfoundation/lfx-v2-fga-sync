@@ -472,6 +472,7 @@ func logAccessMutationFailure(
 	attributes := append([]any{
 		"error_type", safeErrorType(err),
 		"classification", classification,
+		errKey, err,
 	}, accessMutationDeliveryAttributes(message)...)
 	logger.With(attributes...).ErrorContext(ctx, "access mutation delivery failure")
 }

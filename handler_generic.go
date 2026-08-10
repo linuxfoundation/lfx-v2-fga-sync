@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	fgatypes "github.com/linuxfoundation/lfx-v2-fga-sync/pkg/types"
@@ -430,35 +431,30 @@ func (h *HandlerService) genericMemberRemoveHandler(ctx context.Context, message
 	// Parse generic message
 	genericMsg := new(fgatypes.GenericFGAMessage)
 	if err := json.Unmarshal(message.Data(), genericMsg); err != nil {
-		logger.With(errKey, err).WarnContext(ctx, "failed to parse generic message")
-		return newTerminalValidationError(err)
+		return newTerminalValidationError(fmt.Errorf("failed to parse generic message: %w", err))
 	}
 
 	// Validate
 	if genericMsg.ObjectType == "" {
-		logger.WarnContext(ctx, "object_type is required")
-		return newTerminalValidationError(errors.New("object_type is required"))
+		return newTerminalValidationError(errors.New("member_remove: object_type is required"))
 	}
 	if genericMsg.Operation != "member_remove" {
-		logger.WarnContext(ctx, "invalid operation for this handler", "operation", genericMsg.Operation)
-		return newTerminalValidationError(errors.New("invalid operation for member_remove handler"))
+		return newTerminalValidationError(
+			fmt.Errorf("member_remove: invalid operation %q", genericMsg.Operation))
 	}
 
 	// Parse data field
 	data := new(fgatypes.GenericMemberData)
 	if err := genericMsg.UnmarshalData(data); err != nil {
-		logger.With(errKey, err).WarnContext(ctx, "failed to parse member data")
-		return newTerminalValidationError(err)
+		return newTerminalValidationError(fmt.Errorf("member_remove: failed to parse member data: %w", err))
 	}
 
 	// Validate required fields
 	if data.Username == "" {
-		logger.WarnContext(ctx, "username is required")
-		return newTerminalValidationError(errors.New("username is required"))
+		return newTerminalValidationError(errors.New("member_remove: username is required"))
 	}
 	if data.UID == "" {
-		logger.WarnContext(ctx, "uid is required")
-		return newTerminalValidationError(errors.New("uid is required"))
+		return newTerminalValidationError(errors.New("member_remove: uid is required"))
 	}
 
 	logger.With(
