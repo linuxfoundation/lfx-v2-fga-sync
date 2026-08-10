@@ -11,6 +11,10 @@ metadata:
     {{- with (omit (.Values.deployment.labels | default dict) "app.kubernetes.io/name") }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.application.replicas }}
   selector:
