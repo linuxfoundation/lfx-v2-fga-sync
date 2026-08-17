@@ -17,11 +17,6 @@ const (
 	RelationMeetingCoordinator = "meeting_coordinator"
 	RelationViewer             = "viewer"
 	RelationExecutiveDirector  = "executive_director"
-	// RelationMarketingOps and RelationMarketingAuditor only accept [team#member] tuples
-	// in the model, not [user] — they cannot go through the generic per-user obj.Relations
-	// emission path and must be granted via the team-based workflow instead.
-	RelationMarketingOps     = "marketing_ops"
-	RelationMarketingAuditor = "marketing_auditor"
 
 	// Meeting relations
 	RelationProject                       = "project"
