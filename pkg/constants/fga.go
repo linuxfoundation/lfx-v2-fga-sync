@@ -17,9 +17,13 @@ const (
 	RelationMeetingCoordinator = "meeting_coordinator"
 	RelationViewer             = "viewer"
 	RelationExecutiveDirector  = "executive_director"
-	RelationMarketingOps       = "marketing_ops"
-	RelationMarketingAuditor   = "marketing_auditor"
-	RelationCampaignManager    = "campaign_manager"
+	// RelationMarketingOps and RelationMarketingAuditor only accept [team#member] tuples
+	// in the model, not [user] — they cannot go through the generic per-user obj.Relations
+	// emission path and must be granted via the team-based workflow instead.
+	RelationMarketingOps     = "marketing_ops"
+	RelationMarketingAuditor = "marketing_auditor"
+	// campaign_manager is a computed relation (executive_director or marketing_ops) with no
+	// direct tuple accepted — intentionally no RelationCampaignManager constant here.
 
 	// Meeting relations
 	RelationProject                       = "project"
