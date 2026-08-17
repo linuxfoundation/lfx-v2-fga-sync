@@ -22,8 +22,6 @@ const (
 	// emission path and must be granted via the team-based workflow instead.
 	RelationMarketingOps     = "marketing_ops"
 	RelationMarketingAuditor = "marketing_auditor"
-	// campaign_manager is a computed relation (executive_director or marketing_ops) with no
-	// direct tuple accepted — intentionally no RelationCampaignManager constant here.
 
 	// Meeting relations
 	RelationProject                       = "project"
