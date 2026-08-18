@@ -16,6 +16,7 @@ const (
 	RelationAuditor            = "auditor"
 	RelationMeetingCoordinator = "meeting_coordinator"
 	RelationViewer             = "viewer"
+	RelationExecutiveDirector  = "executive_director"
 
 	// Meeting relations
 	RelationProject                       = "project"
