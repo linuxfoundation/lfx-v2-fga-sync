@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
 )
@@ -34,7 +35,38 @@ import (
 const (
 	// trueString is used for cache values representing allowed access
 	trueString = "true"
+
+	// fgaHTTPMaxIdleConns and fgaHTTPMaxConnsPerHost raise the OpenFGA HTTP
+	// client's connection pool well above Go's http.DefaultTransport
+	// defaults (MaxIdleConnsPerHost: 2), which starve BatchCheck calls under
+	// the concurrent access-check load this service handles: every request
+	// goes to the same OpenFGA host, so the default pool forced most calls
+	// to wait for a free connection rather than run in parallel.
+	fgaHTTPMaxIdleConns        = 100
+	fgaHTTPMaxIdleConnsPerHost = 64
+	fgaHTTPMaxConnsPerHost     = 64
+
+	// cacheLookupConcurrency bounds how many NATS KV Get/Put calls run in
+	// parallel when resolving a batch of tuples against the cache. A batch of
+	// several hundred tuples run serially (one JetStream round-trip each, ~20ms
+	// apiece) was directly responsible for double-digit-second access-check
+	// latency; this trades a bounded amount of extra NATS load for wall-clock.
+	cacheLookupConcurrency = 64
 )
+
+// fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
+// except for a connection pool sized for this service's OpenFGA call volume.
+func fgaHTTPTransport() *http.Transport {
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		defaultTransport = &http.Transport{}
+	}
+	transport := defaultTransport.Clone()
+	transport.MaxIdleConns = fgaHTTPMaxIdleConns
+	transport.MaxIdleConnsPerHost = fgaHTTPMaxIdleConnsPerHost
+	transport.MaxConnsPerHost = fgaHTTPMaxConnsPerHost
+	return transport
+}
 
 var (
 	cacheHits       *expvar.Int
@@ -83,7 +115,7 @@ func connectFga() (IFgaClient, error) {
 		StoreId:              fgaStoreID,
 		AuthorizationModelId: fgaAuthModelID,
 		HTTPClient: &http.Client{
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
+			Transport: otelhttp.NewTransport(fgaHTTPTransport()),
 		},
 	})
 	if err != nil {
@@ -749,6 +781,11 @@ func (s FgaService) appendToMessage(
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
 ) []byte {
+	// Cache write-backs are fanned out below with bounded concurrency once the
+	// message is assembled; nothing downstream depends on them completing
+	// before we reply.
+	cachePuts := make([]func() error, 0, len(result))
+
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
 		req, ok := mapCorrelationIDToTuple[correlationID]
@@ -779,17 +816,99 @@ func (s FgaService) appendToMessage(
 		// Append the result to our response message.
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
-		// Cache the result.
+		// Queue the cache write.
 		if shouldCache {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-			_, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowed))
-			if err != nil {
-				logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
-			}
+			allowedValue := allowed
+			cachePuts = append(cachePuts, func() error {
+				if _, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowedValue)); err != nil {
+					logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+				}
+				return nil
+			})
+		}
+	}
+
+	if len(cachePuts) > 0 {
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(cacheLookupConcurrency)
+		for _, put := range cachePuts {
+			g.Go(func() error {
+				select {
+				case <-gctx.Done():
+					return nil
+				default:
+					return put()
+				}
+			})
+		}
+		// Cache-write failures are already logged per-entry above; a failed
+		// write only means a future request re-checks OpenFGA for that tuple.
+		if err := g.Wait(); err != nil {
+			logger.With(errKey, err).ErrorContext(ctx, "cache write fan-out returned an error")
 		}
 	}
 
 	return message
+}
+
+// cacheLookupOutcome is the result of resolving a single tuple against the
+// cache: either a ready-to-append response line, or a signal that the tuple
+// still needs to be resolved via OpenFGA.
+type cacheLookupOutcome struct {
+	needsCheck bool
+	hitLine    []byte
+}
+
+// lookupCacheEntry checks the cache for a single tuple. It never returns a Go
+// error: a cache miss, a stale hit, or an unexpected cache error all result
+// in needsCheck being set so the tuple falls through to OpenFGA instead of
+// failing the whole batch.
+func (s FgaService) lookupCacheEntry(
+	ctx context.Context,
+	tuple ClientBatchCheckItem,
+	lastInvalidation time.Time,
+) cacheLookupOutcome {
+	relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
+	// Encode relation using base32 without padding to conform to the allowed
+	// characters for NATS subjects.
+	cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+	entry, errCache := s.cacheBucket.Get(ctx, cacheKey)
+	switch {
+	case errCache == jetstream.ErrKeyNotFound:
+		cacheMisses.Add(1)
+		return cacheLookupOutcome{needsCheck: true}
+	case errCache != nil:
+		// This is not expected (we would have exited early already on cache
+		// errors when grabbing the invalidation timestamp), but log and treat
+		// this single tuple as a miss rather than failing the whole request.
+		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; treating as miss")
+		return cacheLookupOutcome{needsCheck: true}
+	}
+
+	// Cache entry was found. If the cache entry is older than the invalidation
+	// timestamp, skip it.
+	if lastInvalidation.After(entry.Created()) {
+		logger.With(
+			"relation_key", relationKey,
+			"last_invalidation", lastInvalidation,
+			"entry_created", entry.Created(),
+			"entry_value", string(entry.Value()),
+		).DebugContext(ctx, "cache stale hit")
+		cacheStaleHits.Add(1)
+		return cacheLookupOutcome{needsCheck: true}
+	}
+
+	logger.With(
+		"relation_key", relationKey,
+		"last_invalidation", lastInvalidation,
+		"entry_created", entry.Created(),
+		"entry_value", string(entry.Value()),
+	).DebugContext(ctx, "cache hit")
+	cacheHits.Add(1)
+	return cacheLookupOutcome{
+		hitLine: []byte(fmt.Sprintf("%s\t%s\n", relationKey, string(entry.Value()))),
+	}
 }
 
 // CheckRelationships uses OpenFGA to determine multiple relationships in
@@ -819,58 +938,38 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		})
 	}
 
-	// Loop through the requested tuples to check for cache hits.
-	for i, tuple := range tupleItems {
-		// If the cache is disabled, all tuples are added to the check list.
-		if !useCache {
-			tuplesToCheck = append(tuplesToCheck, tuple)
-			continue
+	if !useCache {
+		// Cache disabled; all tuples go straight to OpenFGA.
+		tuplesToCheck = append(tuplesToCheck, tupleItems...)
+	} else {
+		// Resolve every tuple against the cache concurrently rather than one
+		// sequential NATS KV round-trip at a time — a batch of several hundred
+		// tuples serially was the dominant cost in slow access checks. Each
+		// lookup writes to its own index, so no synchronization is needed
+		// beyond the errgroup itself; the final ordering pass below is what
+		// keeps the response/queue-order deterministic.
+		outcomes := make([]cacheLookupOutcome, len(tupleItems))
+		g, gctx := errgroup.WithContext(ctx)
+		g.SetLimit(cacheLookupConcurrency)
+		for i, tuple := range tupleItems {
+			g.Go(func() error {
+				outcomes[i] = s.lookupCacheEntry(gctx, tuple, lastInvalidation)
+				return nil
+			})
+		}
+		// lookupCacheEntry never returns an error itself, so this only ever
+		// reflects context cancellation, which none of the goroutines trigger.
+		if waitErr := g.Wait(); waitErr != nil {
+			logger.With(errKey, waitErr).ErrorContext(ctx, "cache lookup fan-out returned an error")
 		}
 
-		relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
-		// Encode relation using base32 without padding to conform to the allowed
-		// characters for NATS subjects.
-		cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-		entry, errCache := s.cacheBucket.Get(ctx, cacheKey)
-		if errCache == jetstream.ErrKeyNotFound {
-			// No cache hit; continue.
-			cacheMisses.Add(1)
-			tuplesToCheck = append(tuplesToCheck, tuple)
-			continue
+		for i, outcome := range outcomes {
+			if outcome.needsCheck {
+				tuplesToCheck = append(tuplesToCheck, tupleItems[i])
+				continue
+			}
+			message = append(message, outcome.hitLine...)
 		}
-		if errCache != nil {
-			// This is not expected (we would have exited early already on cache
-			// errors when grabbing the invalidation timestamp), but log the error
-			// and skip cache lookups for remaining items without breaking the
-			// request at this point.
-			logger.With(errKey, errCache).ErrorContext(ctx, "cache error; continuing")
-			// Add all remaining tuples to the check list.
-			tuplesToCheck = append(tuplesToCheck, tupleItems[i:]...)
-			break
-		}
-
-		// Cache entry was found. If the cache entry is older than the invalidation
-		// timestamp, skip it.
-		if lastInvalidation.After(entry.Created()) {
-			logger.With(
-				"relation_key", relationKey,
-				"last_invalidation", lastInvalidation,
-				"entry_created", entry.Created(),
-				"entry_value", string(entry.Value()),
-			).DebugContext(ctx, "cache stale hit")
-			cacheStaleHits.Add(1)
-			tuplesToCheck = append(tuplesToCheck, tupleItems[i])
-			continue
-		}
-		logger.With(
-			"relation_key", relationKey,
-			"last_invalidation", lastInvalidation,
-			"entry_created", entry.Created(),
-			"entry_value", string(entry.Value()),
-		).DebugContext(ctx, "cache hit")
-		cacheHits.Add(1)
-		// Append the cached value to our response message.
-		message = append(message, []byte(fmt.Sprintf("%s\t%s\n", relationKey, string(entry.Value())))...)
 	}
 
 	// If we have no tuples to check, return the cached message.
