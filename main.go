@@ -33,6 +33,16 @@ const (
 	// request timeout, and lower than the pod or liveness probe's
 	// terminationGracePeriodSeconds.
 	gracefulShutdownSeconds = 25
+	// subscriptionConcurrency bounds how many access-check/read-tuples
+	// handler invocations may run concurrently. QueueSubscribe otherwise
+	// dispatches each subject on a single goroutine, so a handler that waits
+	// on OpenFGA serializes every request behind it; these two subjects have
+	// no ordering requirement between distinct messages, unlike the
+	// access-mutation JetStream consumer (see access_mutation.go), so
+	// bounded concurrency is safe here. Sized to match fgaHTTPMaxConnsPerHost
+	// in fga.go so handler concurrency and the OpenFGA connection pool scale
+	// together.
+	subscriptionConcurrency = fgaHTTPMaxConnsPerHost
 )
 
 // Build-time variables set via ldflags
@@ -51,6 +61,16 @@ var (
 	cacheBucketName string
 	// TODO: improve the configuration of the service to use dependency injection instead of global variables
 	useCache bool
+
+	// subscriptionSem bounds concurrent handler invocations across all plain
+	// (non-JetStream) NATS subscriptions to subscriptionConcurrency.
+	// subscriptionWG tracks in-flight handler goroutines so shutdown can wait
+	// for them; NATS considers a message "processed" as soon as the
+	// QueueSubscribe callback returns, which happens immediately once work is
+	// handed off to a goroutine, so natsConn.Drain() alone would not wait for
+	// them.
+	subscriptionSem = make(chan struct{}, subscriptionConcurrency)
+	subscriptionWG  sync.WaitGroup
 )
 
 func init() {
@@ -245,6 +265,12 @@ func run(bind, port string) error {
 	// Wait for the graceful shutdown steps to complete.
 	gracefulCloseWG.Wait()
 
+	// Drain() only waits for messages already handed to the QueueSubscribe
+	// callback; since that callback now hands off to a goroutine immediately,
+	// wait here (bounded, so a stuck handler cannot hang shutdown indefinitely)
+	// for those goroutines to actually finish.
+	waitForSubscriptionWorkers(gracefulShutdownSeconds * time.Second)
+
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {
 		logger.With(errKey, err).Error("http listener error on close")
@@ -315,6 +341,22 @@ func createHTTPHandlers() {
 	})
 }
 
+// waitForSubscriptionWorkers waits for in-flight subscribeToSubject handler
+// goroutines to finish, up to timeout, logging and giving up rather than
+// blocking shutdown forever if one is stuck.
+func waitForSubscriptionWorkers(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		subscriptionWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warn("timed out waiting for in-flight NATS handler goroutines during shutdown")
+	}
+}
+
 // HandlerFunc defines a message handler function type.
 type HandlerFunc func(context.Context, INatsMsg) error
 
@@ -326,22 +368,33 @@ type subscriptionConfig struct {
 }
 
 // subscribeToSubject subscribes to a single NATS subject with error handling and logging.
+// Each message is handled on its own goroutine, bounded by subscriptionSem,
+// so a slow handler (e.g. waiting on OpenFGA) no longer serializes every
+// other message on the same subject.
 func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
 	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
-		// A fresh background context is used as the extraction base, not the
-		// service context, since this callback must not inherit shutdown
-		// cancellation ahead of any explicit handling of that signal.
-		msgCtx, span := startConsumerSpan(context.Background(), msg.Header, subject)
-		defer span.End()
-		if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
-			span.RecordError(errHandler)
-			span.SetStatus(codes.Error, errHandler.Error())
-			logger.Error("error handling "+description+" request",
-				errKey, errHandler,
-				"subject", subject,
-				"queue", queue,
-			)
-		}
+		subscriptionSem <- struct{}{}
+		subscriptionWG.Add(1)
+		go func() {
+			defer subscriptionWG.Done()
+			defer func() { <-subscriptionSem }()
+
+			// A fresh background context is used as the extraction base, not
+			// the service context, since this callback must not inherit
+			// shutdown cancellation ahead of any explicit handling of that
+			// signal.
+			msgCtx, span := startConsumerSpan(context.Background(), msg.Header, subject)
+			defer span.End()
+			if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
+				span.RecordError(errHandler)
+				span.SetStatus(codes.Error, errHandler.Error())
+				logger.Error("error handling "+description+" request",
+					errKey, errHandler,
+					"subject", subject,
+					"queue", queue,
+				)
+			}
+		}()
 	}); err != nil {
 		logger.Error("error subscribing to NATS subject",
 			errKey, err,
