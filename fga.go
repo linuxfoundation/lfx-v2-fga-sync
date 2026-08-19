@@ -36,12 +36,14 @@ const (
 	// trueString is used for cache values representing allowed access
 	trueString = "true"
 
-	// fgaHTTPMaxIdleConns and fgaHTTPMaxConnsPerHost raise the OpenFGA HTTP
-	// client's connection pool well above Go's http.DefaultTransport
-	// defaults (MaxIdleConnsPerHost: 2), which starve BatchCheck calls under
-	// the concurrent access-check load this service handles: every request
-	// goes to the same OpenFGA host, so the default pool forced most calls
-	// to wait for a free connection rather than run in parallel.
+	// fgaHTTPMaxIdleConns and fgaHTTPMaxIdleConnsPerHost raise how many idle
+	// connections the OpenFGA HTTP client keeps ready, well above Go's
+	// http.DefaultTransport default (MaxIdleConnsPerHost: 2). Every request
+	// goes to the same OpenFGA host, so under this service's concurrent
+	// access-check load the default pool churned through TCP/TLS handshakes
+	// instead of reusing connections. fgaHTTPMaxConnsPerHost additionally
+	// caps the number of simultaneously active connections to that host,
+	// which http.DefaultTransport otherwise leaves unbounded.
 	fgaHTTPMaxIdleConns        = 100
 	fgaHTTPMaxIdleConnsPerHost = 64
 	fgaHTTPMaxConnsPerHost     = 64
@@ -782,8 +784,9 @@ func (s FgaService) appendToMessage(
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
 ) []byte {
 	// Cache write-backs are fanned out below with bounded concurrency once the
-	// message is assembled; nothing downstream depends on them completing
-	// before we reply.
+	// message is assembled. g.Wait() still blocks below before this function
+	// returns, so they complete within the request's lifetime; the fan-out
+	// only bounds how many run at once, not whether the reply waits for them.
 	cachePuts := make([]func() error, 0, len(result))
 
 	for correlationID, resp := range result {
@@ -821,7 +824,9 @@ func (s FgaService) appendToMessage(
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
 			cachePuts = append(cachePuts, func() error {
-				if _, err := s.cacheBucket.Put(ctx, cacheKey, []byte(allowedValue)); err != nil {
+				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				if _, err := s.cacheBucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
 					logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
 				}
 				return nil
@@ -842,11 +847,11 @@ func (s FgaService) appendToMessage(
 				}
 			})
 		}
-		// Cache-write failures are already logged per-entry above; a failed
-		// write only means a future request re-checks OpenFGA for that tuple.
-		if err := g.Wait(); err != nil {
-			logger.With(errKey, err).ErrorContext(ctx, "cache write fan-out returned an error")
-		}
+		// Every closure above always returns nil (cache-write failures are
+		// already logged per-entry, not propagated), so g.Wait() can only
+		// ever return nil here; it is called solely to block until all
+		// writes finish.
+		_ = g.Wait()
 	}
 
 	return message
@@ -883,6 +888,7 @@ func (s FgaService) lookupCacheEntry(
 		// errors when grabbing the invalidation timestamp), but log and treat
 		// this single tuple as a miss rather than failing the whole request.
 		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; treating as miss")
+		cacheMisses.Add(1)
 		return cacheLookupOutcome{needsCheck: true}
 	}
 
@@ -946,8 +952,10 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// sequential NATS KV round-trip at a time — a batch of several hundred
 		// tuples serially was the dominant cost in slow access checks. Each
 		// lookup writes to its own index, so no synchronization is needed
-		// beyond the errgroup itself; the final ordering pass below is what
-		// keeps the response/queue-order deterministic.
+		// beyond the errgroup itself. The pass below preserves input order
+		// only for cache hits; lines for tuples that fall through to OpenFGA
+		// are appended by appendToMessage in map-iteration order, so overall
+		// response order is not guaranteed and callers must not rely on it.
 		outcomes := make([]cacheLookupOutcome, len(tupleItems))
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(cacheLookupConcurrency)

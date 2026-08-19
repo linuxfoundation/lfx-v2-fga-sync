@@ -6,7 +6,9 @@ package main
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -234,4 +236,176 @@ func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 
 	assert.Equal(t, "v1_meeting:79915658043#viewer@user:userA\tfalse", string(result))
 	fgaClient.AssertExpectations(t)
+}
+
+// concurrencyTrackingKV is an INatsKeyValue fake whose Get and Put each sleep
+// briefly and track their own peak number of calls in flight at once, so a
+// test can assert the cache-lookup and cache-write fan-outs actually overlap
+// instead of running serially.
+type concurrencyTrackingKV struct {
+	mu         sync.Mutex
+	current    int
+	peak       int
+	putCurrent int
+	putPeak    int
+	sleep      time.Duration
+	entries    map[string]jetstream.KeyValueEntry
+}
+
+func (k *concurrencyTrackingKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
+	k.mu.Lock()
+	k.current++
+	if k.current > k.peak {
+		k.peak = k.current
+	}
+	k.mu.Unlock()
+
+	select {
+	case <-time.After(k.sleep):
+	case <-ctx.Done():
+	}
+
+	k.mu.Lock()
+	k.current--
+	k.mu.Unlock()
+
+	if entry, ok := k.entries[key]; ok {
+		return entry, nil
+	}
+	return nil, jetstream.ErrKeyNotFound
+}
+
+func (k *concurrencyTrackingKV) Put(ctx context.Context, _ string, _ []byte) (uint64, error) {
+	k.mu.Lock()
+	k.putCurrent++
+	if k.putCurrent > k.putPeak {
+		k.putPeak = k.putCurrent
+	}
+	k.mu.Unlock()
+
+	select {
+	case <-time.After(k.sleep):
+	case <-ctx.Done():
+	}
+
+	k.mu.Lock()
+	k.putCurrent--
+	k.mu.Unlock()
+
+	return 1, nil
+}
+
+func (k *concurrencyTrackingKV) PutString(context.Context, string, string) (uint64, error) {
+	return 1, nil
+}
+
+// TestCheckRelationshipsBoundsCacheLookupConcurrency proves the cache-lookup
+// fan-out in CheckRelationships actually overlaps (not a hidden serial loop
+// in disguise) while staying within cacheLookupConcurrency, the invariant the
+// bounded-concurrency rewrite depends on.
+func TestCheckRelationshipsBoundsCacheLookupConcurrency(t *testing.T) {
+	useCache = true
+	t.Cleanup(func() { useCache = false })
+
+	const tupleCount = cacheLookupConcurrency * 3
+
+	kv := &concurrencyTrackingKV{
+		sleep:   20 * time.Millisecond,
+		entries: map[string]jetstream.KeyValueEntry{"inv": nil},
+	}
+	// "inv" has no fixed entry above (invalidation lookup goes through a
+	// separate path); give it a real entry so getLastCacheInvalidation
+	// succeeds without needing another fake type.
+	kv.entries["inv"] = fixedEntry{value: []byte("1"), created: time.Now().Add(-time.Hour)}
+
+	tuples := make([]ClientCheckRequest, 0, tupleCount)
+	expectedResults := make(map[string]openfga.BatchCheckSingleResult, tupleCount)
+	for i := range tupleCount {
+		user := "user:user" + strconv.Itoa(i)
+		tuples = append(tuples, ClientCheckRequest{
+			User:     user,
+			Relation: "viewer",
+			Object:   "obj" + strconv.Itoa(i),
+		})
+		expectedResults[strconv.Itoa(i+1)] = openfga.BatchCheckSingleResult{Allowed: openfga.PtrBool(true)}
+	}
+
+	fgaClient := new(MockFgaClient)
+	fgaClient.
+		On("BatchCheck", mock.Anything, mock.Anything).
+		Return(&openfga.BatchCheckResponse{Result: &expectedResults}, nil)
+
+	service := FgaService{client: fgaClient, cacheBucket: kv}
+
+	start := time.Now()
+	result, err := service.CheckRelationships(context.Background(), tuples)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimRight(string(result), "\n"), "\n")
+	assert.Len(t, lines, tupleCount)
+
+	kv.mu.Lock()
+	peak := kv.peak
+	putPeak := kv.putPeak
+	kv.mu.Unlock()
+
+	assert.Greater(t, peak, 1, "cache lookups ran serially instead of concurrently")
+	assert.LessOrEqual(t, peak, cacheLookupConcurrency, "cache lookup concurrency exceeded cacheLookupConcurrency")
+
+	// Every tuple here is a cache miss resolved via OpenFGA, so
+	// appendToMessage's write-back fan-out also runs for the full batch;
+	// assert it overlaps and stays bounded the same way the lookup fan-out
+	// does.
+	assert.Greater(t, putPeak, 1, "cache write-backs ran serially instead of concurrently")
+	assert.LessOrEqual(t, putPeak, cacheLookupConcurrency, "cache write-back concurrency exceeded cacheLookupConcurrency")
+
+	// A fully serial implementation would take roughly
+	// tupleCount * kv.sleep (~%dms); bounded concurrency should finish in a
+	// small fraction of that.
+	serialEstimate := time.Duration(tupleCount) * kv.sleep
+	assert.Less(t, elapsed, serialEstimate/2, "cache lookups took as long as a serial implementation")
+
+	fgaClient.AssertExpectations(t)
+}
+
+// TestAppendToMessageBoundsCachePutConcurrency isolates appendToMessage's
+// cache write-back fan-out from the cache-lookup fan-out exercised above,
+// proving directly that Put calls overlap while staying within
+// cacheLookupConcurrency, rather than relying only on the indirect coverage
+// from a full CheckRelationships run.
+func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
+	const tupleCount = cacheLookupConcurrency * 3
+
+	kv := &concurrencyTrackingKV{sleep: 20 * time.Millisecond}
+	service := FgaService{cacheBucket: kv}
+
+	result := make(map[string]openfga.BatchCheckSingleResult, tupleCount)
+	mapCorrelationIDToTuple := make(map[string]ClientBatchCheckItem, tupleCount)
+	for i := range tupleCount {
+		correlationID := strconv.Itoa(i)
+		result[correlationID] = openfga.BatchCheckSingleResult{Allowed: openfga.PtrBool(true)}
+		mapCorrelationIDToTuple[correlationID] = ClientBatchCheckItem{
+			User:     "user:user" + correlationID,
+			Relation: "viewer",
+			Object:   "obj" + correlationID,
+		}
+	}
+
+	start := time.Now()
+	message := service.appendToMessage(context.Background(), nil, result, mapCorrelationIDToTuple)
+	elapsed := time.Since(start)
+
+	lines := strings.Split(strings.TrimRight(string(message), "\n"), "\n")
+	assert.Len(t, lines, tupleCount)
+
+	kv.mu.Lock()
+	putPeak := kv.putPeak
+	kv.mu.Unlock()
+
+	assert.Greater(t, putPeak, 1, "cache write-backs ran serially instead of concurrently")
+	assert.LessOrEqual(t, putPeak, cacheLookupConcurrency, "cache write-back concurrency exceeded cacheLookupConcurrency")
+
+	serialEstimate := time.Duration(tupleCount) * kv.sleep
+	assert.Less(t, elapsed, serialEstimate/2, "cache write-backs took as long as a serial implementation")
 }
