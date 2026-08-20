@@ -54,6 +54,18 @@ const (
 	// apiece) was directly responsible for double-digit-second access-check
 	// latency; this trades a bounded amount of extra NATS load for wall-clock.
 	cacheLookupConcurrency = 64
+
+	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
+	// process. cacheLookupConcurrency bounds one request's fan-out, but the
+	// subscription layer admits subscriptionConcurrency (64) handlers at once,
+	// so per-request limits alone permit ~4,096 simultaneous KV round-trips per
+	// pod. The cache bucket is single-replica (see the chart's
+	// nats-kv-bucket.yaml, which sets no replicas field), so every pod's cache
+	// traffic funnels into one JetStream node; cluster-wide pressure is this
+	// value times application.replicas (3 in prod). Sized at 2x
+	// cacheLookupConcurrency so a couple of large batches still overlap fully
+	// while that product stays reasonable for a single-node bucket.
+	cacheOpConcurrency = 2 * cacheLookupConcurrency
 )
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
@@ -75,7 +87,29 @@ var (
 	cacheStaleHits  *expvar.Int
 	cacheMisses     *expvar.Int
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
+	// concurrent KV Get/Put in this file acquires a slot before the
+	// round-trip and releases it after. Held only around the KV call itself,
+	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
+	// capacity hostage.
+	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
 )
+
+// withCacheOpSlot runs fn while holding a slot in the service-wide KV budget
+// (cacheOpSem). If ctx is canceled before a slot frees, fn is not run and
+// ctx.Err() is returned; callers treat that the same as any other cache
+// failure (fall through to OpenFGA, or skip a best-effort write).
+func withCacheOpSlot(ctx context.Context, fn func()) error {
+	select {
+	case cacheOpSem <- struct{}{}:
+		defer func() { <-cacheOpSem }()
+		fn()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func init() {
 	cacheHits = expvar.NewInt("cache_hits")
@@ -393,6 +427,12 @@ func (s FgaService) SyncObjectTuples(
 // Every cacheKey passed in corresponds to a direct user relationship that
 // SyncObjectTuples just wrote, so writing trueString is always correct here:
 // all such relations are "true" (allowed) access relations by construction.
+//
+// Each write additionally waits on cacheOpSem, the service-wide JetStream KV
+// budget shared with CheckRelationships. That only ever shortens how many
+// writes run at once; it does not affect the wg.Wait() ordering guarantee
+// above, since every goroutine below is still awaited regardless of whether
+// it ran immediately or queued for a slot.
 func (s FgaService) seedPositiveCacheEntries(ctx context.Context, cacheKeys []string) {
 	var wg sync.WaitGroup
 	for _, cacheKey := range cacheKeys {
@@ -403,7 +443,9 @@ func (s FgaService) seedPositiveCacheEntries(ctx context.Context, cacheKeys []st
 			defer cancel()
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
-			_, _ = s.cacheBucket.PutString(timeoutCtx, key, trueString)
+			_ = withCacheOpSlot(timeoutCtx, func() {
+				_, _ = s.cacheBucket.PutString(timeoutCtx, key, trueString)
+			})
 		}(cacheKey)
 	}
 	wg.Wait()
@@ -826,8 +868,12 @@ func (s FgaService) appendToMessage(
 			cachePuts = append(cachePuts, func() error {
 				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
-				if _, err := s.cacheBucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
-					logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+				if slotErr := withCacheOpSlot(putCtx, func() {
+					if _, err := s.cacheBucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
+						logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+					}
+				}); slotErr != nil {
+					logger.With(errKey, slotErr).ErrorContext(ctx, "failed to cache relation")
 				}
 				return nil
 			})
@@ -851,6 +897,7 @@ func (s FgaService) appendToMessage(
 		// already logged per-entry, not propagated), so g.Wait() can only
 		// ever return nil here; it is called solely to block until all
 		// writes finish.
+		//nolint:errcheck // g.Wait() can only return nil; see comment above.
 		_ = g.Wait()
 	}
 
@@ -878,7 +925,17 @@ func (s FgaService) lookupCacheEntry(
 	// Encode relation using base32 without padding to conform to the allowed
 	// characters for NATS subjects.
 	cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
-	entry, errCache := s.cacheBucket.Get(ctx, cacheKey)
+	var entry jetstream.KeyValueEntry
+	var errCache error
+	if slotErr := withCacheOpSlot(ctx, func() {
+		entry, errCache = s.cacheBucket.Get(ctx, cacheKey)
+	}); slotErr != nil {
+		// The service-wide KV budget didn't free up before ctx was canceled;
+		// treat this the same as any other cache miss so the tuple falls
+		// through to OpenFGA.
+		cacheMisses.Add(1)
+		return cacheLookupOutcome{needsCheck: true}
+	}
 	switch {
 	case errCache == jetstream.ErrKeyNotFound:
 		cacheMisses.Add(1)

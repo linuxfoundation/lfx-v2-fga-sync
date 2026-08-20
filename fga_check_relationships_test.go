@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -408,4 +409,63 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 
 	serialEstimate := time.Duration(tupleCount) * kv.sleep
 	assert.Less(t, elapsed, serialEstimate/2, "cache write-backs took as long as a serial implementation")
+}
+
+// TestCheckRelationshipsBoundsServiceWideCacheConcurrency proves cacheOpSem
+// actually caps JetStream KV concurrency across concurrent CheckRelationships
+// calls (e.g. concurrent NATS handlers), not just within a single request.
+// Each of the concurrentRequests calls below fans out cacheLookupConcurrency
+// lookups on its own, so without a service-wide bound the observed peak would
+// reach concurrentRequests*cacheLookupConcurrency; with it, peak must stay at
+// or below cacheOpConcurrency.
+func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
+	useCache = true
+	t.Cleanup(func() { useCache = false })
+
+	const concurrentRequests = 4
+	const tupleCount = cacheLookupConcurrency
+
+	kv := &concurrencyTrackingKV{
+		sleep:   20 * time.Millisecond,
+		entries: map[string]jetstream.KeyValueEntry{"inv": nil},
+	}
+	kv.entries["inv"] = fixedEntry{value: []byte("1"), created: time.Now().Add(-time.Hour)}
+
+	requestTuples := make([][]ClientCheckRequest, concurrentRequests)
+	for r := range concurrentRequests {
+		tuples := make([]ClientCheckRequest, 0, tupleCount)
+		for i := range tupleCount {
+			user := fmt.Sprintf("user:req%d-user%d", r, i)
+			object := fmt.Sprintf("obj%d-%d", r, i)
+			tuple := ClientCheckRequest{User: user, Relation: "viewer", Object: object}
+			tuples = append(tuples, tuple)
+
+			relationKey := object + "#viewer@" + user
+			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			kv.entries[cacheKey] = fixedEntry{value: []byte("true"), created: time.Now().Add(-time.Minute)}
+		}
+		requestTuples[r] = tuples
+	}
+
+	service := FgaService{cacheBucket: kv}
+
+	var wg sync.WaitGroup
+	for r := range concurrentRequests {
+		wg.Add(1)
+		go func(tuples []ClientCheckRequest) {
+			defer wg.Done()
+			_, err := service.CheckRelationships(context.Background(), tuples)
+			assert.NoError(t, err)
+		}(requestTuples[r])
+	}
+	wg.Wait()
+
+	kv.mu.Lock()
+	peak := kv.peak
+	kv.mu.Unlock()
+
+	assert.Greater(t, peak, cacheLookupConcurrency,
+		"requests did not overlap; assertion below would be vacuous")
+	assert.LessOrEqual(t, peak, cacheOpConcurrency,
+		"cache lookup concurrency exceeded the service-wide cacheOpConcurrency budget")
 }
