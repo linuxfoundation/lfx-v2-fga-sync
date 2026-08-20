@@ -344,22 +344,37 @@ func accessMutationAttemptContext(ctx context.Context) (context.Context, context
 // attempt has returned, so canceling the shared context before that would
 // abort an attempt that might otherwise succeed. Cancellation is therefore
 // deferred to a bounded grace period: give the in-flight attempt a chance to
-// finish normally, and only force-cancel if it does not.
+// finish normally, and only force-cancel if it does not. Both waits are
+// additionally bounded by deadline, the shared shutdown budget, so a
+// consumer that never closes cannot block shutdown indefinitely.
 func stopAccessMutationConsumer(
 	consumer accessMutationConsumeContext,
 	cancel context.CancelFunc,
+	deadline time.Time,
 ) {
 	consumer.Stop()
+
+	grace := accessMutationShutdownGrace
+	if remaining := time.Until(deadline); remaining < grace {
+		grace = remaining
+	}
+
 	select {
 	case <-consumer.Closed():
 		// The in-flight attempt, if any, finished on its own; nothing is
 		// using the context anymore, so canceling now is safe.
 		cancel()
-	case <-time.After(accessMutationShutdownGrace):
+		return
+	case <-time.After(grace):
 		// The attempt did not finish in time; force it to abort so the
 		// consume loop can close.
-		cancel()
-		<-consumer.Closed()
+	}
+
+	cancel()
+	select {
+	case <-consumer.Closed():
+	case <-time.After(time.Until(deadline)):
+		logger.Warn("timed out waiting for access mutation consumer to close during shutdown")
 	}
 }
 

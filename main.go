@@ -271,7 +271,7 @@ func run(bind, port string) error {
 	// pod's terminationGracePeriodSeconds.
 	shutdownDeadline := time.Now().Add(gracefulShutdownSeconds * time.Second)
 
-	stopAccessMutationConsumer(accessMutationConsumer, cancel)
+	stopAccessMutationConsumer(accessMutationConsumer, cancel, shutdownDeadline)
 
 	// Stop new deliveries on each plain (non-JetStream) subscription
 	// individually, before touching the connection itself. QueueSubscribe
@@ -284,10 +284,22 @@ func run(bind, port string) error {
 	// goroutines still need to call Respond() on.
 	drainPlainSubscriptions()
 
+	// sub.Drain() above unsubscribes but returns before nats.go's internal
+	// delivery loop has necessarily dispatched every already-queued message
+	// to its callback. Without this barrier, waitForSubscriptionWorkers could
+	// observe subscriptionWG at zero and return before one of those pending
+	// callbacks ever reaches subscriptionWG.Add(1), letting shutdown proceed
+	// to close the connection out from under that late-arriving worker.
+	// natsConn.Barrier schedules a marker behind every currently registered
+	// subscription's queue, so waiting for it guarantees every message queued
+	// at drain time has already reached its callback -- and thus already
+	// called Add -- before subscriptionWG.Wait() runs.
+	waitForSubscriptionAdmission(time.Until(shutdownDeadline))
+
 	// Now wait for the goroutines those subscriptions handed off to, using
 	// whatever is left of the shutdown budget, while the connection is still
 	// open so their replies can still be sent.
-	waitForSubscriptionWorkers(time.Until(shutdownDeadline))
+	waitForSubscriptionWorkers(&subscriptionWG, time.Until(shutdownDeadline))
 
 	// Every plain-subscription worker is done (or the wait above gave up on
 	// a stuck one); it is now safe to drain and close the connection.
@@ -404,13 +416,33 @@ func drainPlainSubscriptions() {
 	}
 }
 
+// waitForSubscriptionAdmission blocks, up to timeout, until every
+// subscribeToSubject message queued on natsConn's async subscriptions at
+// call time has reached its callback (and thus called wg.Add on
+// subscriptionWG) -- see the call site comment in run() for why sub.Drain()
+// alone does not guarantee this. A Barrier error (e.g. the connection is
+// already closed) is logged and otherwise ignored, since in that case there
+// is nothing left to wait for.
+func waitForSubscriptionAdmission(timeout time.Duration) {
+	done := make(chan struct{})
+	if err := natsConn.Barrier(func() { close(done) }); err != nil {
+		logger.With(errKey, err).Warn("error scheduling NATS subscription admission barrier")
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warn("timed out waiting for NATS subscription admission barrier during shutdown")
+	}
+}
+
 // waitForSubscriptionWorkers waits for in-flight subscribeToSubject handler
-// goroutines to finish, up to timeout, logging and giving up rather than
-// blocking shutdown forever if one is stuck.
-func waitForSubscriptionWorkers(timeout time.Duration) {
+// goroutines tracked by wg to finish, up to timeout, logging and giving up
+// rather than blocking shutdown forever if one is stuck.
+func waitForSubscriptionWorkers(wg *sync.WaitGroup, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
-		subscriptionWG.Wait()
+		wg.Wait()
 		close(done)
 	}()
 	select {

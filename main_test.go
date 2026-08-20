@@ -4,6 +4,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -15,14 +16,15 @@ import (
 // subscribeToSubject handler goroutine finishes, well before the timeout
 // budget is exhausted -- the fast path shutdown depends on.
 func TestWaitForSubscriptionWorkersReturnsWhenDrained(t *testing.T) {
-	subscriptionWG.Add(1)
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		subscriptionWG.Done()
+		wg.Done()
 	}()
 
 	start := time.Now()
-	waitForSubscriptionWorkers(time.Second)
+	waitForSubscriptionWorkers(&wg, time.Second)
 	elapsed := time.Since(start)
 
 	assert.Less(t, elapsed, 500*time.Millisecond, "should return once workers finish, not wait out the full timeout")
@@ -30,17 +32,18 @@ func TestWaitForSubscriptionWorkersReturnsWhenDrained(t *testing.T) {
 
 // TestWaitForSubscriptionWorkersTimesOutOnStuckWorker confirms that a worker
 // which never finishes does not block shutdown forever -- the function must
-// give up once the timeout budget is spent instead of blocking on
-// subscriptionWG.Wait() indefinitely.
+// give up once the timeout budget is spent instead of blocking on wg.Wait()
+// indefinitely.
 func TestWaitForSubscriptionWorkersTimesOutOnStuckWorker(t *testing.T) {
-	subscriptionWG.Add(1)
-	// Deliberately never call Done -- simulates a stuck handler goroutine.
-	// Leaves subscriptionWG permanently incremented; harmless for a package
-	// global at process/test-binary exit and does not affect other tests,
-	// which each Add/Done their own delta.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	// Deliberately never call Done before the timeout -- simulates a stuck
+	// handler goroutine. Released at the end of the test via wg.Done() below
+	// so it doesn't leak into other tests.
+	defer wg.Done()
 
 	start := time.Now()
-	waitForSubscriptionWorkers(50 * time.Millisecond)
+	waitForSubscriptionWorkers(&wg, 50*time.Millisecond)
 	elapsed := time.Since(start)
 
 	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond, "should wait out the full timeout before giving up")

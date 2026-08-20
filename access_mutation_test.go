@@ -369,7 +369,7 @@ func TestStopAccessMutationConsumerAwaitsInFlightAttemptWithinGrace(t *testing.T
 	stopAccessMutationConsumer(consumer, func() {
 		cancelCalls++
 		events = append(events, "cancel")
-	})
+	}, time.Now().Add(time.Minute))
 	elapsed := time.Since(start)
 
 	assert.Equal(t, []string{"stop", "cancel"}, events)
@@ -394,10 +394,36 @@ func TestStopAccessMutationConsumerForceCancelsAfterGraceTimeout(t *testing.T) {
 		if cancelCalls == 1 {
 			close(closed)
 		}
-	})
+	}, time.Now().Add(time.Minute))
 
 	assert.Equal(t, []string{"stop", "cancel"}, events)
 	assert.Equal(t, 1, cancelCalls, "cancel must run exactly once, to force the stuck attempt to abort")
+}
+
+// TestStopAccessMutationConsumerBoundedByDeadlineEvenAfterCancel confirms
+// that a consumer whose Closed() channel never fires -- even after
+// cancellation -- does not block shutdown forever. Both the pre-cancel grace
+// wait and the post-cancel wait must be bounded by the shared deadline.
+func TestStopAccessMutationConsumerBoundedByDeadlineEvenAfterCancel(t *testing.T) {
+	restoreGrace := setAccessMutationShutdownGrace(time.Minute)
+	defer restoreGrace()
+
+	events := make([]string, 0, 2)
+	closed := make(chan struct{})
+	consumer := &testAccessMutationConsumeContext{closed: closed, events: &events}
+	// closed is intentionally never closed, simulating a consumer stuck even
+	// after cancellation.
+
+	cancelCalls := 0
+	start := time.Now()
+	stopAccessMutationConsumer(consumer, func() {
+		cancelCalls++
+		events = append(events, "cancel")
+	}, time.Now().Add(50*time.Millisecond))
+	elapsed := time.Since(start)
+
+	assert.Equal(t, 1, cancelCalls, "cancel must still run once the deadline forces the grace wait to give up")
+	assert.Less(t, elapsed, 500*time.Millisecond, "must give up once the deadline passes rather than blocking on Closed() forever")
 }
 
 // setAccessMutationShutdownGrace overrides the package-level shutdown grace
