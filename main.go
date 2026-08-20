@@ -294,12 +294,22 @@ func run(bind, port string) error {
 	// subscription's queue, so waiting for it guarantees every message queued
 	// at drain time has already reached its callback -- and thus already
 	// called Add -- before subscriptionWG.Wait() runs.
-	waitForSubscriptionAdmission(time.Until(shutdownDeadline))
-
-	// Now wait for the goroutines those subscriptions handed off to, using
-	// whatever is left of the shutdown budget, while the connection is still
-	// open so their replies can still be sent.
-	waitForSubscriptionWorkers(&subscriptionWG, time.Until(shutdownDeadline))
+	//
+	// If the barrier times out or natsConn.Barrier itself errors, that
+	// guarantee no longer holds: a late callback could still be about to call
+	// Add. Calling subscriptionWG.Wait() in that state risks observing the
+	// counter at zero and returning before that Add happens, which is
+	// undefined WaitGroup usage. So skip the worker wait entirely and fall
+	// through to draining the connection, rather than trusting a count we can
+	// no longer verify is complete.
+	if waitForSubscriptionAdmission(time.Until(shutdownDeadline)) {
+		// Now wait for the goroutines those subscriptions handed off to, using
+		// whatever is left of the shutdown budget, while the connection is
+		// still open so their replies can still be sent.
+		waitForSubscriptionWorkers(&subscriptionWG, time.Until(shutdownDeadline))
+	} else {
+		logger.Warn("subscription admission barrier did not complete; skipping in-flight worker wait")
+	}
 
 	// Every plain-subscription worker is done (or the wait above gave up on
 	// a stuck one); it is now safe to drain and close the connection.
@@ -420,19 +430,22 @@ func drainPlainSubscriptions() {
 // subscribeToSubject message queued on natsConn's async subscriptions at
 // call time has reached its callback (and thus called wg.Add on
 // subscriptionWG) -- see the call site comment in run() for why sub.Drain()
-// alone does not guarantee this. A Barrier error (e.g. the connection is
-// already closed) is logged and otherwise ignored, since in that case there
-// is nothing left to wait for.
-func waitForSubscriptionAdmission(timeout time.Duration) {
+// alone does not guarantee this. It reports whether that guarantee was
+// established: false if natsConn.Barrier itself errored (e.g. the connection
+// is already closed) or the wait timed out, in which case the caller must not
+// treat subscriptionWG's count as trustworthy.
+func waitForSubscriptionAdmission(timeout time.Duration) bool {
 	done := make(chan struct{})
 	if err := natsConn.Barrier(func() { close(done) }); err != nil {
 		logger.With(errKey, err).Warn("error scheduling NATS subscription admission barrier")
-		return
+		return false
 	}
 	select {
 	case <-done:
+		return true
 	case <-time.After(timeout):
 		logger.Warn("timed out waiting for NATS subscription admission barrier during shutdown")
+		return false
 	}
 }
 
