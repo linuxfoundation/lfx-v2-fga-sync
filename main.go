@@ -29,10 +29,25 @@ const (
 	// The slog key for errors.
 	errKey            = "error"
 	defaultListenPort = "8080"
-	// gracefulShutdownSeconds should be higher than NATS client
-	// request timeout, and lower than the pod or liveness probe's
+	// gracefulShutdownSeconds is the total shared budget for every shutdown
+	// phase after the stop signal is received (access-mutation consumer
+	// stop, subscription drain/wait, and waiting for the NATS connection to
+	// close -- see the shutdownDeadline comment in run()), not a per-phase
+	// timeout. It should be higher than NATS client request timeout, and low
+	// enough that this budget plus the deferred OpenTelemetry shutdown
+	// timeout still fits under the pod or liveness probe's
 	// terminationGracePeriodSeconds.
 	gracefulShutdownSeconds = 25
+	// subscriptionConcurrency bounds how many access-check/read-tuples
+	// handler invocations may run concurrently. QueueSubscribe otherwise
+	// dispatches each subject on a single goroutine, so a handler that waits
+	// on OpenFGA serializes every request behind it; these two subjects have
+	// no ordering requirement between distinct messages, unlike the
+	// access-mutation JetStream consumer (see access_mutation.go), so
+	// bounded concurrency is safe here. Sized to match fgaHTTPMaxConnsPerHost
+	// in fga.go so handler concurrency and the OpenFGA connection pool scale
+	// together.
+	subscriptionConcurrency = fgaHTTPMaxConnsPerHost
 )
 
 // Build-time variables set via ldflags
@@ -51,6 +66,22 @@ var (
 	cacheBucketName string
 	// TODO: improve the configuration of the service to use dependency injection instead of global variables
 	useCache bool
+
+	// subscriptionSem bounds concurrent handler invocations across all plain
+	// (non-JetStream) NATS subscriptions to subscriptionConcurrency.
+	// subscriptionWG tracks in-flight handler goroutines so shutdown can wait
+	// for them; NATS considers a message "processed" as soon as the
+	// QueueSubscribe callback returns, which happens immediately once work is
+	// handed off to a goroutine, so natsConn.Drain() alone would not wait for
+	// them.
+	subscriptionSem = make(chan struct{}, subscriptionConcurrency)
+	subscriptionWG  sync.WaitGroup
+
+	// plainSubscriptions collects every subscription created by
+	// subscribeToSubject so shutdown can drain them individually (see
+	// drainPlainSubscriptions). Populated once, sequentially, during startup
+	// before any shutdown code runs, so it needs no synchronization.
+	plainSubscriptions []*nats.Subscription
 )
 
 func init() {
@@ -231,10 +262,57 @@ func run(bind, port string) error {
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS closes.
 	<-done
 
-	stopAccessMutationConsumer(accessMutationConsumer, cancel)
+	// shutdownDeadline is a single overall budget shared by every remaining
+	// shutdown phase (access-mutation consumer stop, subscription drain/wait,
+	// and waiting for the NATS connection to close). Each phase below waits
+	// only for whatever is left of this one deadline instead of getting its
+	// own independent gracefulShutdownSeconds timeout, so the phases cannot
+	// compound into a multiple of gracefulShutdownSeconds that exceeds the
+	// pod's terminationGracePeriodSeconds.
+	shutdownDeadline := time.Now().Add(gracefulShutdownSeconds * time.Second)
 
-	// Drain the connection, which will drain all subscriptions, then close the
-	// connection when complete.
+	stopAccessMutationConsumer(accessMutationConsumer, cancel, shutdownDeadline)
+
+	// Stop new deliveries on each plain (non-JetStream) subscription
+	// individually, before touching the connection itself. QueueSubscribe
+	// callbacks hand off to a goroutine and return immediately, so draining
+	// the whole connection here would let natsConn.Drain() consider every
+	// subject drained -- and close the connection -- long before those
+	// goroutines finish, causing in-flight access-check/read-tuples replies
+	// to fail against an already-closed connection. Draining just the
+	// subscriptions stops new work without closing the connection those
+	// goroutines still need to call Respond() on.
+	drainPlainSubscriptions()
+
+	// sub.Drain() above unsubscribes but returns before nats.go's internal
+	// delivery loop has necessarily dispatched every already-queued message
+	// to its callback. Without this barrier, waitForSubscriptionWorkers could
+	// observe subscriptionWG at zero and return before one of those pending
+	// callbacks ever reaches subscriptionWG.Add(1), letting shutdown proceed
+	// to close the connection out from under that late-arriving worker.
+	// natsConn.Barrier schedules a marker behind every currently registered
+	// subscription's queue, so waiting for it guarantees every message queued
+	// at drain time has already reached its callback -- and thus already
+	// called Add -- before subscriptionWG.Wait() runs.
+	//
+	// If the barrier times out or natsConn.Barrier itself errors, that
+	// guarantee no longer holds: a late callback could still be about to call
+	// Add. Calling subscriptionWG.Wait() in that state risks observing the
+	// counter at zero and returning before that Add happens, which is
+	// undefined WaitGroup usage. So skip the worker wait entirely and fall
+	// through to draining the connection, rather than trusting a count we can
+	// no longer verify is complete.
+	if waitForSubscriptionAdmission(time.Until(shutdownDeadline)) {
+		// Now wait for the goroutines those subscriptions handed off to, using
+		// whatever is left of the shutdown budget, while the connection is
+		// still open so their replies can still be sent.
+		waitForSubscriptionWorkers(&subscriptionWG, time.Until(shutdownDeadline))
+	} else {
+		logger.Warn("subscription admission barrier did not complete; skipping in-flight worker wait")
+	}
+
+	// Every plain-subscription worker is done (or the wait above gave up on
+	// a stuck one); it is now safe to drain and close the connection.
 	if !natsConn.IsClosed() && !natsConn.IsDraining() {
 		logger.Info("draining NATS connections")
 		if err = natsConn.Drain(); err != nil {
@@ -242,8 +320,10 @@ func run(bind, port string) error {
 		}
 	}
 
-	// Wait for the graceful shutdown steps to complete.
-	gracefulCloseWG.Wait()
+	// Wait for the graceful shutdown steps to complete, bounded by whatever
+	// is left of shutdownDeadline rather than blocking indefinitely if the
+	// NATS connection never reports itself closed.
+	waitForGracefulClose(&gracefulCloseWG, time.Until(shutdownDeadline))
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
 	if err = httpServer.Close(); err != nil {
@@ -251,6 +331,23 @@ func run(bind, port string) error {
 	}
 
 	return nil
+}
+
+// waitForGracefulClose waits for gracefulCloseWG (signaled by the NATS
+// ClosedHandler once the connection finishes draining) up to timeout, logging
+// and giving up rather than blocking shutdown forever if the connection never
+// closes.
+func waitForGracefulClose(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warn("timed out waiting for NATS connection to close during shutdown")
+	}
 }
 
 func startHTTPListener(bind, port string) {
@@ -315,6 +412,59 @@ func createHTTPHandlers() {
 	})
 }
 
+// drainPlainSubscriptions unsubscribes each plain (non-JetStream)
+// subscription individually so no further messages are delivered, without
+// touching the NATS connection itself. This is deliberately not
+// natsConn.Drain(), which closes the connection as soon as every
+// subscription reports itself drained -- see the call site in run() for why
+// that would race with subscribeToSubject's handler goroutines.
+func drainPlainSubscriptions() {
+	for _, sub := range plainSubscriptions {
+		if err := sub.Drain(); err != nil {
+			logger.With(errKey, err, "subject", sub.Subject).Warn("error draining NATS subscription")
+		}
+	}
+}
+
+// waitForSubscriptionAdmission blocks, up to timeout, until every
+// subscribeToSubject message queued on natsConn's async subscriptions at
+// call time has reached its callback (and thus called wg.Add on
+// subscriptionWG) -- see the call site comment in run() for why sub.Drain()
+// alone does not guarantee this. It reports whether that guarantee was
+// established: false if natsConn.Barrier itself errored (e.g. the connection
+// is already closed) or the wait timed out, in which case the caller must not
+// treat subscriptionWG's count as trustworthy.
+func waitForSubscriptionAdmission(timeout time.Duration) bool {
+	done := make(chan struct{})
+	if err := natsConn.Barrier(func() { close(done) }); err != nil {
+		logger.With(errKey, err).Warn("error scheduling NATS subscription admission barrier")
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		logger.Warn("timed out waiting for NATS subscription admission barrier during shutdown")
+		return false
+	}
+}
+
+// waitForSubscriptionWorkers waits for in-flight subscribeToSubject handler
+// goroutines tracked by wg to finish, up to timeout, logging and giving up
+// rather than blocking shutdown forever if one is stuck.
+func waitForSubscriptionWorkers(wg *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		logger.Warn("timed out waiting for in-flight NATS handler goroutines during shutdown")
+	}
+}
+
 // HandlerFunc defines a message handler function type.
 type HandlerFunc func(context.Context, INatsMsg) error
 
@@ -326,23 +476,35 @@ type subscriptionConfig struct {
 }
 
 // subscribeToSubject subscribes to a single NATS subject with error handling and logging.
+// Each message is handled on its own goroutine, bounded by subscriptionSem,
+// so a slow handler (e.g. waiting on OpenFGA) no longer serializes every
+// other message on the same subject.
 func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
-	if _, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
-		// A fresh background context is used as the extraction base, not the
-		// service context, since this callback must not inherit shutdown
-		// cancellation ahead of any explicit handling of that signal.
-		msgCtx, span := startConsumerSpan(context.Background(), msg.Header, subject)
-		defer span.End()
-		if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
-			span.RecordError(errHandler)
-			span.SetStatus(codes.Error, errHandler.Error())
-			logger.Error("error handling "+description+" request",
-				errKey, errHandler,
-				"subject", subject,
-				"queue", queue,
-			)
-		}
-	}); err != nil {
+	sub, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
+		subscriptionSem <- struct{}{}
+		subscriptionWG.Add(1)
+		go func() {
+			defer subscriptionWG.Done()
+			defer func() { <-subscriptionSem }()
+
+			// A fresh background context is used as the extraction base, not
+			// the service context, since this callback must not inherit
+			// shutdown cancellation ahead of any explicit handling of that
+			// signal.
+			msgCtx, span := startConsumerSpan(context.Background(), msg.Header, subject)
+			defer span.End()
+			if errHandler := handler(msgCtx, &NatsMsg{msg}); errHandler != nil {
+				span.RecordError(errHandler)
+				span.SetStatus(codes.Error, errHandler.Error())
+				logger.Error("error handling "+description+" request",
+					errKey, errHandler,
+					"subject", subject,
+					"queue", queue,
+				)
+			}
+		}()
+	})
+	if err != nil {
 		logger.Error("error subscribing to NATS subject",
 			errKey, err,
 			"subject", subject,
@@ -350,6 +512,7 @@ func subscribeToSubject(subject, description, queue string, handler HandlerFunc)
 		)
 		return err
 	}
+	plainSubscriptions = append(plainSubscriptions, sub)
 	logger.Info("subscribed to NATS subject",
 		"subject", subject,
 		"queue", queue,

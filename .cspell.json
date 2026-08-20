@@ -133,7 +133,9 @@
         "tracetest",
         "sdktrace",
         "subtests",
-        "Acks"
+        "Acks",
+        "errgroup",
+        "gctx"
       ]
     },
     {
