@@ -34,6 +34,10 @@ jobs:
         id: ml
         # Use the Go flavor.
         uses: oxsecurity/megalinter/flavors/go@ef3e84b8b836d76db562d0f3ed7da61e8fd538bc  # v9.6.0
+        # Only Actions-specific values (secrets, runner behavior) belong
+        # here. Generic MegaLinter/repo config belongs in .mega-linter.yml
+        # so local runs (e.g. mega-linter-runner) get the same behavior.
+        #
         env:
           # All available variables are described in documentation
           # https://megalinter.io/configuration/
@@ -43,5 +47,3 @@ jobs:
           # zizmor's "artipacked" audit needs the GitHub API (to verify
           # SHA-pinned action tags), which requires GITHUB_TOKEN.
           ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
-          # Set the Go toolchain to auto so that megalinter uses the correct go version for the service.
-          GOTOOLCHAIN: auto
