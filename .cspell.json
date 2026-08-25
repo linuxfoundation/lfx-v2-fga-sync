@@ -18,6 +18,7 @@
     "artipacked",
     "startswith",
     "golangci",
+    "govulncheck",
     "openfga",
     "OPENSEARCH",
     "jetstream",
