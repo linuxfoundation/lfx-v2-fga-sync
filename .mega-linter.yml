@@ -9,32 +9,57 @@ APPLY_FIXES: none  # Don't auto-fix files in CI
 DEFAULT_BRANCH: main
 PRINT_ALPACA: false
 SHOW_ELAPSED_TIME: true
+GITHUB_COMMENT_REPORTER: false
 
 # File filters
+# Templates directory is excluded since it contains Helm templating macros
+# that typically fail YAML linting and/or schema checking.
 FILTER_REGEX_EXCLUDE: |
   (\.git/)
   (bin/)
   (coverage\.(out|html))
   (\.claude)
+  (templates/.*\.yaml)
 
-# Enable specific linters
-ENABLE_LINTERS:
-  - ACTION_ACTIONLINT
-  - DOCKERFILE_HADOLINT
-  - GO_REVIVE
-  - GO_SEC
-  - YAML_YAMLLINT
-  - MARKDOWN_MARKDOWNLINT
-  - SPELL_CSPELL
-  - REPOSITORY_SECRETLINT
-
-# Disable problematic linters
 DISABLE_LINTERS:
-  - COPYPASTE_JSCPD  # Can be too strict for Go code
-  - REPOSITORY_GITLEAKS  # Using other secret scanners
-  - GO_GOLANGCI_LINT  # Go version mismatch in MegaLinter bundled container
-  - REPOSITORY_CHECKOV # Need to look into this since it is failing for unknown reasons
-  - REPOSITORY_TRIVY # Need to look into this since it is failing for unknown reasons
+  # We are setting KUBERNETES_DIRECTORY to the helm chart so the
+  # KUBERNETES_HELM linter can find the chart, but then this linter expects to
+  # find raw Kubernetes manifests in this directory, which isn't the case.
+  # If we added a PRE_ command with a `helm template` step, and further
+  # restricted the included files for this linter, it *might* work.
+  - KUBERNETES_KUBECONFORM
+  # TBD how to use this from Megalinter with our setup.
+  - KUBERNETES_KUBESCAPE
+  # Repository-wide link checking returns mostly false positives (like internal
+  # service URLs in templates).
+  - SPELL_LYCHEE
+  # yamllint is sufficient for us.
+  - YAML_PRETTIER
+  # Using other secret scanners (REPOSITORY_SECRETLINT).
+  - REPOSITORY_GITLEAKS
+  # golangci-lint's precompiled binary in the MegaLinter bundled container is
+  # statically compiled against an older Go version than this repo's go.mod
+  # directive requires, and refuses to analyze the module. See CLAUDE.md's
+  # "Go Toolchain Version" section for the full explanation. (This does not
+  # affect govulncheck or MegaLinter's separate osv-scanner/trivy-based
+  # REPOSITORY_OSV_SCANNER check.)
+  - GO_GOLANGCI_LINT
+DISABLE_ERRORS_LINTERS:
+  # There's no easy local feedback loop for spelling issues before
+  # pushing, so keep them non-blocking to avoid unnecessary PR cycles
+  # for words that just need adding to the dictionary.
+  - SPELL_CSPELL
+  # This may be informative but doesn't need to break the build.
+  - COPYPASTE_JSCPD
+  # TBD! Need to work through these.
+  - REPOSITORY_TRIVY
+  - REPOSITORY_CHECKOV
+  - REPOSITORY_DEVSKIM
+  # Newly activated by removing the ENABLE_LINTERS allowlist; no known
+  # findings yet, but keep non-blocking pending a first triage pass since
+  # we've never run these linters against this repo before.
+  - REPOSITORY_GRYPE
+  - REPOSITORY_KICS
 
 # Go-specific settings
 GO_SEC_ARGUMENTS: -fmt sarif -out gosec.sarif -quiet
