@@ -158,7 +158,7 @@ func run(bind, port string) error {
 	}()
 
 	natsURL := envOrDefault("NATS_URL", "nats://nats:4222")
-	cacheBucketName := envOrDefault("CACHE_BUCKET", "fga-sync-cache")
+	cacheBucketName := envOrDefault("CACHE_BUCKET", constants.KVBucketNameSyncCache)
 
 	// Create an OpenFGA client.
 	fgaClient, err := connectFga()
@@ -171,11 +171,6 @@ func run(bind, port string) error {
 	srv := &server{
 		subscriptionSem: make(chan struct{}, subscriptionConcurrency),
 	}
-
-	// Create HTTP handlers for health checks.
-	srv.createHTTPHandlers()
-
-	srv.startHTTPListener(bind, port)
 
 	// Create a wait group which is used to wait while draining (gracefully
 	// closing) a connection.
@@ -232,6 +227,11 @@ func run(bind, port string) error {
 		return fmt.Errorf("error creating NATS client: %w", err)
 	}
 	logger.With("url", natsURL).Info("NATS client created")
+
+	// Register HTTP handlers and start the listener only after srv.natsConn is
+	// set, so /readyz never races with startup assignment.
+	srv.createHTTPHandlers()
+	srv.startHTTPListener(bind, port)
 
 	srv.jsConn, err = jetstream.New(srv.natsConn)
 	if err != nil {
