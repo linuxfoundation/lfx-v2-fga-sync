@@ -341,7 +341,7 @@ func (h *HandlerService) computeMemberPutChanges(
 	// Add relations that don't exist yet
 	for relation := range desiredRelations {
 		if !existingRelationsMap[relation] {
-			tuplesToWrite = append(tuplesToWrite, h.fgaService.TupleKey(userPrincipal, relation, object))
+			tuplesToWrite = append(tuplesToWrite, client.ClientTupleKey{User: userPrincipal, Relation: relation, Object: object})
 		}
 	}
 

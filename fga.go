@@ -161,32 +161,6 @@ func connectFga() (IFgaClient, error) {
 	return FgaAdapter{OpenFgaClient: *fgaClient}, nil
 }
 
-// NewTupleKeySlice abstracts the creation of a ClientTupleKey slice for our
-// handler functions.
-func (s FgaService) NewTupleKeySlice(size int) []ClientTupleKey {
-	// Preallocate our slice to avoid extra allocations.
-	slice := make([]ClientTupleKey, 0, size)
-	return slice
-}
-
-// TupleKey abstracts the creation of a ClientTupleKey for our handler functions.
-func (s FgaService) TupleKey(user, relation, object string) ClientTupleKey {
-	return ClientTupleKey{
-		User:     user,
-		Relation: relation,
-		Object:   object,
-	}
-}
-
-// TupleKeyWithoutCondition abstracts the creation of a ClientTupleKeyWithoutCondition for our handler functions.
-func (s FgaService) TupleKeyWithoutCondition(user, relation, object string) ClientTupleKeyWithoutCondition {
-	return ClientTupleKeyWithoutCondition{
-		User:     user,
-		Relation: relation,
-		Object:   object,
-	}
-}
-
 // ReadObjectTuples is a pagination helper to fetch all direct relationships (_no_
 // transitive evaluations) defined against a given object.
 func (s FgaService) ReadObjectTuples(ctx context.Context, object string) ([]openfga.Tuple, error) {
@@ -356,7 +330,9 @@ func (s FgaService) SyncObjectTuples(
 				"relation", tuple.Key.Relation,
 				"object", object,
 			).DebugContext(ctx, "will delete relation in batch write")
-			deletes = append(deletes, s.TupleKeyWithoutCondition(tuple.Key.User, tuple.Key.Relation, object))
+			deletes = append(deletes, ClientTupleKeyWithoutCondition{
+				User: tuple.Key.User, Relation: tuple.Key.Relation, Object: object,
+			})
 		}
 	}
 
@@ -741,14 +717,14 @@ func (s FgaService) DeleteTuples(ctx context.Context, tuples []ClientTupleKeyWit
 // WriteTuple writes a single tuple to OpenFGA using simple string parameters.
 // This provides a cleaner API for handlers that don't need to know about OpenFGA types.
 func (s FgaService) WriteTuple(ctx context.Context, user, relation, object string) error {
-	tuple := s.TupleKey(user, relation, object)
+	tuple := ClientTupleKey{User: user, Relation: relation, Object: object}
 	return s.WriteTuples(ctx, []ClientTupleKey{tuple})
 }
 
 // DeleteTuple deletes a single tuple from OpenFGA using simple string parameters.
 // This provides a cleaner API for handlers that don't need to know about OpenFGA types.
 func (s FgaService) DeleteTuple(ctx context.Context, user, relation, object string) error {
-	tuple := s.TupleKeyWithoutCondition(user, relation, object)
+	tuple := ClientTupleKeyWithoutCondition{User: user, Relation: relation, Object: object}
 	return s.DeleteTuples(ctx, []ClientTupleKeyWithoutCondition{tuple})
 }
 
@@ -763,7 +739,7 @@ func (s FgaService) DeleteTuplesByUserAndObject(ctx context.Context, user, objec
 	for _, tuple := range tuples {
 		tuplesWithoutConditions = append(
 			tuplesWithoutConditions,
-			s.TupleKeyWithoutCondition(tuple.User, tuple.Relation, tuple.Object),
+			ClientTupleKeyWithoutCondition{User: tuple.User, Relation: tuple.Relation, Object: tuple.Object},
 		)
 	}
 	return s.DeleteTuples(ctx, tuplesWithoutConditions)
@@ -780,7 +756,9 @@ func (s FgaService) GetTuplesByUserAndObject(ctx context.Context, user, object s
 	var filteredTuples []ClientTupleKey
 	for _, tuple := range tuples {
 		if tuple.Key.User == user {
-			filteredTuples = append(filteredTuples, s.TupleKey(tuple.Key.User, tuple.Key.Relation, object))
+			filteredTuples = append(filteredTuples, ClientTupleKey{
+				User: tuple.Key.User, Relation: tuple.Key.Relation, Object: object,
+			})
 		}
 	}
 	return filteredTuples, nil
