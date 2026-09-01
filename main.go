@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -68,6 +69,12 @@ type server struct {
 	natsConn   *nats.Conn
 	jsConn     jetstream.JetStream
 	httpServer *http.Server
+
+	// ready is set to true after all NATS subscriptions and the JetStream
+	// consumer are registered, and cleared at the start of shutdown. /readyz
+	// gates on this so Kubernetes only routes traffic once the service is
+	// fully initialized and can process messages.
+	ready atomic.Bool
 
 	// subscriptionSem bounds concurrent handler invocations across all plain
 	// (non-JetStream) NATS subscriptions to subscriptionConcurrency.
@@ -172,6 +179,13 @@ func run(bind, port string) error {
 		subscriptionSem: make(chan struct{}, subscriptionConcurrency),
 	}
 
+	// Register HTTP handlers and start the listener early so /livez is
+	// available throughout startup. /readyz gates on srv.ready, which is set
+	// only after all subscriptions are up (see below), so Kubernetes will not
+	// route traffic until the service can actually process messages.
+	srv.createHTTPHandlers()
+	srv.startHTTPListener(bind, port)
+
 	// Create a wait group which is used to wait while draining (gracefully
 	// closing) a connection.
 	gracefulCloseWG := sync.WaitGroup{}
@@ -228,11 +242,6 @@ func run(bind, port string) error {
 	}
 	logger.With("url", natsURL).Info("NATS client created")
 
-	// Register HTTP handlers and start the listener only after srv.natsConn is
-	// set, so /readyz never races with startup assignment.
-	srv.createHTTPHandlers()
-	srv.startHTTPListener(bind, port)
-
 	srv.jsConn, err = jetstream.New(srv.natsConn)
 	if err != nil {
 		return fmt.Errorf("error creating JetStream client: %w", err)
@@ -265,8 +274,17 @@ func run(bind, port string) error {
 		return fmt.Errorf("error starting access mutation consumer: %w", err)
 	}
 
+	// All subscriptions and consumers are registered — the service can now
+	// process messages. Signal readiness so /readyz returns 200.
+	srv.ready.Store(true)
+	logger.Info("service ready")
+
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS closes.
 	<-done
+
+	// Clear readiness immediately on shutdown so /readyz returns 503 while
+	// the service is draining, preventing new traffic from being routed here.
+	srv.ready.Store(false)
 
 	// shutdownDeadline is a single overall budget shared by every remaining
 	// shutdown phase (access-mutation consumer stop, subscription drain/wait,
@@ -403,8 +421,10 @@ func (s *server) createHTTPHandlers() {
 
 	// Basic health check.
 	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if s.natsConn == nil {
-			http.Error(w, "no NATS connection", http.StatusServiceUnavailable)
+		// Not ready until all subscriptions and consumers are registered (set
+		// after startAccessMutationConsumer), and cleared during shutdown.
+		if !s.ready.Load() {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
 		if !s.natsConn.IsConnected() || s.natsConn.IsDraining() {
