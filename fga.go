@@ -128,6 +128,7 @@ type INatsKeyValue interface {
 type FgaService struct {
 	client      IFgaClient
 	cacheBucket INatsKeyValue
+	useCache    bool
 }
 
 // connectFga initializes the global shared fgaClient connection. This demo
@@ -1001,7 +1002,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		})
 	}
 
-	if !useCache {
+	if !s.useCache {
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
 	} else {

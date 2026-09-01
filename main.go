@@ -64,8 +64,6 @@ var (
 	natsConn        *nats.Conn
 	jetstreamConn   jetstream.JetStream
 	cacheBucketName string
-	// TODO: improve the configuration of the service to use dependency injection instead of global variables
-	useCache bool
 
 	// subscriptionSem bounds concurrent handler invocations across all plain
 	// (non-JetStream) NATS subscriptions to subscriptionConcurrency.
@@ -92,10 +90,6 @@ func init() {
 	cacheBucketName = os.Getenv("CACHE_BUCKET")
 	if cacheBucketName == "" {
 		cacheBucketName = "fga-sync-cache"
-	}
-	useCacheStr := os.Getenv("USE_CACHE")
-	if useCacheStr == trueString {
-		useCache = true
 	}
 }
 
@@ -239,10 +233,13 @@ func run(bind, port string) error {
 		return fmt.Errorf("error binding to cache bucket: %w", err)
 	}
 
+	useCache := os.Getenv("USE_CACHE") == trueString
+
 	handlerService := HandlerService{
 		fgaService: FgaService{
 			client:      fgaClient,
 			cacheBucket: cacheBucket,
+			useCache:    useCache,
 		},
 	}
 
