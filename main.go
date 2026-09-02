@@ -60,20 +60,23 @@ var (
 
 var logger *slog.Logger
 
-// server holds the lifecycle state for a single run of the service. All fields
-// are set during startup inside run() before any subscription or shutdown code
-// reads them, so no synchronization is needed beyond the sequential startup
-// order itself — which is now visible at the call sites rather than hidden in
-// package-level assignments.
+// server holds the lifecycle state for a single run of the service.
+//
+// Concurrency contract: natsConn, jsConn, httpServer, subscriptionSem, and
+// plainSubscriptions are written once during sequential startup in run() before
+// any goroutine can read them, so they need no additional synchronization.
+// ready is the exception: it is the atomic gate that HTTP handler goroutines
+// must observe before touching other fields (see /readyz). It is also cleared
+// on shutdown, so /readyz returns 503 while the service is draining.
 type server struct {
 	natsConn   *nats.Conn
 	jsConn     jetstream.JetStream
 	httpServer *http.Server
 
-	// ready is set to true after all NATS subscriptions and the JetStream
-	// consumer are registered, and cleared at the start of shutdown. /readyz
-	// gates on this so Kubernetes only routes traffic once the service is
-	// fully initialized and can process messages.
+	// ready is the atomic publish point for HTTP handlers. It is set true
+	// after all NATS subscriptions and the JetStream consumer are registered,
+	// and cleared at the start of shutdown. /readyz gates on this so
+	// Kubernetes only routes traffic when the service can process messages.
 	ready atomic.Bool
 
 	// subscriptionSem bounds concurrent handler invocations across all plain

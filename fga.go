@@ -29,8 +29,9 @@ import (
 	. "github.com/openfga/go-sdk/client"
 )
 
-// Note: all OpenFGA SDK calls are kept in the same file due to the namespace
-// pollution which is the recommended way of using this SDK.
+// Note: fga.go uses a dot-import for the OpenFGA SDK client package so that
+// SDK types are available unqualified within this file. Handlers in other
+// files use the qualified client.ClientTupleKey{} form instead.
 
 const (
 	// trueString is used for cache values representing allowed access

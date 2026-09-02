@@ -597,7 +597,6 @@ func TestCacheInvalidationLogic(t *testing.T) {
 	}
 }
 
-// TestNewTupleKeySlice tests the NewTupleKeySlice helper function
 // TestGetTuplesByRelation tests the GetTuplesByRelation function
 func TestGetTuplesByRelation(t *testing.T) {
 	tests := []struct {
