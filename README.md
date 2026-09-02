@@ -207,8 +207,11 @@ Returns `200 OK` if the service is running.
 GET /readyz
 ```
 
-Returns `200 OK` when NATS is connected and not draining. It does not attest to
-JetStream consumer-loop health.
+Returns `200 OK` when the service has completed startup (all subscriptions and
+the JetStream consumer are registered) and NATS is connected and not draining.
+Returns `503 Service Unavailable` during startup, after a shutdown signal is
+received, or if NATS connectivity is lost. It does not attest to JetStream
+consumer-loop health after startup.
 
 ### NATS API
 

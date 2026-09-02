@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -57,15 +58,37 @@ var (
 	GitCommit = "unknown"
 )
 
-var (
-	logger          *slog.Logger
-	httpServer      *http.Server
-	natsURL         string
-	natsConn        *nats.Conn
-	jetstreamConn   jetstream.JetStream
-	cacheBucketName string
-	// TODO: improve the configuration of the service to use dependency injection instead of global variables
-	useCache bool
+var logger *slog.Logger
+
+// natsReadyChecker is the subset of *nats.Conn that /readyz needs. Keeping it
+// as an interface allows tests to inject a stub without a real NATS server.
+type natsReadyChecker interface {
+	IsConnected() bool
+	IsDraining() bool
+}
+
+// server holds the lifecycle state for a single run of the service.
+//
+// Concurrency contract: natsConn, natsChecker, jsConn, httpServer,
+// subscriptionSem, and plainSubscriptions are written once during sequential
+// startup in run(). The HTTP listener starts early (so /livez is available
+// during initialization), meaning those fields are assigned after the serving
+// goroutine is already running. Safety for HTTP handlers that read them (e.g.
+// /readyz) comes from the ready atomic gate below, not from startup ordering.
+// ready is the sole synchronization point: HTTP handlers that touch lifecycle
+// fields must observe ready.Load() == true first. It is cleared on shutdown so
+// /readyz returns 503 while the service is draining.
+type server struct {
+	natsConn    *nats.Conn
+	natsChecker natsReadyChecker // same value as natsConn; separate for testability
+	jsConn      jetstream.JetStream
+	httpServer  *http.Server
+
+	// ready is the atomic publish point for HTTP handlers. It is set true
+	// after all NATS subscriptions and the JetStream consumer are registered,
+	// and cleared at the start of shutdown. /readyz gates on this so
+	// Kubernetes only routes traffic when the service can process messages.
+	ready atomic.Bool
 
 	// subscriptionSem bounds concurrent handler invocations across all plain
 	// (non-JetStream) NATS subscriptions to subscriptionConcurrency.
@@ -74,7 +97,7 @@ var (
 	// QueueSubscribe callback returns, which happens immediately once work is
 	// handed off to a goroutine, so natsConn.Drain() alone would not wait for
 	// them.
-	subscriptionSem = make(chan struct{}, subscriptionConcurrency)
+	subscriptionSem chan struct{}
 	subscriptionWG  sync.WaitGroup
 
 	// plainSubscriptions collects every subscription created by
@@ -82,21 +105,6 @@ var (
 	// drainPlainSubscriptions). Populated once, sequentially, during startup
 	// before any shutdown code runs, so it needs no synchronization.
 	plainSubscriptions []*nats.Subscription
-)
-
-func init() {
-	natsURL = os.Getenv("NATS_URL")
-	if natsURL == "" {
-		natsURL = "nats://nats:4222"
-	}
-	cacheBucketName = os.Getenv("CACHE_BUCKET")
-	if cacheBucketName == "" {
-		cacheBucketName = "fga-sync-cache"
-	}
-	useCacheStr := os.Getenv("USE_CACHE")
-	if useCacheStr == trueString {
-		useCache = true
-	}
 }
 
 // main parses optional flags and starts the NATS subscribers.
@@ -137,6 +145,15 @@ func main() {
 	}
 }
 
+// envOrDefault returns the value of the named environment variable, or
+// fallback if it is unset or empty.
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // run contains the main service logic. It is separated from main() so that
 // deferred cleanup functions (e.g. OpenTelemetry shutdown) run before
 // main() calls os.Exit on error.
@@ -161,6 +178,9 @@ func run(bind, port string) error {
 		}
 	}()
 
+	natsURL := envOrDefault("NATS_URL", "nats://nats:4222")
+	cacheBucketName := envOrDefault("CACHE_BUCKET", constants.KVBucketNameSyncCache)
+
 	// Create an OpenFGA client.
 	fgaClient, err := connectFga()
 	if err != nil {
@@ -169,10 +189,16 @@ func run(bind, port string) error {
 
 	logger.With("url", os.Getenv("OPENFGA_API_URL")).Info("OpenFGA client created")
 
-	// Create HTTP handlers for health checks.
-	createHTTPHandlers()
+	srv := &server{
+		subscriptionSem: make(chan struct{}, subscriptionConcurrency),
+	}
 
-	startHTTPListener(bind, port)
+	// Register HTTP handlers and start the listener early so /livez is
+	// available throughout startup. /readyz gates on srv.ready, which is set
+	// only after all subscriptions are up (see below), so Kubernetes will not
+	// route traffic until the service can actually process messages.
+	srv.createHTTPHandlers()
+	srv.startHTTPListener(bind, port)
 
 	// Create a wait group which is used to wait while draining (gracefully
 	// closing) a connection.
@@ -187,7 +213,7 @@ func run(bind, port string) error {
 	// Create NATS connection.
 	gracefulCloseWG.Add(1)
 	var natsCloseOnce sync.Once
-	natsConn, err = nats.Connect(
+	srv.natsConn, err = nats.Connect(
 		natsURL,
 		nats.DrainTimeout(gracefulShutdownSeconds*time.Second),
 		nats.MaxReconnects(-1),
@@ -228,39 +254,52 @@ func run(bind, port string) error {
 	if err != nil {
 		return fmt.Errorf("error creating NATS client: %w", err)
 	}
+	srv.natsChecker = srv.natsConn
 	logger.With("url", natsURL).Info("NATS client created")
 
-	jetstreamConn, err = jetstream.New(natsConn)
+	srv.jsConn, err = jetstream.New(srv.natsConn)
 	if err != nil {
 		return fmt.Errorf("error creating JetStream client: %w", err)
 	}
-	cacheBucket, err := jetstreamConn.KeyValue(context.Background(), cacheBucketName)
+	cacheBucket, err := srv.jsConn.KeyValue(context.Background(), cacheBucketName)
 	if err != nil {
 		return fmt.Errorf("error binding to cache bucket: %w", err)
 	}
+
+	useCache := os.Getenv("USE_CACHE") == trueString
 
 	handlerService := HandlerService{
 		fgaService: FgaService{
 			client:      fgaClient,
 			cacheBucket: cacheBucket,
+			useCache:    useCache,
 		},
 	}
 
-	if err = createQueueSubscriptions(handlerService); err != nil {
+	if err = srv.createQueueSubscriptions(handlerService); err != nil {
 		return fmt.Errorf("error creating queue subscriptions: %w", err)
 	}
 
-	if err = startMaxDeliveryAdvisorySubscription(ctx, natsConn, jetstreamConn); err != nil {
+	if err = startMaxDeliveryAdvisorySubscription(ctx, srv.natsConn, srv.jsConn); err != nil {
 		return fmt.Errorf("error starting max-delivery advisory subscription: %w", err)
 	}
 
-	accessMutationConsumer, err := startAccessMutationConsumer(ctx, jetstreamConn, handlerService)
+	accessMutationConsumer, err := startAccessMutationConsumer(ctx, srv.jsConn, handlerService)
 	if err != nil {
 		return fmt.Errorf("error starting access mutation consumer: %w", err)
 	}
 
+	// All subscriptions and consumers are registered — the service can now
+	// process messages. Signal readiness so /readyz returns 200.
+	srv.ready.Store(true)
+	logger.Info("service ready")
+
 	// This next line blocks until SIGINT or SIGTERM is received, or NATS closes.
 	<-done
+
+	// Clear readiness immediately on shutdown so /readyz returns 503 while
+	// the service is draining, preventing new traffic from being routed here.
+	srv.ready.Store(false)
 
 	// shutdownDeadline is a single overall budget shared by every remaining
 	// shutdown phase (access-mutation consumer stop, subscription drain/wait,
@@ -282,7 +321,7 @@ func run(bind, port string) error {
 	// to fail against an already-closed connection. Draining just the
 	// subscriptions stops new work without closing the connection those
 	// goroutines still need to call Respond() on.
-	drainPlainSubscriptions()
+	srv.drainPlainSubscriptions()
 
 	// sub.Drain() above unsubscribes but returns before nats.go's internal
 	// delivery loop has necessarily dispatched every already-queued message
@@ -302,20 +341,20 @@ func run(bind, port string) error {
 	// undefined WaitGroup usage. So skip the worker wait entirely and fall
 	// through to draining the connection, rather than trusting a count we can
 	// no longer verify is complete.
-	if waitForSubscriptionAdmission(time.Until(shutdownDeadline)) {
+	if srv.waitForSubscriptionAdmission(time.Until(shutdownDeadline)) {
 		// Now wait for the goroutines those subscriptions handed off to, using
 		// whatever is left of the shutdown budget, while the connection is
 		// still open so their replies can still be sent.
-		waitForSubscriptionWorkers(&subscriptionWG, time.Until(shutdownDeadline))
+		waitForSubscriptionWorkers(&srv.subscriptionWG, time.Until(shutdownDeadline))
 	} else {
 		logger.Warn("subscription admission barrier did not complete; skipping in-flight worker wait")
 	}
 
 	// Every plain-subscription worker is done (or the wait above gave up on
 	// a stuck one); it is now safe to drain and close the connection.
-	if !natsConn.IsClosed() && !natsConn.IsDraining() {
+	if !srv.natsConn.IsClosed() && !srv.natsConn.IsDraining() {
 		logger.Info("draining NATS connections")
-		if err = natsConn.Drain(); err != nil {
+		if err = srv.natsConn.Drain(); err != nil {
 			return fmt.Errorf("error draining NATS connection: %w", err)
 		}
 	}
@@ -326,7 +365,7 @@ func run(bind, port string) error {
 	waitForGracefulClose(&gracefulCloseWG, time.Until(shutdownDeadline))
 
 	// Immediately close the HTTP server after graceful shutdown has finished.
-	if err = httpServer.Close(); err != nil {
+	if err = srv.httpServer.Close(); err != nil {
 		logger.With(errKey, err).Error("http listener error on close")
 	}
 
@@ -350,7 +389,7 @@ func waitForGracefulClose(wg *sync.WaitGroup, timeout time.Duration) {
 	}
 }
 
-func startHTTPListener(bind, port string) {
+func (s *server) startHTTPListener(bind, port string) {
 	// Add an http listener for health checks. This server does NOT participate
 	// in the graceful shutdown process; we want it to stay up until the process
 	// is killed, to avoid liveness checks failing during the graceful shutdown.
@@ -368,48 +407,54 @@ func startHTTPListener(bind, port string) {
 		}),
 	)
 
-	httpServer = &http.Server{
+	s.httpServer = &http.Server{
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 3 * time.Second,
 	}
 	go func() {
 		logger.Info("starting HTTP server", "addr", addr)
-		err := httpServer.ListenAndServe()
+		err := s.httpServer.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			logger.With(errKey, err).Error("http listener error")
 		}
 	}()
 }
 
-// createHTTPHandlers creates HTTP handlers for health checks.
-func createHTTPHandlers() {
-	// Support GET/POST monitoring "ping".
-	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
-		// This always returns OK as long as the process is running. NATS
-		// reconnects indefinitely rather than exiting on connection loss, so
-		// connectivity health is reported via /readyz instead.
-		_, err := fmt.Fprintf(w, "OK\n")
-		if err != nil {
-			logger.With(errKey, err).Error("error writing to response writer")
-		}
-	})
+// createHTTPHandlers registers the /livez and /readyz handlers on
+// http.DefaultServeMux.
+func (s *server) createHTTPHandlers() {
+	http.HandleFunc("/livez", s.livezHandler)
+	http.HandleFunc("/readyz", s.readyzHandler)
+}
 
-	// Basic health check.
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if natsConn == nil {
-			http.Error(w, "no NATS connection", http.StatusServiceUnavailable)
-			return
-		}
-		if !natsConn.IsConnected() || natsConn.IsDraining() {
-			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
-			return
-		}
-		_, err := fmt.Fprintf(w, "OK\n")
-		if err != nil {
-			logger.With(errKey, err).Error("error writing to response writer")
-		}
-	})
+// livezHandler reports liveness. It always returns 200 as long as the process
+// is running. NATS reconnects indefinitely rather than exiting on connection
+// loss, so connectivity health is reported via /readyz instead.
+func (s *server) livezHandler(w http.ResponseWriter, _ *http.Request) {
+	_, err := fmt.Fprintf(w, "OK\n")
+	if err != nil {
+		logger.With(errKey, err).Error("error writing to response writer")
+	}
+}
+
+// readyzHandler reports readiness. It returns 503 until all NATS subscriptions
+// and the JetStream consumer are registered (ready=true), and again once the
+// shutdown signal is received (ready=false), so Kubernetes stops routing
+// traffic while the service is draining.
+func (s *server) readyzHandler(w http.ResponseWriter, _ *http.Request) {
+	if !s.ready.Load() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if s.natsChecker == nil || !s.natsChecker.IsConnected() || s.natsChecker.IsDraining() {
+		http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
+		return
+	}
+	_, err := fmt.Fprintf(w, "OK\n")
+	if err != nil {
+		logger.With(errKey, err).Error("error writing to response writer")
+	}
 }
 
 // drainPlainSubscriptions unsubscribes each plain (non-JetStream)
@@ -418,8 +463,8 @@ func createHTTPHandlers() {
 // natsConn.Drain(), which closes the connection as soon as every
 // subscription reports itself drained -- see the call site in run() for why
 // that would race with subscribeToSubject's handler goroutines.
-func drainPlainSubscriptions() {
-	for _, sub := range plainSubscriptions {
+func (s *server) drainPlainSubscriptions() {
+	for _, sub := range s.plainSubscriptions {
 		if err := sub.Drain(); err != nil {
 			logger.With(errKey, err, "subject", sub.Subject).Warn("error draining NATS subscription")
 		}
@@ -434,9 +479,9 @@ func drainPlainSubscriptions() {
 // established: false if natsConn.Barrier itself errored (e.g. the connection
 // is already closed) or the wait timed out, in which case the caller must not
 // treat subscriptionWG's count as trustworthy.
-func waitForSubscriptionAdmission(timeout time.Duration) bool {
+func (s *server) waitForSubscriptionAdmission(timeout time.Duration) bool {
 	done := make(chan struct{})
-	if err := natsConn.Barrier(func() { close(done) }); err != nil {
+	if err := s.natsConn.Barrier(func() { close(done) }); err != nil {
 		logger.With(errKey, err).Warn("error scheduling NATS subscription admission barrier")
 		return false
 	}
@@ -479,13 +524,13 @@ type subscriptionConfig struct {
 // Each message is handled on its own goroutine, bounded by subscriptionSem,
 // so a slow handler (e.g. waiting on OpenFGA) no longer serializes every
 // other message on the same subject.
-func subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
-	sub, err := natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
-		subscriptionSem <- struct{}{}
-		subscriptionWG.Add(1)
+func (s *server) subscribeToSubject(subject, description, queue string, handler HandlerFunc) error {
+	sub, err := s.natsConn.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
+		s.subscriptionSem <- struct{}{}
+		s.subscriptionWG.Add(1)
 		go func() {
-			defer subscriptionWG.Done()
-			defer func() { <-subscriptionSem }()
+			defer s.subscriptionWG.Done()
+			defer func() { <-s.subscriptionSem }()
 
 			// A fresh background context is used as the extraction base, not
 			// the service context, since this callback must not inherit
@@ -512,7 +557,7 @@ func subscribeToSubject(subject, description, queue string, handler HandlerFunc)
 		)
 		return err
 	}
-	plainSubscriptions = append(plainSubscriptions, sub)
+	s.plainSubscriptions = append(s.plainSubscriptions, sub)
 	logger.Info("subscribed to NATS subject",
 		"subject", subject,
 		"queue", queue,
@@ -521,11 +566,11 @@ func subscribeToSubject(subject, description, queue string, handler HandlerFunc)
 }
 
 // createQueueSubscriptions creates queue subscriptions for the NATS subjects.
-func createQueueSubscriptions(handlerService HandlerService) error {
+func (s *server) createQueueSubscriptions(handlerService HandlerService) error {
 	queue := constants.FgaSyncQueue
 
 	for _, config := range queueSubscriptionConfigs(handlerService) {
-		if err := subscribeToSubject(config.subject, config.description, queue, config.handler); err != nil {
+		if err := s.subscribeToSubject(config.subject, config.description, queue, config.handler); err != nil {
 			return err
 		}
 	}
