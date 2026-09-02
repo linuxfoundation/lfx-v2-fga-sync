@@ -60,6 +60,13 @@ var (
 
 var logger *slog.Logger
 
+// natsReadyChecker is the subset of *nats.Conn that /readyz needs. Keeping it
+// as an interface allows tests to inject a stub without a real NATS server.
+type natsReadyChecker interface {
+	IsConnected() bool
+	IsDraining() bool
+}
+
 // server holds the lifecycle state for a single run of the service.
 //
 // Concurrency contract: natsConn, jsConn, httpServer, subscriptionSem, and
@@ -69,9 +76,10 @@ var logger *slog.Logger
 // must observe before touching other fields (see /readyz). It is also cleared
 // on shutdown, so /readyz returns 503 while the service is draining.
 type server struct {
-	natsConn   *nats.Conn
-	jsConn     jetstream.JetStream
-	httpServer *http.Server
+	natsConn    *nats.Conn
+	natsChecker natsReadyChecker // same value as natsConn; separate for testability
+	jsConn      jetstream.JetStream
+	httpServer  *http.Server
 
 	// ready is the atomic publish point for HTTP handlers. It is set true
 	// after all NATS subscriptions and the JetStream consumer are registered,
@@ -243,6 +251,7 @@ func run(bind, port string) error {
 	if err != nil {
 		return fmt.Errorf("error creating NATS client: %w", err)
 	}
+	srv.natsChecker = srv.natsConn
 	logger.With("url", natsURL).Info("NATS client created")
 
 	srv.jsConn, err = jetstream.New(srv.natsConn)
@@ -409,36 +418,40 @@ func (s *server) startHTTPListener(bind, port string) {
 	}()
 }
 
-// createHTTPHandlers creates HTTP handlers for health checks.
+// createHTTPHandlers registers the /livez and /readyz handlers on
+// http.DefaultServeMux.
 func (s *server) createHTTPHandlers() {
-	// Support GET/POST monitoring "ping".
-	http.HandleFunc("/livez", func(w http.ResponseWriter, _ *http.Request) {
-		// This always returns OK as long as the process is running. NATS
-		// reconnects indefinitely rather than exiting on connection loss, so
-		// connectivity health is reported via /readyz instead.
-		_, err := fmt.Fprintf(w, "OK\n")
-		if err != nil {
-			logger.With(errKey, err).Error("error writing to response writer")
-		}
-	})
+	http.HandleFunc("/livez", s.livezHandler)
+	http.HandleFunc("/readyz", s.readyzHandler)
+}
 
-	// Basic health check.
-	http.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		// Not ready until all subscriptions and consumers are registered (set
-		// after startAccessMutationConsumer), and cleared during shutdown.
-		if !s.ready.Load() {
-			http.Error(w, "not ready", http.StatusServiceUnavailable)
-			return
-		}
-		if !s.natsConn.IsConnected() || s.natsConn.IsDraining() {
-			http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
-			return
-		}
-		_, err := fmt.Fprintf(w, "OK\n")
-		if err != nil {
-			logger.With(errKey, err).Error("error writing to response writer")
-		}
-	})
+// livezHandler reports liveness. It always returns 200 as long as the process
+// is running. NATS reconnects indefinitely rather than exiting on connection
+// loss, so connectivity health is reported via /readyz instead.
+func (s *server) livezHandler(w http.ResponseWriter, _ *http.Request) {
+	_, err := fmt.Fprintf(w, "OK\n")
+	if err != nil {
+		logger.With(errKey, err).Error("error writing to response writer")
+	}
+}
+
+// readyzHandler reports readiness. It returns 503 until all NATS subscriptions
+// and the JetStream consumer are registered (ready=true), and again once the
+// shutdown signal is received (ready=false), so Kubernetes stops routing
+// traffic while the service is draining.
+func (s *server) readyzHandler(w http.ResponseWriter, _ *http.Request) {
+	if !s.ready.Load() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	if s.natsChecker == nil || !s.natsChecker.IsConnected() || s.natsChecker.IsDraining() {
+		http.Error(w, "NATS connection not ready", http.StatusServiceUnavailable)
+		return
+	}
+	_, err := fmt.Fprintf(w, "OK\n")
+	if err != nil {
+		logger.With(errKey, err).Error("error writing to response writer")
+	}
 }
 
 // drainPlainSubscriptions unsubscribes each plain (non-JetStream)
