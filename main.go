@@ -69,12 +69,15 @@ type natsReadyChecker interface {
 
 // server holds the lifecycle state for a single run of the service.
 //
-// Concurrency contract: natsConn, jsConn, httpServer, subscriptionSem, and
-// plainSubscriptions are written once during sequential startup in run() before
-// any goroutine can read them, so they need no additional synchronization.
-// ready is the exception: it is the atomic gate that HTTP handler goroutines
-// must observe before touching other fields (see /readyz). It is also cleared
-// on shutdown, so /readyz returns 503 while the service is draining.
+// Concurrency contract: natsConn, natsChecker, jsConn, httpServer,
+// subscriptionSem, and plainSubscriptions are written once during sequential
+// startup in run(). The HTTP listener starts early (so /livez is available
+// during initialization), meaning those fields are assigned after the serving
+// goroutine is already running. Safety for HTTP handlers that read them (e.g.
+// /readyz) comes from the ready atomic gate below, not from startup ordering.
+// ready is the sole synchronization point: HTTP handlers that touch lifecycle
+// fields must observe ready.Load() == true first. It is cleared on shutdown so
+// /readyz returns 503 while the service is draining.
 type server struct {
 	natsConn    *nats.Conn
 	natsChecker natsReadyChecker // same value as natsConn; separate for testability

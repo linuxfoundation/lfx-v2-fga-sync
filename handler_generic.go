@@ -30,7 +30,7 @@ func parseGenericMsg[T any](ctx context.Context, message INatsMsg, op string) (f
 		return fgatypes.GenericFGAMessage{}, nil, newTerminalValidationError(errors.New("object_type is required"))
 	}
 	if genericMsg.Operation != op {
-		logger.ErrorContext(ctx, "invalid operation for handler", "operation", op, "received_operation", genericMsg.Operation)
+		logger.ErrorContext(ctx, "invalid operation for handler", "operation", genericMsg.Operation, "expected_operation", op)
 		return fgatypes.GenericFGAMessage{}, nil, newTerminalValidationError(
 			fmt.Errorf("invalid operation for %s handler", op),
 		)
