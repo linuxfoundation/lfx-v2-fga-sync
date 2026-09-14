@@ -1646,3 +1646,52 @@ func TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp(t *testing.T) {
 	assert.Empty(t, skipped)
 	mockClient.AssertExpectations(t)
 }
+
+// TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext verifies that
+// FgaService.WriteAndDeleteTuples bumps the cache invalidation key even when
+// the caller's context is already cancelled at call time.
+//
+// This guards the context.WithoutCancel + WithTimeout invariant introduced to
+// prevent stale auth decisions after partial multi-batch commits: if a batch-2
+// deadline expires after batch-1 committed to OpenFGA, the parent ctx is done.
+// Without a detached context, bucket.Put returns context.Canceled immediately
+// and the inv key is never written, leaving cached positive results fresh for
+// tuples that now exist in the store.
+//
+// The test pre-cancels ctx and verifies that MockNatsKeyValue.Put is called
+// with a context whose Err() is nil — i.e. a fresh, live context.
+func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
+	// Pre-cancel the caller context to simulate a deadline exceeded after
+	// an earlier batch committed to OpenFGA.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mockClient := new(MockFgaClient)
+	// MockFgaClient ignores the context, so Write succeeds even with a done ctx.
+	mockClient.On("Write", mock.Anything, mock.Anything, mock.Anything).
+		Return(&ClientWriteResponse{}, nil).Once()
+
+	mockKV := &MockNatsKeyValue{}
+	// The key assertion: Put must be called with a live (non-done) context,
+	// proving that WriteAndDeleteTuples used context.WithoutCancel to derive
+	// the invalidation context rather than forwarding the cancelled parent ctx.
+	mockKV.On("Put",
+		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
+		"inv",
+		mock.Anything,
+	).Return(uint64(1), nil).Once()
+
+	svc := newFgaService(mockClient, mockKV, false)
+
+	writes := []ClientTupleKey{
+		{Object: "project:1", Relation: "viewer", User: "user:alice"},
+	}
+
+	skipped, err := svc.WriteAndDeleteTuples(ctx, writes, nil)
+
+	assert.NoError(t, err)
+	assert.Empty(t, skipped)
+	mockClient.AssertExpectations(t)
+	// This expectation failing means the detached-context guarantee was broken.
+	mockKV.AssertExpectations(t)
+}
