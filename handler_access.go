@@ -21,12 +21,8 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if err != nil {
 		errText := "failed to extract check requests"
 		logger.With(errKey, err).WarnContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		return err
 	}
@@ -34,12 +30,8 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if len(checkRequests) == 0 {
 		errText := "no check requests found"
 		logger.WarnContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		// The message containing no check requests is not an error.
 		return nil
@@ -50,23 +42,17 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if err != nil {
 		errText := "failed to check relationship"
 		logger.With(errKey, err).ErrorContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		return err
 	}
 
 	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if errRespond := message.Respond(response); errRespond != nil {
-			logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-			return errRespond
+		err = h.reply(ctx, message, response)
+		if err != nil {
+			return err
 		}
-
 		logger.With(
 			"message", string(message.Data()),
 			"response", string(response),

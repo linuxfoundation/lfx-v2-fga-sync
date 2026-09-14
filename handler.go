@@ -215,12 +215,10 @@ func (h *HandlerService) processStandardAccessUpdate(
 	).InfoContext(ctx, "synced tuples")
 
 	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+		err = h.reply(ctx, message, []byte("OK"))
+		if err != nil {
 			return err
 		}
-
 		logger.With("object", object).InfoContext(ctx, fmt.Sprintf("sent %s access control update response", obj.ObjectType))
 	}
 
