@@ -313,17 +313,20 @@ func run(bind, port string) error {
 	srv.ready.Store(false)
 
 	shutdownDeadline := time.Now().Add(gracefulShutdownSeconds * time.Second)
-	err = srv.shutdown(shutdownDeadline)
-	if err != nil {
-		return err
-	}
+	shutdownErr := srv.shutdown(shutdownDeadline)
 
 	// HTTP server closes after NATS is fully drained.
-	if err = srv.httpServer.Close(); err != nil {
-		logger.With(errKey, err).Error("http listener error on close")
+	// Run it unconditionally so the listener is always cleaned up even when
+	// NATS drain returned an error above.
+	httpCloseErr := srv.httpServer.Close()
+	if httpCloseErr != nil {
+		logger.With(errKey, httpCloseErr).Error("http listener error on close")
 	}
 
-	return nil
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	return httpCloseErr
 }
 
 // shutdown runs the five-phase graceful drain sequence, bounded by deadline.

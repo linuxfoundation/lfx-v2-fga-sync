@@ -145,22 +145,29 @@ func (s FgaService) ListObjectsByUserAndRelation(
 }
 
 // WriteAndDeleteTuples writes and/or deletes the given tuples to/from OpenFGA,
-// batching at 100 ops/request, then invalidates the cache on success. It
-// returns the tuple strings of any write tuples OpenFGA rejected as invalid.
+// batching at 100 ops/request, then invalidates the cache. It returns the
+// tuple strings of any write tuples OpenFGA rejected as invalid.
+//
+// Cache invalidation happens even when the store returns an error: a
+// multi-batch run may have committed earlier batches to OpenFGA before the
+// failure, so skipping invalidation on a partial success would leave cache
+// entries fresh for tuples that now exist in the store. The inv bump is cheap
+// and a spurious invalidation is far safer than serving stale auth results.
 func (s FgaService) WriteAndDeleteTuples(
 	ctx context.Context,
 	writes []ClientTupleKey,
 	deletes []ClientTupleKeyWithoutCondition,
 ) ([]string, error) {
-	skipped, err := s.store.WriteAndDeleteTuples(ctx, writes, deletes)
-	if err != nil {
-		return skipped, err
+	skipped, storeErr := s.store.WriteAndDeleteTuples(ctx, writes, deletes)
+	// Invalidate whenever there was anything to write/delete — even on error —
+	// to cover partial multi-batch commits (see doc comment above).
+	if len(writes) > 0 || len(deletes) > 0 {
+		if err := s.cache.invalidate(ctx); err != nil {
+			// Log but don't fail; the write result is already determined.
+			logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
+		}
 	}
-	if err := s.cache.invalidate(ctx); err != nil {
-		// Log but don't fail the operation since the write succeeded.
-		logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
-	}
-	return skipped, nil
+	return skipped, storeErr
 }
 
 // WriteTuples writes the given tuples to OpenFGA and invalidates the cache.

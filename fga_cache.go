@@ -94,8 +94,12 @@ type CacheLayer struct {
 }
 
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
-// time predates this write is treated as stale on the next lookup.
+// time predates this write is treated as stale on the next lookup. It is a
+// no-op when the bucket is nil (e.g., cache disabled or not yet connected).
 func (c CacheLayer) invalidate(ctx context.Context) error {
+	if c.bucket == nil {
+		return nil
+	}
 	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
