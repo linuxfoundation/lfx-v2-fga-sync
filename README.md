@@ -102,8 +102,10 @@ Dependencies you need but should get from [lfx-v2-helm](https://github.com/linux
    # from https://github.com/linuxfoundation/lfx-v2-helm/tree/main
    export NATS_URL="nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
    export OPENFGA_API_URL="http://lfx-platform-openfga.lfx.svc.cluster.local:8080"
-   export OPENFGA_STORE_ID="01K1GTJZW163H839J3YZHD8ZRY"  # Use your actual store ID if you aren't using the lfx-platform chart
-   export OPENFGA_AUTH_MODEL_ID="01K1H4TFHDSBCZVZ5EP6HHDWE6"   # Use your actual model ID if you aren't using the lfx-platform chart
+   # Discover the store/model IDs (or use fga-operator's openfga-store pod label
+   # to have them populated automatically -- see Kubernetes Deployment below)
+   export OPENFGA_STORE_ID=$(curl -s "$OPENFGA_API_URL/stores" | jq -r '.stores[0].id')
+   export OPENFGA_AUTH_MODEL_ID=$(curl -s "$OPENFGA_API_URL/stores/$OPENFGA_STORE_ID/authorization-models?page_size=1" | jq -r '.authorization_models[0].id')
    export CACHE_BUCKET="fga-sync-cache"
    export USE_CACHE=true
    export DEBUG=false
@@ -140,8 +142,8 @@ make docker-build
 docker run -d \
   -e NATS_URL=nats://lfx-platform-nats.lfx.svc.cluster.local:4222 \
   -e OPENFGA_API_URL=http://lfx-platform-openfga.lfx.svc.cluster.local:8080 \
-  -e OPENFGA_STORE_ID=01K1GTJZW163H839J3YZHD8ZRY \
-  -e OPENFGA_AUTH_MODEL_ID=01K1H4TFHDSBCZVZ5EP6HHDWE6 \
+  -e OPENFGA_STORE_ID=$OPENFGA_STORE_ID \
+  -e OPENFGA_AUTH_MODEL_ID=$OPENFGA_AUTH_MODEL_ID \
   -e CACHE_BUCKET=fga-sync-cache \
   -p 8080:8080 \
   linuxfoundation/lfx-v2-fga-sync:latest

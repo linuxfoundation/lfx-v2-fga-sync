@@ -61,9 +61,6 @@ DISABLE_ERRORS_LINTERS:
   - REPOSITORY_GRYPE
   - REPOSITORY_KICS
 
-# Go-specific settings
-GO_SEC_ARGUMENTS: -fmt sarif -out gosec.sarif -quiet
-
 # YAML settings
 YAML_YAMLLINT_CONFIG_FILE: .yamllint.yml
 
