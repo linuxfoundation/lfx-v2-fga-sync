@@ -74,7 +74,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 500})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ReadObjectTuples(ctx, "project:123")
@@ -88,7 +88,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 500})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ReadUserTuples(ctx, "user:alice", "project")
@@ -102,7 +102,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("ListObjects", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientListObjectsResponse)(nil), fakeStatusErr{code: 500})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ListObjectsByUserAndRelation(ctx, "project", "writer", "user:alice")
@@ -118,7 +118,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				// path is not taken and the error is returned immediately.
 				mc.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), fakeStatusErr{code: 500})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.WriteAndDeleteTuples(ctx,
@@ -137,7 +137,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 					Return((*openfga.BatchCheckResponse)(nil), fakeStatusErr{code: 500})
 				mockKV := new(MockNatsKeyValue)
 				mockKV.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
-				return FgaService{client: mc, cacheBucket: mockKV}
+				return newFgaService(mc, mockKV, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.CheckRelationships(ctx, []ClientCheckRequest{
@@ -154,7 +154,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 422})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ReadObjectTuples(ctx, "project:123")
@@ -168,7 +168,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("Read", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientReadResponse)(nil), fakeStatusErr{code: 422})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ReadUserTuples(ctx, "user:alice", "project")
@@ -182,7 +182,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("ListObjects", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientListObjectsResponse)(nil), fakeStatusErr{code: 422})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.ListObjectsByUserAndRelation(ctx, "project", "writer", "user:alice")
@@ -196,7 +196,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("Write", mock.Anything, mock.Anything, mock.Anything).
 					Return((*ClientWriteResponse)(nil), fakeStatusErr{code: 422})
-				return FgaService{client: mc}
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.WriteAndDeleteTuples(ctx,
@@ -215,7 +215,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 					Return((*openfga.BatchCheckResponse)(nil), fakeStatusErr{code: 422})
 				mockKV := new(MockNatsKeyValue)
 				mockKV.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
-				return FgaService{client: mc, cacheBucket: mockKV}
+				return newFgaService(mc, mockKV, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.CheckRelationships(ctx, []ClientCheckRequest{

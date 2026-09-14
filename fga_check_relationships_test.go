@@ -104,7 +104,7 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
+	service := newFgaService(fgaClient, kv, true)
 
 	tuples := []ClientCheckRequest{
 		{User: "user:userA", Relation: "viewer", Object: "obj1"},
@@ -157,7 +157,7 @@ func TestCheckRelationshipsMeetingAccessAllowedAndDenied(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
+	service := newFgaService(fgaClient, kv, true)
 
 	tuples := []ClientCheckRequest{
 		// Stands in for a meeting registrant/participant/rsvp: the check is
@@ -218,7 +218,7 @@ func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
+	service := newFgaService(fgaClient, kv, true)
 
 	tuples := []ClientCheckRequest{
 		{User: "user:userA", Relation: "viewer", Object: "v1_meeting:79915658043"},
@@ -325,7 +325,7 @@ func TestCheckRelationshipsBoundsCacheLookupConcurrency(t *testing.T) {
 		On("BatchCheck", mock.Anything, mock.Anything).
 		Return(&openfga.BatchCheckResponse{Result: &expectedResults}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
+	service := newFgaService(fgaClient, kv, true)
 
 	start := time.Now()
 	result, err := service.CheckRelationships(context.Background(), tuples)
@@ -368,7 +368,7 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 	const tupleCount = cacheLookupConcurrency * 3
 
 	kv := &concurrencyTrackingKV{sleep: 20 * time.Millisecond}
-	service := FgaService{cacheBucket: kv}
+	service := newFgaService(nil, kv, false)
 
 	result := make(map[string]openfga.BatchCheckSingleResult, tupleCount)
 	mapCorrelationIDToTuple := make(map[string]ClientBatchCheckItem, tupleCount)
@@ -383,7 +383,7 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 	}
 
 	start := time.Now()
-	message := service.appendToMessage(context.Background(), nil, result, mapCorrelationIDToTuple)
+	message := service.cache.buildResponseAndWriteBack(context.Background(), nil, result, mapCorrelationIDToTuple)
 	elapsed := time.Since(start)
 
 	lines := strings.Split(strings.TrimRight(string(message), "\n"), "\n")
@@ -433,7 +433,7 @@ func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
 		requestTuples[r] = tuples
 	}
 
-	service := FgaService{cacheBucket: kv, useCache: true}
+	service := newFgaService(nil, kv, true)
 
 	var wg sync.WaitGroup
 	for r := range concurrentRequests {

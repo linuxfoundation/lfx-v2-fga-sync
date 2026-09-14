@@ -215,7 +215,7 @@ func TestProcessAccessMutationMessageOutcomes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service := setupService()
-			fgaClient := service.fgaService.client.(*MockFgaClient)
+			fgaClient := service.fgaService.store.client.(*MockFgaClient)
 			fgaClient.
 				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 				Return(&client.ClientReadResponse{}, tt.fgaErr)
@@ -271,7 +271,7 @@ func TestProcessAccessMutationMessageFgaErrorsStayTransient(t *testing.T) {
 	for _, tt := range fgaErrors {
 		t.Run(tt.name, func(t *testing.T) {
 			service := setupService()
-			service.fgaService.client.(*MockFgaClient).
+			service.fgaService.store.client.(*MockFgaClient).
 				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 				Return((*client.ClientReadResponse)(nil), tt.err)
 
@@ -299,7 +299,7 @@ func TestProcessAccessMutationMessageFgaErrorsStayTransient(t *testing.T) {
 // terminated early or displaced by another message.
 func TestProcessAccessMutationMessagePersistentErrorStaysTransientAcrossRedeliveries(t *testing.T) {
 	service := setupService()
-	service.fgaService.client.(*MockFgaClient).
+	service.fgaService.store.client.(*MockFgaClient).
 		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 		Return((*client.ClientReadResponse)(nil), makeValidationError("request validation failed"))
 
@@ -324,14 +324,14 @@ func TestProcessAccessMutationMessagePersistentErrorStaysTransientAcrossRedelive
 
 func TestProcessAccessMutationMessageAcksCacheInvalidationWarning(t *testing.T) {
 	service := setupService()
-	fgaClient := service.fgaService.client.(*MockFgaClient)
+	fgaClient := service.fgaService.store.client.(*MockFgaClient)
 	fgaClient.
 		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 		Return(&client.ClientReadResponse{}, nil)
 	fgaClient.
 		On("Write", mock.Anything, mock.Anything, mock.Anything).
 		Return(&client.ClientWriteResponse{}, nil)
-	service.fgaService.cacheBucket.(*MockKeyValue).SetError(assert.AnError)
+	service.fgaService.cache.bucket.(*MockKeyValue).SetError(assert.AnError)
 	message := &testAccessMutationMessage{
 		data: []byte(
 			`{"object_type":"committee","operation":"update_access",` +

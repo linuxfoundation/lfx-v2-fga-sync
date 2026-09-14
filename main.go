@@ -269,11 +269,7 @@ func run(bind, port string) error {
 	useCache := os.Getenv("USE_CACHE") == trueString
 
 	handlerService := HandlerService{
-		fgaService: FgaService{
-			client:      fgaClient,
-			cacheBucket: cacheBucket,
-			useCache:    useCache,
-		},
+		fgaService: newFgaService(fgaClient, cacheBucket, useCache),
 	}
 
 	if err = srv.createQueueSubscriptions(handlerService); err != nil {
