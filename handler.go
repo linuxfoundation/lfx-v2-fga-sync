@@ -12,6 +12,7 @@ import (
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
+	"github.com/openfga/go-sdk/client"
 )
 
 // HandlerService is the service that handles the messages from NATS about FGA syncing.
@@ -144,11 +145,13 @@ func (h *HandlerService) processStandardAccessUpdate(
 	object := buildObjectID(obj.ObjectType, obj.UID)
 
 	// Build a list of tuples to sync.
-	tuples := h.fgaService.NewTupleKeySlice(4)
+	tuples := make([]client.ClientTupleKey, 0, 4)
 
 	// Convert the "public" attribute to a "user:*" relation.
 	if obj.Public {
-		tuples = append(tuples, h.fgaService.TupleKey(constants.UserWildcard, constants.RelationViewer, object))
+		tuples = append(tuples, client.ClientTupleKey{
+			User: constants.UserWildcard, Relation: constants.RelationViewer, Object: object,
+		})
 	}
 
 	// for parent relation, project relation, etc
@@ -179,7 +182,7 @@ func (h *HandlerService) processStandardAccessUpdate(
 				// Value is just an ID, prepend the type
 				key = fmt.Sprintf("%s:%s", refType, value)
 			}
-			tuples = append(tuples, h.fgaService.TupleKey(key, reference, object))
+			tuples = append(tuples, client.ClientTupleKey{User: key, Relation: reference, Object: object})
 		}
 	}
 
@@ -188,7 +191,9 @@ func (h *HandlerService) processStandardAccessUpdate(
 	// for writer, auditor etc
 	for relation, principals := range obj.Relations {
 		for _, principal := range principals {
-			tuples = append(tuples, h.fgaService.TupleKey(constants.ObjectTypeUser+principal, relation, object))
+			tuples = append(tuples, client.ClientTupleKey{
+				User: constants.ObjectTypeUser + principal, Relation: relation, Object: object,
+			})
 		}
 	}
 

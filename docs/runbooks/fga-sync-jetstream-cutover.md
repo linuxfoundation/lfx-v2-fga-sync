@@ -61,8 +61,11 @@ Do not run the OpenFGA outage drill inside this live cutover window.
   `sync_terminal`, and `sync_max_deliver_exhausted` do not increase
   unexpectedly.
 - Confirm no publisher waits for an application `OK` reply.
-- Confirm `/readyz` reports NATS connectivity. It does not prove the JetStream
-  consumer loop is healthy; verify the durable consumer separately.
+- Confirm `/readyz` returns 200. It gates on full startup completion (all
+  subscriptions and the JetStream consumer registered) plus NATS connectivity;
+  a 503 with NATS connected means the service is still starting up or has
+  received a shutdown signal. It does not prove the JetStream consumer loop is
+  healthy after startup; verify the durable consumer separately.
 
 ## Rollback
 

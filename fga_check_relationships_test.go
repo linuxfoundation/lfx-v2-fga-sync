@@ -70,9 +70,6 @@ func (e fixedEntry) Operation() jetstream.KeyValueOp { return jetstream.KeyValue
 // break-the-whole-batch cache-error case) is routed to OpenFGA individually
 // instead of dropped or mis-classifying unrelated tuples.
 func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
-	useCache = true
-	t.Cleanup(func() { useCache = false })
-
 	now := time.Now()
 	invalidatedBefore := now.Add(-time.Hour)
 
@@ -107,7 +104,7 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv}
+	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
 
 	tuples := []ClientCheckRequest{
 		{User: "user:userA", Relation: "viewer", Object: "obj1"},
@@ -146,8 +143,6 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 // a single line here effectively stands in for every child resource (e.g. all
 // registrants of one meeting) that shares that parent's grant.
 func TestCheckRelationshipsMeetingAccessAllowedAndDenied(t *testing.T) {
-	useCache = true
-	t.Cleanup(func() { useCache = false })
 
 	kv := &perKeyErrorKV{entries: map[string]jetstream.KeyValueEntry{}}
 
@@ -162,7 +157,7 @@ func TestCheckRelationshipsMeetingAccessAllowedAndDenied(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv}
+	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
 
 	tuples := []ClientCheckRequest{
 		// Stands in for a meeting registrant/participant/rsvp: the check is
@@ -199,9 +194,6 @@ func TestCheckRelationshipsMeetingAccessAllowedAndDenied(t *testing.T) {
 // parent object, so this also covers the case where the parent's grant is
 // removed after being cached.
 func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
-	useCache = true
-	t.Cleanup(func() { useCache = false })
-
 	now := time.Now()
 	invalidatedBefore := now.Add(-time.Hour)
 	staleKey := "rel." + cacheKeyEncoder.EncodeToString(
@@ -226,7 +218,7 @@ func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 			},
 		}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv}
+	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
 
 	tuples := []ClientCheckRequest{
 		{User: "user:userA", Relation: "viewer", Object: "v1_meeting:79915658043"},
@@ -305,9 +297,6 @@ func (k *concurrencyTrackingKV) PutString(context.Context, string, string) (uint
 // in disguise) while staying within cacheLookupConcurrency, the invariant the
 // bounded-concurrency rewrite depends on.
 func TestCheckRelationshipsBoundsCacheLookupConcurrency(t *testing.T) {
-	useCache = true
-	t.Cleanup(func() { useCache = false })
-
 	const tupleCount = cacheLookupConcurrency * 3
 
 	kv := &concurrencyTrackingKV{
@@ -336,7 +325,7 @@ func TestCheckRelationshipsBoundsCacheLookupConcurrency(t *testing.T) {
 		On("BatchCheck", mock.Anything, mock.Anything).
 		Return(&openfga.BatchCheckResponse{Result: &expectedResults}, nil)
 
-	service := FgaService{client: fgaClient, cacheBucket: kv}
+	service := FgaService{client: fgaClient, cacheBucket: kv, useCache: true}
 
 	start := time.Now()
 	result, err := service.CheckRelationships(context.Background(), tuples)
@@ -419,9 +408,6 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 // reach concurrentRequests*cacheLookupConcurrency; with it, peak must stay at
 // or below cacheOpConcurrency.
 func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
-	useCache = true
-	t.Cleanup(func() { useCache = false })
-
 	const concurrentRequests = 4
 	const tupleCount = cacheLookupConcurrency
 
@@ -447,7 +433,7 @@ func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
 		requestTuples[r] = tuples
 	}
 
-	service := FgaService{cacheBucket: kv}
+	service := FgaService{cacheBucket: kv, useCache: true}
 
 	var wg sync.WaitGroup
 	for r := range concurrentRequests {

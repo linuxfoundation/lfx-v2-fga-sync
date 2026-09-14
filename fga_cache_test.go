@@ -52,7 +52,7 @@ func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T
 				Return(&client.ClientWriteResponse{}, tt.writeErr)
 			cache := &cacheWriteRecorder{writes: make(chan string, 1)}
 			service := FgaService{client: fgaClient, cacheBucket: cache}
-			tuple := service.TupleKey("user:alice", "writer", "project:resource-1")
+			tuple := client.ClientTupleKey{User: "user:alice", Relation: "writer", Object: "project:resource-1"}
 
 			_, _, err := service.SyncObjectTuples(
 				context.Background(),
@@ -110,8 +110,8 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 	service := FgaService{client: fgaClient, cacheBucket: cache}
 
 	writes := []client.ClientTupleKey{
-		service.TupleKey("user:alice", "writer", "project:resource-1"),
-		service.TupleKey("user:bob", "viewer", "project:resource-1"),
+		{User: "user:alice", Relation: "writer", Object: "project:resource-1"},
+		{User: "user:bob", Relation: "viewer", Object: "project:resource-1"},
 	}
 
 	_, _, err := service.SyncObjectTuples(context.Background(), "project:resource-1", writes)
