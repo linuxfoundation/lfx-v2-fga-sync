@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
@@ -153,6 +154,13 @@ func (s FgaService) ListObjectsByUserAndRelation(
 // failure, so skipping invalidation on a partial success would leave cache
 // entries fresh for tuples that now exist in the store. The inv bump is cheap
 // and a spurious invalidation is far safer than serving stale auth results.
+//
+// Invalidation uses an independent short-lived context derived with
+// context.WithoutCancel so that a canceled or deadline-exceeded parent context
+// (e.g. from a batch-2 timeout after batch-1 committed) cannot prevent the
+// inv key from being written. Without this, a canceled ctx would cause
+// bucket.Put to return immediately, leaving cached entries from committed
+// writes fresh until some later successful mutation bumps inv.
 func (s FgaService) WriteAndDeleteTuples(
 	ctx context.Context,
 	writes []ClientTupleKey,
@@ -162,7 +170,11 @@ func (s FgaService) WriteAndDeleteTuples(
 	// Invalidate whenever there was anything to write/delete — even on error —
 	// to cover partial multi-batch commits (see doc comment above).
 	if len(writes) > 0 || len(deletes) > 0 {
-		if err := s.cache.invalidate(ctx); err != nil {
+		// Use a detached context with a short deadline so a canceled parent
+		// (e.g. expired deadline after batch 1 committed) cannot block the Put.
+		invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer invCancel()
+		if err := s.cache.invalidate(invCtx); err != nil {
 			// Log but don't fail; the write result is already determined.
 			logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
 		}
