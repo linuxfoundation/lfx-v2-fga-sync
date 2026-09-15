@@ -39,6 +39,9 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
+# Cursor IDE
+.cursor/
+
 # Claude AI assistant
 .claude
 
