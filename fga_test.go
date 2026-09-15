@@ -159,9 +159,7 @@ func TestExtractCheckRequests(t *testing.T) {
 		},
 	}
 
-	fgaService := FgaService{
-		client: &MockFgaClient{},
-	}
+	fgaService := newFgaService(&MockFgaClient{}, nil, false)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -337,13 +335,11 @@ func TestReadObjectTuples(t *testing.T) {
 			mockClient := new(MockFgaClient)
 			tt.mockSetup(mockClient)
 
-			fgaService := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
 			ctx := context.Background()
-			tuples, err := fgaService.ReadObjectTuples(ctx, tt.object)
+			tuples, err := store.ReadObjectTuples(ctx, tt.object)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -773,13 +769,11 @@ func TestGetTuplesByRelation(t *testing.T) {
 			mockClient := new(MockFgaClient)
 			tt.mockSetup(mockClient)
 
-			fgaService := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
 			ctx := context.Background()
-			tuples, err := fgaService.GetTuplesByRelation(ctx, tt.object, tt.relation)
+			tuples, err := store.GetTuplesByRelation(ctx, tt.object, tt.relation)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -1006,10 +1000,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 			mockCache.On("Put", mock.Anything, "inv", []byte("1")).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			service := newFgaService(mockClient, mockCache, false)
 
 			// Execute the function
 			err := service.DeleteTuplesByUserAndObject(context.Background(), tt.user, tt.object)
@@ -1126,12 +1117,10 @@ func TestGetTuplesByUserAndObject(t *testing.T) {
 			tt.mockSetup(mockClient)
 
 			// Create service with mock client
-			service := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
-			tuples, err := service.GetTuplesByUserAndObject(context.Background(), tt.user, tt.object)
+			tuples, err := store.GetTuplesByUserAndObject(context.Background(), tt.user, tt.object)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -1291,10 +1280,7 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			service := newFgaService(mockClient, mockCache, false)
 			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations, tt.excludeRelations...)
 
 			// Verify no error
@@ -1433,10 +1419,7 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			mockCache.On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			service := newFgaService(mockClient, mockCache, false)
 			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations)
 
 			if err != nil {
@@ -1592,15 +1575,11 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockClient := new(MockFgaClient)
-			mockCache := NewMockKeyValue()
 			tt.mockSetup(mockClient)
 
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			store := TupleStore{client: mockClient}
 
-			skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
+			skipped, err := store.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
 
 			if tt.expectError && err == nil {
 				t.Errorf("%s: expected error but got nil", tt.description)
@@ -1631,16 +1610,15 @@ func TestWriteCollisionIgnoreOptions(t *testing.T) {
 // mixes a genuinely new tuple with one OpenFGA reports as invalid.
 func TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions(t *testing.T) {
 	mockClient := new(MockFgaClient)
-	mockCache := NewMockKeyValue()
 	wantOptions := writeCollisionIgnoreOptions
 
 	mockClient.On("Write", mock.Anything, mock.Anything, wantOptions).
 		Return(&ClientWriteResponse{}, nil).Once()
 
-	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	store := TupleStore{client: mockClient}
 	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
 
-	_, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, nil)
+	_, err := store.writeAndDeleteTuplesBatch(context.Background(), writes, nil)
 
 	assert.NoError(t, err)
 	mockClient.AssertExpectations(t)
@@ -1653,19 +1631,67 @@ func TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions(t *testing.T) {
 // all, so extractInvalidTuple's skip path is not exercised.
 func TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp(t *testing.T) {
 	mockClient := new(MockFgaClient)
-	mockCache := NewMockKeyValue()
 
 	mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 		return len(req.Writes) == 1 && len(req.Deletes) == 1
 	}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 
-	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	store := TupleStore{client: mockClient}
 	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
 	deletes := []ClientTupleKeyWithoutCondition{{Object: "project:1", Relation: "writer", User: "user:bob"}}
 
-	skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, deletes)
+	skipped, err := store.writeAndDeleteTuplesBatch(context.Background(), writes, deletes)
 
 	assert.NoError(t, err)
 	assert.Empty(t, skipped)
 	mockClient.AssertExpectations(t)
+}
+
+// TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext verifies that
+// FgaService.WriteAndDeleteTuples bumps the cache invalidation key even when
+// the caller's context is already cancelled at call time.
+//
+// This guards the context.WithoutCancel + WithTimeout invariant introduced to
+// prevent stale auth decisions after partial multi-batch commits: if a batch-2
+// deadline expires after batch-1 committed to OpenFGA, the parent ctx is done.
+// Without a detached context, bucket.Put returns context.Canceled immediately
+// and the inv key is never written, leaving cached positive results fresh for
+// tuples that now exist in the store.
+//
+// The test pre-cancels ctx and verifies that MockNatsKeyValue.Put is called
+// with a context whose Err() is nil — i.e. a fresh, live context.
+func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
+	// Pre-cancel the caller context to simulate a deadline exceeded after
+	// an earlier batch committed to OpenFGA.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mockClient := new(MockFgaClient)
+	// MockFgaClient ignores the context, so Write succeeds even with a done ctx.
+	mockClient.On("Write", mock.Anything, mock.Anything, mock.Anything).
+		Return(&ClientWriteResponse{}, nil).Once()
+
+	mockKV := &MockNatsKeyValue{}
+	// The key assertion: Put must be called with a live (non-done) context,
+	// proving that WriteAndDeleteTuples used context.WithoutCancel to derive
+	// the invalidation context rather than forwarding the cancelled parent ctx.
+	mockKV.On("Put",
+		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
+		"inv",
+		mock.Anything,
+	).Return(uint64(1), nil).Once()
+
+	svc := newFgaService(mockClient, mockKV, false)
+
+	writes := []ClientTupleKey{
+		{Object: "project:1", Relation: "viewer", User: "user:alice"},
+	}
+
+	skipped, err := svc.WriteAndDeleteTuples(ctx, writes, nil)
+
+	assert.NoError(t, err)
+	assert.Empty(t, skipped)
+	mockClient.AssertExpectations(t)
+	// This expectation failing means the detached-context guarantee was broken.
+	mockKV.AssertExpectations(t)
 }

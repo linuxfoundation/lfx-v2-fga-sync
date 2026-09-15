@@ -105,6 +105,23 @@ type server struct {
 	// drainPlainSubscriptions). Populated once, sequentially, during startup
 	// before any shutdown code runs, so it needs no synchronization.
 	plainSubscriptions []*nats.Subscription
+
+	// Shutdown coordination fields. All are written once during sequential
+	// startup before the signal wait, so no synchronization with shutdown is
+	// needed beyond the ready atomic gate.
+
+	// closeWG is incremented once before the NATS connection is created and
+	// is signaled by the NATS ClosedHandler when the connection finishes
+	// draining. shutdown waits on it as the final phase of the drain sequence.
+	closeWG       sync.WaitGroup
+	natsCloseOnce sync.Once
+
+	// consumer is the JetStream access-mutation consume loop; shutdown calls
+	// its Stop method to drain the consumer before touching the connection.
+	consumer accessMutationConsumeContext
+	// cancel is the cancellation function for the consumer's context; shutdown
+	// uses it after Stop to force-abort any still-running delivery attempt.
+	cancel context.CancelFunc
 }
 
 // main parses optional flags and starts the NATS subscribers.
@@ -200,19 +217,17 @@ func run(bind, port string) error {
 	srv.createHTTPHandlers()
 	srv.startHTTPListener(bind, port)
 
-	// Create a wait group which is used to wait while draining (gracefully
-	// closing) a connection.
-	gracefulCloseWG := sync.WaitGroup{}
-
 	// Support graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
+	srv.cancel = cancel
 	defer cancel()
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create NATS connection.
-	gracefulCloseWG.Add(1)
-	var natsCloseOnce sync.Once
+	// Create NATS connection. closeWG is incremented here, before the
+	// connection exists, so the ClosedHandler can always call Done without
+	// racing against the Add.
+	srv.closeWG.Add(1)
 	srv.natsConn, err = nats.Connect(
 		natsURL,
 		nats.DrainTimeout(gracefulShutdownSeconds*time.Second),
@@ -235,7 +250,7 @@ func run(bind, port string) error {
 			}
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
-			natsCloseOnce.Do(gracefulCloseWG.Done)
+			srv.natsCloseOnce.Do(srv.closeWG.Done)
 			if ctx.Err() != nil {
 				logger.Info("NATS closed handler called during graceful shutdown")
 				return
@@ -269,11 +284,7 @@ func run(bind, port string) error {
 	useCache := os.Getenv("USE_CACHE") == trueString
 
 	handlerService := HandlerService{
-		fgaService: FgaService{
-			client:      fgaClient,
-			cacheBucket: cacheBucket,
-			useCache:    useCache,
-		},
+		fgaService: newFgaService(fgaClient, cacheBucket, useCache),
 	}
 
 	if err = srv.createQueueSubscriptions(handlerService); err != nil {
@@ -284,7 +295,7 @@ func run(bind, port string) error {
 		return fmt.Errorf("error starting max-delivery advisory subscription: %w", err)
 	}
 
-	accessMutationConsumer, err := startAccessMutationConsumer(ctx, srv.jsConn, handlerService)
+	srv.consumer, err = startAccessMutationConsumer(ctx, srv.jsConn, handlerService)
 	if err != nil {
 		return fmt.Errorf("error starting access mutation consumer: %w", err)
 	}
@@ -294,81 +305,75 @@ func run(bind, port string) error {
 	srv.ready.Store(true)
 	logger.Info("service ready")
 
-	// This next line blocks until SIGINT or SIGTERM is received, or NATS closes.
+	// Block until SIGINT, SIGTERM, or an unexpected NATS close.
 	<-done
 
-	// Clear readiness immediately on shutdown so /readyz returns 503 while
-	// the service is draining, preventing new traffic from being routed here.
+	// Clear readiness immediately so /readyz returns 503 while draining,
+	// preventing Kubernetes from routing new traffic here.
 	srv.ready.Store(false)
 
-	// shutdownDeadline is a single overall budget shared by every remaining
-	// shutdown phase (access-mutation consumer stop, subscription drain/wait,
-	// and waiting for the NATS connection to close). Each phase below waits
-	// only for whatever is left of this one deadline instead of getting its
-	// own independent gracefulShutdownSeconds timeout, so the phases cannot
-	// compound into a multiple of gracefulShutdownSeconds that exceeds the
-	// pod's terminationGracePeriodSeconds.
 	shutdownDeadline := time.Now().Add(gracefulShutdownSeconds * time.Second)
+	shutdownErr := srv.shutdown(shutdownDeadline)
 
-	stopAccessMutationConsumer(accessMutationConsumer, cancel, shutdownDeadline)
+	// HTTP server closes after NATS is fully drained.
+	// Run it unconditionally so the listener is always cleaned up even when
+	// NATS drain returned an error above.
+	httpCloseErr := srv.httpServer.Close()
+	if httpCloseErr != nil {
+		logger.With(errKey, httpCloseErr).Error("http listener error on close")
+	}
 
-	// Stop new deliveries on each plain (non-JetStream) subscription
-	// individually, before touching the connection itself. QueueSubscribe
-	// callbacks hand off to a goroutine and return immediately, so draining
-	// the whole connection here would let natsConn.Drain() consider every
-	// subject drained -- and close the connection -- long before those
-	// goroutines finish, causing in-flight access-check/read-tuples replies
-	// to fail against an already-closed connection. Draining just the
-	// subscriptions stops new work without closing the connection those
-	// goroutines still need to call Respond() on.
-	srv.drainPlainSubscriptions()
+	if shutdownErr != nil {
+		return shutdownErr
+	}
+	return httpCloseErr
+}
 
-	// sub.Drain() above unsubscribes but returns before nats.go's internal
-	// delivery loop has necessarily dispatched every already-queued message
-	// to its callback. Without this barrier, waitForSubscriptionWorkers could
-	// observe subscriptionWG at zero and return before one of those pending
-	// callbacks ever reaches subscriptionWG.Add(1), letting shutdown proceed
-	// to close the connection out from under that late-arriving worker.
-	// natsConn.Barrier schedules a marker behind every currently registered
-	// subscription's queue, so waiting for it guarantees every message queued
-	// at drain time has already reached its callback -- and thus already
-	// called Add -- before subscriptionWG.Wait() runs.
-	//
-	// If the barrier times out or natsConn.Barrier itself errors, that
-	// guarantee no longer holds: a late callback could still be about to call
-	// Add. Calling subscriptionWG.Wait() in that state risks observing the
-	// counter at zero and returning before that Add happens, which is
-	// undefined WaitGroup usage. So skip the worker wait entirely and fall
-	// through to draining the connection, rather than trusting a count we can
-	// no longer verify is complete.
-	if srv.waitForSubscriptionAdmission(time.Until(shutdownDeadline)) {
-		// Now wait for the goroutines those subscriptions handed off to, using
-		// whatever is left of the shutdown budget, while the connection is
-		// still open so their replies can still be sent.
-		waitForSubscriptionWorkers(&srv.subscriptionWG, time.Until(shutdownDeadline))
+// shutdown runs the five-phase graceful drain sequence, bounded by deadline.
+// It must be called exactly once, after srv.ready has been cleared.
+//
+// Phase ordering is load-bearing — see the inline comments for the invariants
+// that each transition depends on:
+//
+//  1. Stop the JetStream access-mutation consumer (cancel its context after a
+//     grace period so any in-flight delivery attempt can finish first).
+//  2. Drain each plain NATS subscription individually to stop new deliveries
+//     without closing the connection (which handler goroutines still need).
+//  3. Wait for the NATS delivery-loop barrier, then for all in-flight handler
+//     goroutines to finish.
+//  4. Drain the NATS connection (safe now that all goroutines are done).
+//  5. Wait for the NATS ClosedHandler to signal closeWG.
+func (s *server) shutdown(deadline time.Time) error {
+	// Phase 1: stop the JetStream consumer.
+	stopAccessMutationConsumer(s.consumer, s.cancel, deadline)
+
+	// Phase 2: stop new deliveries on plain subscriptions without closing the
+	// connection; see drainPlainSubscriptions for why this is not
+	// natsConn.Drain().
+	s.drainPlainSubscriptions()
+
+	// Phase 3: wait for every already-queued message to have called Add on
+	// subscriptionWG (barrier), then wait for those goroutines to finish.
+	// If the barrier fails, skip the worker wait rather than risk undefined
+	// WaitGroup usage — see waitForSubscriptionAdmission for full rationale.
+	if s.waitForSubscriptionAdmission(time.Until(deadline)) {
+		waitForSubscriptionWorkers(&s.subscriptionWG, time.Until(deadline))
 	} else {
 		logger.Warn("subscription admission barrier did not complete; skipping in-flight worker wait")
 	}
 
-	// Every plain-subscription worker is done (or the wait above gave up on
-	// a stuck one); it is now safe to drain and close the connection.
-	if !srv.natsConn.IsClosed() && !srv.natsConn.IsDraining() {
+	// Phase 4: all plain-subscription workers are done; drain the connection.
+	if !s.natsConn.IsClosed() && !s.natsConn.IsDraining() {
 		logger.Info("draining NATS connections")
-		if err = srv.natsConn.Drain(); err != nil {
+		if err := s.natsConn.Drain(); err != nil {
 			return fmt.Errorf("error draining NATS connection: %w", err)
 		}
 	}
 
-	// Wait for the graceful shutdown steps to complete, bounded by whatever
-	// is left of shutdownDeadline rather than blocking indefinitely if the
-	// NATS connection never reports itself closed.
-	waitForGracefulClose(&gracefulCloseWG, time.Until(shutdownDeadline))
-
-	// Immediately close the HTTP server after graceful shutdown has finished.
-	if err = srv.httpServer.Close(); err != nil {
-		logger.With(errKey, err).Error("http listener error on close")
-	}
-
+	// Phase 5: wait for the ClosedHandler to signal closeWG, bounded by
+	// whatever budget remains so a connection that never closes cannot block
+	// shutdown indefinitely.
+	waitForGracefulClose(&s.closeWG, time.Until(deadline))
 	return nil
 }
 

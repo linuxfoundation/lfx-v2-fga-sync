@@ -188,7 +188,7 @@ func TestMemberRemoveEmptyRelationsIsValid(t *testing.T) {
 			t.Parallel()
 
 			service := setupService()
-			service.fgaService.client.(*MockFgaClient).
+			service.fgaService.store.client.(*MockFgaClient).
 				On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 				Return(&client.ClientReadResponse{Tuples: nil}, nil)
 
@@ -255,7 +255,7 @@ func TestGenericAccessHandlersLeaveFgaErrorsTransient(t *testing.T) {
 				t.Parallel()
 
 				service := setupService()
-				service.fgaService.client.(*MockFgaClient).
+				service.fgaService.store.client.(*MockFgaClient).
 					On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
 					Return((*client.ClientReadResponse)(nil), fgaErr.err)
 
