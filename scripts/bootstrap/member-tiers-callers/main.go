@@ -54,7 +54,12 @@ var duplicateWriteIgnore = ClientWriteOptions{
 
 func main() {
 	workerClientID := flag.String("worker-client-id", "", "Auth0 client ID of the Insights Tiers Service (required)")
-	lfxOneClientID := flag.String("lfx-one-client-id", "", "Auth0 client ID of the LFX One gateway M2M client (M2M_AUTH_CLIENT_ID from lfx-self-serve) (required)")
+	lfxOneClientID := flag.String(
+		"lfx-one-client-id",
+		"",
+		"Auth0 client ID of the LFX One gateway M2M client "+
+			"(M2M_AUTH_CLIENT_ID from lfx-self-serve) (required)",
+	)
 	dryRun := flag.Bool("dry-run", false, "Print tuples that would be written without writing them")
 	flag.Parse()
 
