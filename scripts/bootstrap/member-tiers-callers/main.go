@@ -1,7 +1,7 @@
 // Copyright The Linux Foundation and each contributor to LFX.
 // SPDX-License-Identifier: MIT
 
-// member-tiers-callers grants the three M2M clients that call the
+// member-tiers-callers grants the two M2M clients that call the
 // GET /b2b_orgs/member-tiers/{username} endpoint the `member` relation on
 // team:member_tiers_caller in OpenFGA.
 //
@@ -15,7 +15,6 @@
 // Required flags:
 //
 //	-worker-client-id      Auth0 client ID of the Insights Tiers Service (off-cluster Cloudflare worker)
-//	-pat-service-client-id Auth0 client ID of the LFX V2 PAT Service (on-cluster)
 //	-lfx-one-client-id     Auth0 client ID of the LFX One gateway M2M client (M2M_AUTH_CLIENT_ID from lfx-self-serve)
 //
 // Required env vars (not needed for --dry-run):
@@ -55,13 +54,12 @@ var duplicateWriteIgnore = ClientWriteOptions{
 
 func main() {
 	workerClientID := flag.String("worker-client-id", "", "Auth0 client ID of the Insights Tiers Service (required)")
-	patServiceClientID := flag.String("pat-service-client-id", "", "Auth0 client ID of the LFX V2 PAT Service (required)")
-	lfxOneClientID := flag.String("lfx-one-client-id", "", "Auth0 client ID of the LFX One gateway M2M client (required)")
+	lfxOneClientID := flag.String("lfx-one-client-id", "", "Auth0 client ID of the LFX One gateway M2M client (M2M_AUTH_CLIENT_ID from lfx-self-serve) (required)")
 	dryRun := flag.Bool("dry-run", false, "Print tuples that would be written without writing them")
 	flag.Parse()
 
-	if *workerClientID == "" || *patServiceClientID == "" || *lfxOneClientID == "" {
-		fmt.Fprintln(os.Stderr, "all three -worker-client-id, -pat-service-client-id, and -lfx-one-client-id flags are required")
+	if *workerClientID == "" || *lfxOneClientID == "" {
+		fmt.Fprintln(os.Stderr, "both -worker-client-id and -lfx-one-client-id flags are required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -69,11 +67,6 @@ func main() {
 	tuples := []ClientTupleKey{
 		{
 			User:     fmt.Sprintf("user:%s@clients", *workerClientID),
-			Relation: constants.RelationMember,
-			Object:   teamMemberTiersCaller,
-		},
-		{
-			User:     fmt.Sprintf("user:%s@clients", *patServiceClientID),
 			Relation: constants.RelationMember,
 			Object:   teamMemberTiersCaller,
 		},
