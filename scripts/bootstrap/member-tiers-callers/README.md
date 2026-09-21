@@ -1,6 +1,6 @@
 # member-tiers-callers bootstrap
 
-One-time script that grants the three M2M clients for the Public Insights API
+One-time script that grants the two M2M clients for the Public Insights API
 the `member` relation on `team:member_tiers_caller` in OpenFGA.
 
 The `member_tiers_caller` team gates the Heimdall-protected
@@ -12,17 +12,16 @@ Callers must be members of this team; they do **not** need `global_org_admin`.
 | Client | Auth0 name | Direction |
 |--------|-----------|-----------|
 | Insights Tiers Service | `Insights Tiers Service` | off-cluster (Cloudflare) |
-| LFX V2 PAT Service | `LFX V2 PAT Service` | on-cluster |
 | LFX One gateway | `auth0_client.lfx_one` in auth0-terraform (`M2M_AUTH_CLIENT_ID` in lfx-self-serve) | on-cluster |
 
 ## Getting the client IDs
 
-- **Insights Tiers Service** and **LFX V2 PAT Service**: available after `terraform apply` in auth0-terraform. Read from state with `terraform workspace select <env> && terraform state show auth0_client.insights_tiers_service` (Insights Tiers Service) and `terraform state show 'auth0_client.m2m_clients["LFX V2 PAT Service"]'` (PAT Service).
+- **Insights Tiers Service**: available after `terraform apply` in auth0-terraform. Read from state with `terraform workspace select <env> && terraform state show auth0_client.insights_tiers_service`.
 - **LFX One**: already managed as `auth0_client.lfx_one` in auth0-terraform. Read with `terraform state show auth0_client.lfx_one`. Dev value also in `lfx-self-serve/apps/lfx-one/.env` as `M2M_AUTH_CLIENT_ID`.
 
 ## Usage
 
-Run once per environment after Terraform has applied the two new M2M clients.
+Run once per environment after the required Auth0 clients exist and their client IDs are available.
 
 ```bash
 export OPENFGA_API_URL="http://lfx-platform-openfga.lfx.svc.cluster.local:8080"
@@ -35,7 +34,6 @@ export NATS_URL="nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
 
 go run ./scripts/bootstrap/member-tiers-callers \
   -worker-client-id      <insights-tiers-service-client-id> \
-  -pat-service-client-id <lfx-v2-pat-service-client-id> \
   -lfx-one-client-id     <lfx-one-m2m-client-id>
 ```
 
