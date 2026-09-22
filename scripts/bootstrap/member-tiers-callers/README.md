@@ -14,20 +14,40 @@ Callers must be members of this team; they do **not** need `global_org_admin`.
 | Insights Tiers Service | `Insights Tiers Service` | off-cluster (Cloudflare) |
 | LFX One gateway | `auth0_client.lfx_one` in auth0-terraform (`M2M_AUTH_CLIENT_ID` in lfx-self-serve) | on-cluster |
 
-## Getting the client IDs
+## Getting the values
+
+### Auth0 client IDs
 
 - **Insights Tiers Service**: available after `terraform apply` in auth0-terraform. Read from state with `terraform workspace select <env> && terraform state show auth0_client.insights_tiers_service`.
 - **LFX One**: already managed as `auth0_client.lfx_one` in auth0-terraform. Read with `terraform state show auth0_client.lfx_one`. Dev value also in `lfx-self-serve/apps/lfx-one/.env` as `M2M_AUTH_CLIENT_ID`.
+
+### OpenFGA store and model IDs
+
+The fga-operator injects these into the fga-sync pod at runtime. Read them from the running pod:
+
+```bash
+kubectl exec -n lfx <pod-name> -- \
+  sh -c 'tr "\0" "\n" < /proc/1/environ' | grep OPENFGA
+```
 
 ## Usage
 
 Run once per environment after the required Auth0 clients exist and their client IDs are available.
 
+When running from outside the cluster, port-forward the services first:
+
 ```bash
-export OPENFGA_API_URL="http://lfx-platform-openfga.lfx.svc.cluster.local:8080"
+kubectl port-forward -n lfx svc/lfx-platform-openfga 8080:8080 &
+kubectl port-forward -n lfx svc/lfx-platform-nats 4222:4222 &
+```
+
+Then use `localhost` URLs instead of in-cluster DNS:
+
+```bash
+export OPENFGA_API_URL="http://localhost:8080"
 export OPENFGA_STORE_ID="<store-id>"
 export OPENFGA_AUTH_MODEL_ID="<model-id>"
-export NATS_URL="nats://lfx-platform-nats.lfx.svc.cluster.local:4222"
+export NATS_URL="nats://localhost:4222"
 # Optional — must match the fga-sync deployment's CACHE_BUCKET / nats.cacheFgaKvBucket.name.
 # Defaults to "fga-sync-cache" if unset.
 # export CACHE_BUCKET="fga-sync-cache"
