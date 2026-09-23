@@ -10,7 +10,7 @@ Callers must be members of this team; they do **not** need `global_org_admin`.
 ## Callers
 
 | Client | Auth0 name | Direction |
-|--------|-----------|-----------|
+| ------ | ---------- | --------- |
 | Insights Tiers Service | `Insights Tiers Service` | off-cluster (Cloudflare) |
 | LFX One gateway | `auth0_client.lfx_one` in auth0-terraform (`M2M_AUTH_CLIENT_ID` in lfx-self-serve) | on-cluster |
 
@@ -18,8 +18,11 @@ Callers must be members of this team; they do **not** need `global_org_admin`.
 
 ### Auth0 client IDs
 
-- **Insights Tiers Service**: available after `terraform apply` in auth0-terraform. Read from state with `terraform workspace select <env> && terraform state show auth0_client.insights_tiers_service`.
-- **LFX One**: already managed as `auth0_client.lfx_one` in auth0-terraform. Read with `terraform state show auth0_client.lfx_one`. Dev value also in `lfx-self-serve/apps/lfx-one/.env` as `M2M_AUTH_CLIENT_ID`.
+- **Insights Tiers Service**: available after `terraform apply` in auth0-terraform. Read from state with
+  `terraform workspace select <env> && terraform state show auth0_client.insights_tiers_service`.
+- **LFX One**: already managed as `auth0_client.lfx_one` in auth0-terraform. Read with
+  `terraform state show auth0_client.lfx_one`. Dev value also in `lfx-self-serve/apps/lfx-one/.env`
+  as `M2M_AUTH_CLIENT_ID`.
 
 ### OpenFGA store and model IDs
 
