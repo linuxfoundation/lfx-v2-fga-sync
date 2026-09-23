@@ -23,11 +23,14 @@ Callers must be members of this team; they do **not** need `global_org_admin`.
 
 ### OpenFGA store and model IDs
 
-The fga-operator injects these into the fga-sync pod at runtime. Read them from the running pod:
+Read them from the Kubernetes resources managed by the fga-operator:
 
 ```bash
-kubectl exec -n lfx <pod-name> -- \
-  sh -c 'tr "\0" "\n" < /proc/1/environ' | grep OPENFGA
+# Authorization model ID
+kubectl get authorizationmodel lfx-core -n lfx -o jsonpath='{.spec.instances[0].id}'; echo
+
+# Store ID
+kubectl get store lfx-core -n lfx -o jsonpath='{.spec.id}'; echo
 ```
 
 ## Usage
