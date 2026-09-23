@@ -93,7 +93,8 @@
     "stakater",
     "cloudops",
     "triggerer",
-    "zizmor"
+    "zizmor",
+    "authorizationmodel"
   ],
   "overrides": [
     {
