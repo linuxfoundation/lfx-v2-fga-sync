@@ -13,7 +13,12 @@
     "LICENSE-docs"
   ],
   "words": [
+    "zizmor",
+    "ZIZMOR",
+    "artipacked",
+    "startswith",
     "golangci",
+    "govulncheck",
     "openfga",
     "OPENSEARCH",
     "jetstream",

@@ -76,6 +76,63 @@ build/test/lint workflow. Quick reference:
 - `make check` (runs `fmt`, `vet`, `lint`)
 - `make docker-build`, `make helm-install-local`
 
+### Go Toolchain Version
+
+Freely bump `go.mod`'s `go` directive to the latest available *patch*
+release (e.g. `1.X.Y` → `1.X.{Y+1}`) to pick up security fixes. Do **not**
+bump the *minor* version (e.g. `1.X.x` → `1.{X+1}.x`) unless the user
+explicitly asks for it, **and** you've validated it against the Go version
+MegaLinter itself bundles -- MegaLinter's `golangci-lint` binary is
+statically compiled against a specific Go version and refuses to analyze a
+module whose `go.mod` directive is newer than that. (This is a property of
+`golangci-lint` itself, not of MegaLinter's `osv-scanner`/`trivy`-based
+`REPOSITORY_OSV_SCANNER` check, which is a separate, unrelated linter.) A
+`go.mod` directive newer than what `golangci-lint` was built with breaks it
+outright. This is a hard ceiling with no environment-variable workaround --
+`GOTOOLCHAIN: auto` only affects invocations of the `go` command itself
+and does nothing for this precompiled binary's own internal version
+checks (confirmed empirically: setting it in both the workflow and
+`.mega-linter.yml` still failed).
+
+To find MegaLinter's bundled Go version:
+
+```bash
+# 1. Find the MegaLinter flavor and pinned version tag used in CI.
+grep -A1 'oxsecurity/megalinter' .github/workflows/*.yml
+# e.g. "uses: oxsecurity/megalinter/flavors/<flavor>@<sha>  # <tag>"
+
+# 2. Fetch that flavor's Dockerfile and read its GO_ALPINE_VERSION build
+#    arg -- this is what the final image installs as `go`, not
+#    GO_IMAGE_VERSION (which only applies to an intermediate builder
+#    stage).
+curl -s "https://raw.githubusercontent.com/oxsecurity/megalinter/<tag>/flavors/<flavor>/Dockerfile" \
+  | grep -i 'GO_ALPINE_VERSION'
+```
+
+`go.mod`'s `go` directive must never exceed that bundled version's *minor*
+version (e.g. `1.25`). `golangci-lint`'s own version-check code trims the
+comparison down to major.minor before comparing, so a `go.mod` directive of
+`1.25.4` is treated the same as `1.25.0` -- newer *patch* releases within the
+same minor version (e.g. `1.25.x`) are compatible and do not trip the
+ceiling. Note this bundled version is a proxy for what `golangci-lint`'s own
+binary was built with, not a guarantee -- if a MegaLinter run still fails
+after following this procedure, check `golangci-lint --version` inside the
+pinned MegaLinter image directly to see the Go version it actually reports.
+Staying one minor version behind it leaves room to always take the latest
+patch release for security fixes without ever being blocked by MegaLinter's
+own bundled minor version lagging a newly disclosed vulnerability.
+
+There's no built-in `go` subcommand to look up the latest patch release for
+a given minor version -- query the official `go.dev/dl` JSON feed instead:
+
+```bash
+# Find the latest patch release for the minor version pinned in go.mod.
+MINOR=$(grep '^go ' go.mod | awk '{print $2}' | cut -d. -f1,2)
+curl -s "https://go.dev/dl/?mode=json&include=all" \
+  | jq -r --arg m "go${MINOR}." '.[].version | select(startswith($m))' \
+  | sort -V | tail -1
+```
+
 ## Configuration
 
 ### Required Environment Variables
@@ -145,8 +202,10 @@ Key invariants enforced there:
 # Set environment variables
 export NATS_URL="nats://localhost:4222"
 export OPENFGA_API_URL="http://localhost:8080"
-export OPENFGA_STORE_ID="01K1GTJZW163H839J3YZHD8ZRY"
-export OPENFGA_AUTH_MODEL_ID="01K1H4TFHDSBCZVZ5EP6HHDWE6"
+# Discover the store/model IDs (or use fga-operator's openfga-store pod label
+# to have them populated automatically -- see the Kubernetes section below)
+export OPENFGA_STORE_ID=$(curl -s "$OPENFGA_API_URL/stores" | jq -r '.stores[0].id')
+export OPENFGA_AUTH_MODEL_ID=$(curl -s "$OPENFGA_API_URL/stores/$OPENFGA_STORE_ID/authorization-models?page_size=1" | jq -r '.authorization_models[0].id')
 
 # Run the service
 make run
@@ -159,9 +218,14 @@ make run
 helm install fga-sync ./charts/lfx-v2-fga-sync \
   --set nats.url=nats://lfx-platform-nats.lfx.svc.cluster.local:4222 \
   --set fga.apiUrl=http://lfx-platform-openfga.lfx.svc.cluster.local:8080 \
-  --set fga.storeId=01K1GTJZW163H839J3YZHD8ZRY \
-  --set fga.modelId=01K1H4TFHDSBCZVZ5EP6HHDWE6
+  --set fga.storeId=$OPENFGA_STORE_ID \
+  --set fga.modelId=$OPENFGA_AUTH_MODEL_ID
 ```
+
+Clusters running `fga-operator` populate `OPENFGA_STORE_ID`/`OPENFGA_AUTH_MODEL_ID`
+automatically via the `openfga-store` pod label, so the `--set fga.storeId`/
+`--set fga.modelId` overrides above are only needed for standalone (non-operator)
+setups.
 
 ## Troubleshooting
 
