@@ -44,6 +44,41 @@ const (
 	fgaHTTPMaxIdleConns        = 100
 	fgaHTTPMaxIdleConnsPerHost = 64
 	fgaHTTPMaxConnsPerHost     = 64
+
+	// fgaHTTPTimeout bounds every outbound OpenFGA HTTP request. The SDK
+	// ships a default request timeout, but that default only applies to the
+	// SDK's own http.Client; this service supplies its own client (see
+	// connectFga) to configure the connection pool above, which otherwise
+	// leaves the request completely unbounded. Kept below
+	// accessCheckHandlerTimeout so a hung OpenFGA call cannot itself be the
+	// sole reason the handler deadline trips uninformatively.
+	fgaHTTPTimeout = 8 * time.Second
+
+	// batchCheckMaxParallelRequests caps how many outbound HTTP requests a
+	// single BatchCheck call can fan out (the SDK chunks large batches into
+	// ClientMaxBatchSize-sized requests and defaults to 10-way parallelism
+	// per call). Left at the SDK default, subscriptionConcurrency concurrent
+	// handlers could each fan out 10x, blowing past fgaHTTPMaxConnsPerHost.
+	// A value of 1 would bound that worst case exactly, but query-service's
+	// MaxPageSize (1000) means a single batch can chunk into ~20 requests;
+	// fully serializing those all but guarantees hitting
+	// accessCheckHandlerTimeout on the largest pages. 4 keeps the burst
+	// multiplier well under the SDK default while cutting the worst-case
+	// round count roughly in half; it does not itself guarantee staying
+	// within the timeout budget for a 1000-item batch — that budget is
+	// still enforced by fgaHTTPTimeout/accessCheckHandlerTimeout, and a
+	// batch that large will legitimately time out rather than hang
+	// indefinitely. Revisit once production tracing gives real batch-size
+	// and latency data.
+	batchCheckMaxParallelRequests int32 = 4
+
+	// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
+	// spend, covering the full cache-lookup-then-BatchCheck flow, not just
+	// one outbound call. Without it, a slow or hung OpenFGA call can hold one
+	// of this service's limited concurrent-handler slots open indefinitely,
+	// long after the calling service (query-service) has given up: its
+	// AccessCheckTimeout defaults to 15s, so this must stay below that.
+	accessCheckHandlerTimeout = 10 * time.Second
 )
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
@@ -111,6 +146,7 @@ func connectFga() (IFgaClient, error) {
 		AuthorizationModelId: fgaAuthModelID,
 		HTTPClient: &http.Client{
 			Transport: otelhttp.NewTransport(fgaHTTPTransport()),
+			Timeout:   fgaHTTPTimeout,
 		},
 	})
 	if err != nil {
