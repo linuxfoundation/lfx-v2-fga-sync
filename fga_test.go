@@ -996,8 +996,9 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 
 			// Create mock cache
 			mockCache := new(MockNatsKeyValue)
-			// Mock cache invalidation - called when tuples are deleted
-			mockCache.On("Put", mock.Anything, "inv", []byte("1")).Return(uint64(1), nil).Maybe()
+			// Mock cache invalidation - called (once per unique object+relation
+			// pair touched) when tuples are deleted.
+			mockCache.On("Put", mock.Anything, mock.Anything, []byte("1")).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
 			service := newFgaService(mockClient, mockCache, false)
@@ -1677,7 +1678,7 @@ func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
 	// the invalidation context rather than forwarding the cancelled parent ctx.
 	mockKV.On("Put",
 		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
-		"inv",
+		invalidationKey("project:1", "viewer"),
 		mock.Anything,
 	).Return(uint64(1), nil).Once()
 

@@ -15,6 +15,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
@@ -76,10 +78,22 @@ func withCacheOpSlot(ctx context.Context, fn func()) error {
 	}
 }
 
+// cacheOutcomeKind classifies how a cacheLookupOutcome was resolved, so
+// callers can tally hits/stale-hits/misses for tracing without re-deriving
+// the classification from needsCheck and hitLine.
+type cacheOutcomeKind int
+
+const (
+	cacheOutcomeMiss cacheOutcomeKind = iota
+	cacheOutcomeHit
+	cacheOutcomeStaleHit
+)
+
 // cacheLookupOutcome is the result of resolving a single tuple against the
 // cache: either a ready-to-append response line, or a signal that the tuple
 // still needs to be resolved via OpenFGA.
 type cacheLookupOutcome struct {
+	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
 }
@@ -93,26 +107,68 @@ type CacheLayer struct {
 	bucket INatsKeyValue
 }
 
-// invalidate writes the inv timestamp key. Any cached entry whose KV creation
-// time predates this write is treated as stale on the next lookup. It is a
-// no-op when the bucket is nil (e.g., cache disabled or not yet connected).
-func (c CacheLayer) invalidate(ctx context.Context) error {
-	if c.bucket == nil {
-		return nil
-	}
-	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
-	if err != nil {
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
-		return err
-	}
-	return nil
+// invalidationPair identifies the (object, relation) scope of a cache
+// invalidation marker. Invalidation is scoped to object+relation rather than
+// per-user because that is the granularity a write batch reports (see
+// WriteAndDeleteTuples): OpenFGA does not report which users hold a relation
+// that was deleted by a non-tuple-enumerating condition, so anything more
+// precise would require reading the tuples back before invalidating.
+type invalidationPair struct {
+	object   string
+	relation string
 }
 
-// getLastInvalidation reads the inv key and returns its creation time, or the
-// zero time when no invalidation has been recorded within the TTL window.
-func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
+// invalidationKey derives the NATS-KV-safe marker key for an
+// (object, relation) pair. Base32 without padding matches the encoding
+// already used for "rel." cache entry keys.
+func invalidationKey(object, relation string) string {
+	return "inv." + cacheKeyEncoder.EncodeToString([]byte(object+"#"+relation))
+}
+
+// invalidate writes an invalidation marker for every unique (object,
+// relation) pair in pairs. Any cached entry for that object and relation
+// (across all users) whose KV creation time predates this write is treated
+// as stale on the next lookup. It is a no-op when the bucket is nil (e.g.,
+// cache disabled or not yet connected) or pairs is empty.
+func (c CacheLayer) invalidate(ctx context.Context, pairs []invalidationPair) error {
+	if c.bucket == nil || len(pairs) == 0 {
+		return nil
+	}
+
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	defer span.End()
+
+	seen := make(map[invalidationPair]struct{}, len(pairs))
+	var firstErr error
+	for _, pair := range pairs {
+		if _, ok := seen[pair]; ok {
+			continue
+		}
+		seen[pair] = struct{}{}
+		if _, err := c.bucket.Put(ctx, invalidationKey(pair.object, pair.relation), []byte("1")); err != nil {
+			logger.With(
+				errKey, err,
+				"object", pair.object,
+				"relation", pair.relation,
+			).ErrorContext(ctx, "failed to write cache invalidation marker")
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	span.SetAttributes(
+		attribute.Int("fga_sync.cache.invalidate.pairs_total", len(pairs)),
+		attribute.Int("fga_sync.cache.invalidate.pairs_unique", len(seen)),
+	)
+	return firstErr
+}
+
+// getLastInvalidation reads the invalidation marker for a single (object,
+// relation) pair and returns its creation time, or the zero time when no
+// invalidation has been recorded within the TTL window.
+func (c CacheLayer) getLastInvalidation(ctx context.Context, object, relation string) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, "inv")
+	entry, err := c.bucket.Get(ctx, invalidationKey(object, relation))
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
@@ -125,13 +181,61 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 	return lastInvalidation, nil
 }
 
+// invalidationLookup memoizes per-(object, relation) invalidation timestamps
+// within a single CheckRelationships batch. Many batches request several
+// relations for the same object (or the same relation across a handful of
+// objects), so memoizing keeps this at one KV Get per unique pair rather
+// than one per tuple.
+type invalidationLookup struct {
+	cache CacheLayer
+	mu    sync.Mutex
+	memo  map[invalidationPair]time.Time
+}
+
+func newInvalidationLookup(cache CacheLayer) *invalidationLookup {
+	return &invalidationLookup{cache: cache, memo: make(map[invalidationPair]time.Time)}
+}
+
+// get returns the last invalidation time for (object, relation). A KV error
+// or an unfulfilled cacheOpSem slot is treated as "just invalidated" (the
+// current time) rather than propagated: the caller cannot verify the cached
+// entry's freshness, so the safe default is to fall through to OpenFGA
+// rather than trust a cache we could not confirm is fresh.
+func (l *invalidationLookup) get(ctx context.Context, object, relation string) time.Time {
+	pair := invalidationPair{object: object, relation: relation}
+
+	l.mu.Lock()
+	if t, ok := l.memo[pair]; ok {
+		l.mu.Unlock()
+		return t
+	}
+	l.mu.Unlock()
+
+	var t time.Time
+	var err error
+	if slotErr := withCacheOpSlot(ctx, func() {
+		t, err = l.cache.getLastInvalidation(ctx, object, relation)
+	}); slotErr != nil {
+		t = time.Now()
+	} else if err != nil {
+		logger.With(errKey, err, "object", object, "relation", relation).
+			ErrorContext(ctx, "cache invalidation lookup error; treating entry as stale")
+		t = time.Now()
+	}
+
+	l.mu.Lock()
+	l.memo[pair] = t
+	l.mu.Unlock()
+	return t
+}
+
 // lookupEntry checks the KV cache for a single tuple check item. It never
 // returns a Go error: a miss, a stale hit, or an unexpected KV error all
 // set needsCheck so the tuple is forwarded to OpenFGA instead of dropped.
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	invLookup *invalidationLookup,
 ) cacheLookupOutcome {
 	relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
 	// Encode relation using base32 without padding to conform to the allowed
@@ -146,23 +250,23 @@ func (c CacheLayer) lookupEntry(
 		// treat this the same as any other cache miss so the tuple falls
 		// through to OpenFGA.
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 	switch {
 	case errCache == jetstream.ErrKeyNotFound:
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	case errCache != nil:
-		// This is not expected (we would have exited early already on cache
-		// errors when grabbing the invalidation timestamp), but log and treat
-		// this single tuple as a miss rather than failing the whole request.
+		// This is not expected, but log and treat this single tuple as a miss
+		// rather than failing the whole request.
 		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; treating as miss")
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 
-	// Cache entry was found. If the cache entry is older than the invalidation
-	// timestamp, skip it.
+	// Cache entry was found. If the cache entry is older than this tuple's
+	// object+relation invalidation timestamp, skip it.
+	lastInvalidation := invLookup.get(ctx, tuple.Object, tuple.Relation)
 	if lastInvalidation.After(entry.Created()) {
 		logger.With(
 			"relation_key", relationKey,
@@ -171,7 +275,7 @@ func (c CacheLayer) lookupEntry(
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
 	}
 
 	logger.With(
@@ -182,6 +286,7 @@ func (c CacheLayer) lookupEntry(
 	).DebugContext(ctx, "cache hit")
 	cacheHits.Add(1)
 	return cacheLookupOutcome{
+		kind:    cacheOutcomeHit,
 		hitLine: []byte(fmt.Sprintf("%s\t%s\n", relationKey, string(entry.Value()))),
 	}
 }
@@ -201,6 +306,14 @@ func (c CacheLayer) lookupEntry(
 // above, since every goroutine below is still awaited regardless of whether
 // it ran immediately or queued for a slot.
 func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string) {
+	if len(cacheKeys) == 0 {
+		return
+	}
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
+		trace.WithAttributes(attribute.Int("fga_sync.cache.seed.keys", len(cacheKeys))),
+	)
+	defer span.End()
+
 	var wg sync.WaitGroup
 	for _, cacheKey := range cacheKeys {
 		wg.Add(1)
@@ -285,7 +398,11 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	}
 
 	if len(cachePuts) > 0 {
-		g, gctx := errgroup.WithContext(ctx)
+		putCtx, putSpan := tracer.Start(ctx, "fga_sync.cache.write_back",
+			trace.WithAttributes(attribute.Int("fga_sync.cache.write_back.puts", len(cachePuts))),
+		)
+
+		g, gctx := errgroup.WithContext(putCtx)
 		g.SetLimit(cacheLookupConcurrency)
 		for _, put := range cachePuts {
 			g.Go(func() error {
@@ -303,6 +420,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		// writes finish.
 		//nolint:errcheck // g.Wait() can only return nil; see comment above.
 		_ = g.Wait()
+		putSpan.End()
 	}
 
 	return message
