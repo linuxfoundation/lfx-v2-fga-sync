@@ -29,12 +29,21 @@ type FgaAdapter struct {
 	OpenFgaClient
 }
 
-// BatchCheck executes a batch check request.
+// BatchCheck executes a batch check request. MaxParallelRequests is pinned
+// to batchCheckMaxParallelRequests (see fga.go) rather than left at the SDK
+// default, so one logical BatchCheck call cannot fan out more simultaneous
+// outbound HTTP requests than the concurrency budget the connection pool
+// (fgaHTTPMaxConnsPerHost) and handler concurrency (subscriptionConcurrency)
+// were sized for.
 func (c FgaAdapter) BatchCheck(
 	ctx context.Context,
 	request ClientBatchCheckRequest,
 ) (*openfga.BatchCheckResponse, error) {
-	return c.OpenFgaClient.BatchCheck(ctx).Body(request).Execute()
+	maxParallelRequests := int32(batchCheckMaxParallelRequests)
+	return c.OpenFgaClient.BatchCheck(ctx).
+		Body(request).
+		Options(BatchCheckOptions{MaxParallelRequests: &maxParallelRequests}).
+		Execute()
 }
 
 // Read executes a read request.

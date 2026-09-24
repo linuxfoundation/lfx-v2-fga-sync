@@ -44,6 +44,33 @@ const (
 	fgaHTTPMaxIdleConns        = 100
 	fgaHTTPMaxIdleConnsPerHost = 64
 	fgaHTTPMaxConnsPerHost     = 64
+
+	// fgaHTTPTimeout bounds every outbound OpenFGA HTTP request. The SDK
+	// ships a default request timeout, but that default only applies to the
+	// SDK's own http.Client; this service supplies its own client (see
+	// connectFga) to configure the connection pool above, which otherwise
+	// leaves the request completely unbounded. Kept below
+	// accessCheckHandlerTimeout so a hung OpenFGA call cannot itself be the
+	// sole reason the handler deadline trips uninformatively.
+	fgaHTTPTimeout = 8 * time.Second
+
+	// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
+	// spend, covering the full cache-lookup-then-BatchCheck flow, not just
+	// one outbound call. Without it, a slow or hung OpenFGA call can hold one
+	// of this service's limited concurrent-handler slots open indefinitely,
+	// long after the calling service (query-service) has given up: its
+	// AccessCheckTimeout defaults to 15s, so this must stay below that.
+	accessCheckHandlerTimeout = 10 * time.Second
+
+	// batchCheckMaxParallelRequests caps how many simultaneous outbound HTTP
+	// requests a single BatchCheck call may fan out to (the OpenFGA SDK
+	// default is 10). subscriptionConcurrency (in main.go) already matches
+	// handler concurrency 1:1 to fgaHTTPMaxConnsPerHost, so any additional
+	// per-call fan-out here would let peak simultaneous outbound requests
+	// exceed the connection pool size, causing requests to queue for a
+	// connection instead of running in parallel. Pinning this to 1 keeps the
+	// two knobs consistent.
+	batchCheckMaxParallelRequests = 1
 )
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
@@ -111,6 +138,7 @@ func connectFga() (IFgaClient, error) {
 		AuthorizationModelId: fgaAuthModelID,
 		HTTPClient: &http.Client{
 			Transport: otelhttp.NewTransport(fgaHTTPTransport()),
+			Timeout:   fgaHTTPTimeout,
 		},
 	})
 	if err != nil {
