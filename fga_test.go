@@ -18,6 +18,8 @@ import (
 	. "github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 // MockNatsKeyValue is a mock implementation of INatsKeyValue for testing
@@ -1678,7 +1680,7 @@ func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
 	// the invalidation context rather than forwarding the cancelled parent ctx.
 	mockKV.On("Put",
 		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
-		invalidationKey("project:1", "viewer"),
+		cachekey.Invalidation("project:1", "viewer"),
 		mock.Anything,
 	).Return(uint64(1), nil).Once()
 

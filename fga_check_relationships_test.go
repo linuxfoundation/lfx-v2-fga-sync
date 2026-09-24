@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 // perKeyErrorKV is a minimal INatsKeyValue implementation that lets a test
@@ -80,7 +82,7 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 
 	// Only obj3#viewer has an invalidation marker; obj1's and obj2's pairs
 	// have no marker at all, so they resolve as if never invalidated.
-	obj3InvKey := invalidationKey("obj3", "viewer")
+	obj3InvKey := cachekey.Invalidation("obj3", "viewer")
 
 	kv := &perKeyErrorKV{
 		entries: map[string]jetstream.KeyValueEntry{
@@ -203,7 +205,7 @@ func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 	staleKey := "rel." + cacheKeyEncoder.EncodeToString(
 		[]byte("v1_meeting:79915658043#viewer@user:userA"),
 	)
-	invKey := invalidationKey("v1_meeting:79915658043", "viewer")
+	invKey := cachekey.Invalidation("v1_meeting:79915658043", "viewer")
 
 	kv := &perKeyErrorKV{
 		entries: map[string]jetstream.KeyValueEntry{

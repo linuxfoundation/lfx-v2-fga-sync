@@ -6,12 +6,15 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 type cacheWriteRecorder struct {
@@ -29,6 +32,62 @@ func (r *cacheWriteRecorder) Put(context.Context, string, []byte) (uint64, error
 func (r *cacheWriteRecorder) PutString(_ context.Context, key, _ string) (uint64, error) {
 	r.writes <- key
 	return 1, nil
+}
+
+func TestCacheLayerInvalidateDedupesPairs(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Put", mock.Anything, mock.AnythingOfType("string"), []byte("1")).Return(uint64(1), nil)
+	cache := CacheLayer{bucket: kv}
+
+	pairs := []invalidationPair{
+		{object: "project:1", relation: "viewer"},
+		{object: "project:1", relation: "viewer"},
+		{object: "project:2", relation: "viewer"},
+	}
+	cache.invalidate(context.Background(), pairs)
+
+	kv.AssertNumberOfCalls(t, "Put", 2)
+	kv.AssertCalled(t, "Put", mock.Anything, cachekey.Invalidation("project:1", "viewer"), []byte("1"))
+	kv.AssertCalled(t, "Put", mock.Anything, cachekey.Invalidation("project:2", "viewer"), []byte("1"))
+}
+
+func TestCacheLayerInvalidateNoOpOnEmptyOrNilBucket(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	cache := CacheLayer{bucket: kv}
+	cache.invalidate(context.Background(), nil)
+	kv.AssertNotCalled(t, "Put", mock.Anything, mock.Anything, mock.Anything)
+
+	nilCache := CacheLayer{}
+	nilCache.invalidate(context.Background(), []invalidationPair{{object: "project:1", relation: "viewer"}})
+}
+
+func TestInvalidationLookupMemoizesPerPair(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound).Once()
+	cache := CacheLayer{bucket: kv}
+	lookup := newInvalidationLookup(cache)
+
+	first := lookup.get(context.Background(), "project:1", "viewer")
+	second := lookup.get(context.Background(), "project:1", "viewer")
+
+	assert.Equal(t, first, second)
+	kv.AssertNumberOfCalls(t, "Get", 1)
+}
+
+func TestInvalidationLookupTreatsErrorAsJustInvalidated(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, assert.AnError)
+	cache := CacheLayer{bucket: kv}
+	lookup := newInvalidationLookup(cache)
+
+	before := time.Now()
+	got := lookup.get(context.Background(), "project:1", "viewer")
+	after := time.Now()
+
+	assert.False(t, got.Before(before))
+	assert.False(t, got.After(after))
 }
 
 func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T) {

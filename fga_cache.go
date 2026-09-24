@@ -20,6 +20,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 const (
@@ -118,49 +120,67 @@ type invalidationPair struct {
 	relation string
 }
 
-// invalidationKey derives the NATS-KV-safe marker key for an
-// (object, relation) pair. Base32 without padding matches the encoding
-// already used for "rel." cache entry keys.
-func invalidationKey(object, relation string) string {
-	return "inv." + cacheKeyEncoder.EncodeToString([]byte(object+"#"+relation))
-}
-
 // invalidate writes an invalidation marker for every unique (object,
-// relation) pair in pairs. Any cached entry for that object and relation
-// (across all users) whose KV creation time predates this write is treated
-// as stale on the next lookup. It is a no-op when the bucket is nil (e.g.,
-// cache disabled or not yet connected) or pairs is empty.
-func (c CacheLayer) invalidate(ctx context.Context, pairs []invalidationPair) error {
+// relation) pair in pairs, fanned out with the same bounded concurrency used
+// for cache write-backs so a large multi-pair batch cannot serialize into N
+// sequential JetStream round-trips inside the caller's invalidation timeout.
+// Any cached entry for that object and relation (across all users) whose KV
+// creation time predates this write is treated as stale on the next lookup.
+// Per-pair failures are logged, not propagated: a failed marker write means
+// that pair's cache entries may serve stale results until the next
+// successful invalidation, which is preferable to failing the write/delete
+// that triggered it. It is a no-op when the bucket is nil (e.g., cache
+// disabled or not yet connected) or pairs is empty.
+func (c CacheLayer) invalidate(ctx context.Context, pairs []invalidationPair) {
 	if c.bucket == nil || len(pairs) == 0 {
-		return nil
+		return
 	}
 
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
 	defer span.End()
 
 	seen := make(map[invalidationPair]struct{}, len(pairs))
-	var firstErr error
+	unique := make([]invalidationPair, 0, len(pairs))
 	for _, pair := range pairs {
 		if _, ok := seen[pair]; ok {
 			continue
 		}
 		seen[pair] = struct{}{}
-		if _, err := c.bucket.Put(ctx, invalidationKey(pair.object, pair.relation), []byte("1")); err != nil {
-			logger.With(
-				errKey, err,
-				"object", pair.object,
-				"relation", pair.relation,
-			).ErrorContext(ctx, "failed to write cache invalidation marker")
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
+		unique = append(unique, pair)
 	}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(cacheLookupConcurrency)
+	for _, pair := range unique {
+		g.Go(func() error {
+			if slotErr := withCacheOpSlot(gctx, func() {
+				if _, err := c.bucket.Put(gctx, cachekey.Invalidation(pair.object, pair.relation), []byte("1")); err != nil {
+					logger.With(
+						errKey, err,
+						"object", pair.object,
+						"relation", pair.relation,
+					).ErrorContext(ctx, "failed to write cache invalidation marker")
+				}
+			}); slotErr != nil {
+				logger.With(
+					errKey, slotErr,
+					"object", pair.object,
+					"relation", pair.relation,
+				).ErrorContext(ctx, "failed to write cache invalidation marker")
+			}
+			return nil
+		})
+	}
+	// Every closure above always returns nil (failures are logged per-pair,
+	// not propagated), so g.Wait() can only ever return nil here; it is
+	// called solely to block until every marker write finishes.
+	//nolint:errcheck // g.Wait() can only return nil; see comment above.
+	_ = g.Wait()
+
 	span.SetAttributes(
 		attribute.Int("fga_sync.cache.invalidate.pairs_total", len(pairs)),
-		attribute.Int("fga_sync.cache.invalidate.pairs_unique", len(seen)),
+		attribute.Int("fga_sync.cache.invalidate.pairs_unique", len(unique)),
 	)
-	return firstErr
 }
 
 // getLastInvalidation reads the invalidation marker for a single (object,
@@ -168,7 +188,7 @@ func (c CacheLayer) invalidate(ctx context.Context, pairs []invalidationPair) er
 // invalidation has been recorded within the TTL window.
 func (c CacheLayer) getLastInvalidation(ctx context.Context, object, relation string) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, invalidationKey(object, relation))
+	entry, err := c.bucket.Get(ctx, cachekey.Invalidation(object, relation))
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
