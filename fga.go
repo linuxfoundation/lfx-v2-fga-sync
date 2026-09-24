@@ -54,6 +54,20 @@ const (
 	// sole reason the handler deadline trips uninformatively.
 	fgaHTTPTimeout = 8 * time.Second
 
+	// batchCheckMaxParallelRequests caps how many outbound HTTP requests a
+	// single BatchCheck call can fan out (the SDK chunks large batches into
+	// ClientMaxBatchSize-sized requests and defaults to 10-way parallelism
+	// per call). Left at the SDK default, subscriptionConcurrency concurrent
+	// handlers could each fan out 10x, blowing past fgaHTTPMaxConnsPerHost.
+	// A value of 1 would bound that worst case exactly, but query-service's
+	// MaxPageSize (1000) means a single batch can chunk into ~20 requests,
+	// and serializing all of them risks exceeding fgaHTTPTimeout/
+	// accessCheckHandlerTimeout on its own. 4 keeps the burst multiplier
+	// well under the SDK default while still letting a large batch's chunks
+	// run concurrently enough to fit the timeout budget; revisit once
+	// production tracing gives real batch-size and latency data.
+	batchCheckMaxParallelRequests int32 = 4
+
 	// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
 	// spend, covering the full cache-lookup-then-BatchCheck flow, not just
 	// one outbound call. Without it, a slow or hung OpenFGA call can hold one
@@ -61,16 +75,6 @@ const (
 	// long after the calling service (query-service) has given up: its
 	// AccessCheckTimeout defaults to 15s, so this must stay below that.
 	accessCheckHandlerTimeout = 10 * time.Second
-
-	// batchCheckMaxParallelRequests caps how many simultaneous outbound HTTP
-	// requests a single BatchCheck call may fan out to (the OpenFGA SDK
-	// default is 10). subscriptionConcurrency (in main.go) already matches
-	// handler concurrency 1:1 to fgaHTTPMaxConnsPerHost, so any additional
-	// per-call fan-out here would let peak simultaneous outbound requests
-	// exceed the connection pool size, causing requests to queue for a
-	// connection instead of running in parallel. Pinning this to 1 keeps the
-	// two knobs consistent.
-	batchCheckMaxParallelRequests = 1
 )
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport

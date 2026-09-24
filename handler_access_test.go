@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -251,6 +252,38 @@ func TestAccessCheckHandler(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAccessCheckHandlerBoundsContextDeadline verifies accessCheckHandler
+// wraps the incoming context with accessCheckHandlerTimeout, so a slow or
+// hung OpenFGA call cannot hold the handler's concurrency slot open past
+// the budget query-service's caller-side AccessCheckTimeout expects.
+func TestAccessCheckHandlerBoundsContextDeadline(t *testing.T) {
+	msg := CreateMockNatsMsg([]byte("project:123#writer@user:456"))
+	msg.reply = "reply.subject"
+	msg.On("Respond", mock.Anything).Return(nil).Once()
+
+	service := setupService()
+
+	var sawDeadline bool
+	var deadlineDuration time.Duration
+	resultMap := make(map[string]openfga.BatchCheckSingleResult)
+	resultMap["1"] = openfga.BatchCheckSingleResult{Allowed: openfga.PtrBool(true)}
+	service.fgaService.store.client.(*MockFgaClient).On("BatchCheck", mock.MatchedBy(func(ctx context.Context) bool {
+		deadline, ok := ctx.Deadline()
+		sawDeadline = ok
+		if ok {
+			deadlineDuration = time.Until(deadline)
+		}
+		return true
+	}), mock.Anything).Return(&openfga.BatchCheckResponse{Result: &resultMap}, nil)
+	service.fgaService.cache.bucket.(*MockKeyValue).On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil)
+
+	err := service.accessCheckHandler(context.Background(), msg)
+	require.NoError(t, err)
+
+	require.True(t, sawDeadline, "expected accessCheckHandler to set a context deadline before calling BatchCheck")
+	assert.LessOrEqual(t, deadlineDuration, accessCheckHandlerTimeout)
 }
 
 // TestProcessStandardAccessUpdate tests the processStandardAccessUpdate function with intermediate and hard scenarios

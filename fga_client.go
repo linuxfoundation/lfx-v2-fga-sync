@@ -39,7 +39,7 @@ func (c FgaAdapter) BatchCheck(
 	ctx context.Context,
 	request ClientBatchCheckRequest,
 ) (*openfga.BatchCheckResponse, error) {
-	maxParallelRequests := int32(batchCheckMaxParallelRequests)
+	maxParallelRequests := batchCheckMaxParallelRequests
 	return c.OpenFgaClient.BatchCheck(ctx).
 		Body(request).
 		Options(BatchCheckOptions{MaxParallelRequests: &maxParallelRequests}).
