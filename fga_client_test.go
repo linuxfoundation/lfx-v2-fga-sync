@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	openfga "github.com/openfga/go-sdk"
 	. "github.com/openfga/go-sdk/client"
@@ -48,6 +49,12 @@ func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 			mu.Unlock()
 		}()
 
+		// Hold the request open briefly so concurrent chunks overlap in
+		// time; an immediate response could let requests complete
+		// sequentially even without a parallelism cap, making the
+		// maxInFlight assertion below pass vacuously.
+		time.Sleep(20 * time.Millisecond)
+
 		result := map[string]openfga.BatchCheckSingleResult{
 			"1": {Allowed: openfga.PtrBool(true)},
 		}
@@ -79,6 +86,8 @@ func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Greater(t, requestCount, 1, "expected the SDK to chunk 101 items into multiple requests")
+	require.Greaterf(t, maxInFlight, 1,
+		"requests never overlapped (maxInFlight=%d); the parallelism assertion below would pass vacuously", maxInFlight)
 	require.LessOrEqualf(t, maxInFlight, int(batchCheckMaxParallelRequests),
 		"BatchCheck fanned out %d concurrent requests, want at most batchCheckMaxParallelRequests (%d)",
 		maxInFlight, batchCheckMaxParallelRequests)
