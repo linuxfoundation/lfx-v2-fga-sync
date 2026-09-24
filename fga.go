@@ -179,9 +179,11 @@ func (s FgaService) WriteAndDeleteTuples(
 		pairs := make([]invalidationPair, 0, len(writes)+len(deletes))
 		for _, w := range writes {
 			pairs = append(pairs, invalidationPair{object: w.Object, relation: w.Relation})
+			pairs = append(pairs, expandCascadingPairs(w.Object, w.Relation)...)
 		}
 		for _, d := range deletes {
 			pairs = append(pairs, invalidationPair{object: d.Object, relation: d.Relation})
+			pairs = append(pairs, expandCascadingPairs(d.Object, d.Relation)...)
 		}
 		// Use a detached context with a short deadline so a canceled parent
 		// (e.g. expired deadline after batch 1 committed) cannot block the Put.

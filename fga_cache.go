@@ -10,6 +10,7 @@ import (
 	"expvar"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,90 @@ type invalidationPair struct {
 	relation string
 }
 
+// wildcardObject is the sentinel object used in an invalidationPair to mean
+// "every object of this type", for relations whose evaluated value cascades
+// across the OpenFGA object hierarchy (see cascadingRelations). No real
+// object ID is ever literally "*", so it cannot collide with a genuine
+// object+relation invalidation marker.
+const wildcardObject = "*"
+
+// cascadingRelations lists, per object type, the relations that compose
+// "X from parent" (or "from child") in charts/lfx-platform/files/model.fga:
+// project.owner/writer/auditor/marketing_ops/marketing_auditor, and
+// b2b_org.writer/auditor. A write to one of these relations on object O does
+// not only change whether O's own relation holds — because the relation
+// cascades, it can also change the *evaluated* result of a check on any
+// descendant (or, for b2b_org, ancestor) object, even though that object was
+// never itself written. The per-(object, relation) invalidation scoping
+// keyed to the tuple actually written cannot express "invalidate every
+// descendant of O", since that set isn't known without a hierarchy walk. So
+// for these relations only, invalidation additionally targets a
+// per-(type, relation) wildcard marker that covers every object of that
+// type, trading some extra cache misses for correctness. Keep in sync with
+// model.fga; a relation that stops cascading (or a new one that starts)
+// should be removed from (or added to) this map.
+var cascadingRelations = map[string]map[string]bool{
+	"project": {
+		"owner":             true,
+		"writer":            true,
+		"auditor":           true,
+		"marketing_ops":     true,
+		"marketing_auditor": true,
+	},
+	"b2b_org": {
+		"writer":  true,
+		"auditor": true,
+	},
+}
+
+// hierarchyEdgeRelations names the relation(s), on the same object types
+// listed in cascadingRelations, whose tuple values define the parent/child
+// edges those cascades traverse (project.parent; b2b_org.parent and
+// b2b_org.child). Writing or deleting one of these edge tuples changes which
+// objects a cascading relation reaches without writing that relation
+// directly, so it must trigger the same wildcard invalidation as a direct
+// write to one of that type's cascading relations.
+var hierarchyEdgeRelations = map[string]bool{
+	"parent": true,
+	"child":  true,
+}
+
+// objectType returns the OpenFGA type portion of an "type:id" object
+// string, or "" if object has no ':' separator.
+func objectType(object string) string {
+	if idx := strings.IndexByte(object, ':'); idx >= 0 {
+		return object[:idx]
+	}
+	return ""
+}
+
+// expandCascadingPairs returns the wildcard invalidation pair(s) that must
+// additionally be written for a tuple write/delete on (object, relation), on
+// top of the object-scoped pair every write already gets. It returns nil for
+// types/relations outside cascadingRelations/hierarchyEdgeRelations, which
+// is the common case.
+func expandCascadingPairs(object, relation string) []invalidationPair {
+	typ := objectType(object)
+	cascading, ok := cascadingRelations[typ]
+	if !ok {
+		return nil
+	}
+
+	if cascading[relation] {
+		return []invalidationPair{{object: typ + ":" + wildcardObject, relation: relation}}
+	}
+
+	if hierarchyEdgeRelations[relation] {
+		pairs := make([]invalidationPair, 0, len(cascading))
+		for r := range cascading {
+			pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
+		}
+		return pairs
+	}
+
+	return nil
+}
+
 // invalidate writes an invalidation marker for every unique (object,
 // relation) pair in pairs, fanned out with the same bounded concurrency used
 // for cache write-backs so a large multi-pair batch cannot serialize into N
@@ -221,7 +306,28 @@ func newInvalidationLookup(cache CacheLayer) *invalidationLookup {
 // current time) rather than propagated: the caller cannot verify the cached
 // entry's freshness, so the safe default is to fall through to OpenFGA
 // rather than trust a cache we could not confirm is fresh.
+//
+// When (type, relation) is in cascadingRelations, the per-(type, relation)
+// wildcard marker is also consulted and the later of the two timestamps
+// wins: a write to an ancestor/descendant object (or to the parent/child
+// edge itself) invalidates this object's cached result too, even though
+// this object's own (object, relation) marker was never touched. See
+// expandCascadingPairs.
 func (l *invalidationLookup) get(ctx context.Context, object, relation string) time.Time {
+	t := l.getOne(ctx, object, relation)
+
+	if cascading, ok := cascadingRelations[objectType(object)]; ok && cascading[relation] {
+		if wt := l.getOne(ctx, objectType(object)+":"+wildcardObject, relation); wt.After(t) {
+			t = wt
+		}
+	}
+
+	return t
+}
+
+// getOne returns the last invalidation time for a single, literal (object,
+// relation) marker, memoizing the result within this batch.
+func (l *invalidationLookup) getOne(ctx context.Context, object, relation string) time.Time {
 	pair := invalidationPair{object: object, relation: relation}
 
 	l.mu.Lock()

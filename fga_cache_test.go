@@ -90,6 +90,98 @@ func TestInvalidationLookupTreatsErrorAsJustInvalidated(t *testing.T) {
 	assert.False(t, got.After(after))
 }
 
+func TestExpandCascadingPairs(t *testing.T) {
+	tests := []struct {
+		name     string
+		object   string
+		relation string
+		want     []invalidationPair
+	}{
+		{
+			name:     "cascading project relation gets a wildcard pair",
+			object:   "project:1",
+			relation: "writer",
+			want:     []invalidationPair{{object: "project:*", relation: "writer"}},
+		},
+		{
+			name:     "cascading b2b_org relation gets a wildcard pair",
+			object:   "b2b_org:1",
+			relation: "auditor",
+			want:     []invalidationPair{{object: "b2b_org:*", relation: "auditor"}},
+		},
+		{
+			name:     "non-cascading project relation gets nothing extra",
+			object:   "project:1",
+			relation: "viewer",
+			want:     nil,
+		},
+		{
+			name:     "non-cascading type gets nothing extra",
+			object:   "committee:1",
+			relation: "writer",
+			want:     nil,
+		},
+		{
+			name:     "project parent edge write fans out to every cascading project relation",
+			object:   "project:1",
+			relation: "parent",
+			want: []invalidationPair{
+				{object: "project:*", relation: "owner"},
+				{object: "project:*", relation: "writer"},
+				{object: "project:*", relation: "auditor"},
+				{object: "project:*", relation: "marketing_ops"},
+				{object: "project:*", relation: "marketing_auditor"},
+			},
+		},
+		{
+			name:     "b2b_org child edge write fans out to every cascading b2b_org relation",
+			object:   "b2b_org:1",
+			relation: "child",
+			want: []invalidationPair{
+				{object: "b2b_org:*", relation: "writer"},
+				{object: "b2b_org:*", relation: "auditor"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := expandCascadingPairs(tt.object, tt.relation)
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
+}
+
+func TestInvalidationLookupCascadingRelationConsultsWildcardMarker(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	objectEntry := &MockKeyValueEntry{created: time.Now().Add(-time.Hour)}
+	wildcardEntry := &MockKeyValueEntry{created: time.Now()}
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "writer")).
+		Return(objectEntry, nil)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "writer")).
+		Return(wildcardEntry, nil)
+	cache := CacheLayer{bucket: kv}
+	lookup := newInvalidationLookup(cache)
+
+	got := lookup.get(context.Background(), "project:1", "writer")
+
+	assert.Equal(t, wildcardEntry.created, got, "the later wildcard marker must win over the object-scoped one")
+	kv.AssertNumberOfCalls(t, "Get", 2)
+}
+
+func TestInvalidationLookupNonCascadingRelationSkipsWildcardLookup(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	cache := CacheLayer{bucket: kv}
+	lookup := newInvalidationLookup(cache)
+
+	lookup.get(context.Background(), "project:1", "viewer")
+
+	kv.AssertNumberOfCalls(t, "Get", 1)
+	kv.AssertNotCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:*", "viewer"))
+}
+
 func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T) {
 	tests := []struct {
 		name          string
