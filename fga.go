@@ -60,12 +60,16 @@ const (
 	// per call). Left at the SDK default, subscriptionConcurrency concurrent
 	// handlers could each fan out 10x, blowing past fgaHTTPMaxConnsPerHost.
 	// A value of 1 would bound that worst case exactly, but query-service's
-	// MaxPageSize (1000) means a single batch can chunk into ~20 requests,
-	// and serializing all of them risks exceeding fgaHTTPTimeout/
-	// accessCheckHandlerTimeout on its own. 4 keeps the burst multiplier
-	// well under the SDK default while still letting a large batch's chunks
-	// run concurrently enough to fit the timeout budget; revisit once
-	// production tracing gives real batch-size and latency data.
+	// MaxPageSize (1000) means a single batch can chunk into ~20 requests;
+	// fully serializing those all but guarantees hitting
+	// accessCheckHandlerTimeout on the largest pages. 4 keeps the burst
+	// multiplier well under the SDK default while cutting the worst-case
+	// round count roughly in half; it does not itself guarantee staying
+	// within the timeout budget for a 1000-item batch — that budget is
+	// still enforced by fgaHTTPTimeout/accessCheckHandlerTimeout, and a
+	// batch that large will legitimately time out rather than hang
+	// indefinitely. Revisit once production tracing gives real batch-size
+	// and latency data.
 	batchCheckMaxParallelRequests int32 = 4
 
 	// accessCheckHandlerTimeout bounds the total time accessCheckHandler may

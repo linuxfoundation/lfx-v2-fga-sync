@@ -284,6 +284,9 @@ func TestAccessCheckHandlerBoundsContextDeadline(t *testing.T) {
 
 	require.True(t, sawDeadline, "expected accessCheckHandler to set a context deadline before calling BatchCheck")
 	assert.LessOrEqual(t, deadlineDuration, accessCheckHandlerTimeout)
+	assert.Greaterf(t, deadlineDuration, accessCheckHandlerTimeout-time.Second,
+		"deadline %s is far shorter than accessCheckHandlerTimeout (%s); a regression may have shrunk the budget",
+		deadlineDuration, accessCheckHandlerTimeout)
 }
 
 // TestProcessStandardAccessUpdate tests the processStandardAccessUpdate function with intermediate and hard scenarios
