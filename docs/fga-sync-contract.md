@@ -286,8 +286,22 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 Invalidation is scoped to `(object, relation)`, not per-user: OpenFGA batch
 writes/deletes are reported at that granularity, and resolving to individual
 users would require reading tuples back before invalidating. A write to
-`project:123#writer` only invalidates cached entries for that object and
-relation; it does not affect `project:123#viewer` or `project:456#writer`.
+`project:123#writer` invalidates cached entries for that object and
+relation; it does not affect `project:123#viewer`.
+
+For relations that cascade through the OpenFGA object hierarchy — `project`'s
+`owner`, `writer`, `auditor`, `marketing_ops`, `marketing_auditor`, and
+`b2b_org`'s `writer`, `auditor` (see `charts/lfx-platform/files/model.fga`'s
+`X from parent`/`from child` definitions) — a write also invalidates a
+`(type, relation)` wildcard marker covering every object of that type, since
+an ancestor or descendant write (or a `parent`/`child` edge write itself, i.e.
+reparenting) can change what those relations evaluate to on this object
+without ever writing this object's own tuple. So a write to
+`project:123#writer` *does* affect the cached `writer` result for
+`project:456`, but a write to `project:123#viewer` (non-cascading) still only
+affects `project:123`. See `cascadingRelations` in `fga_cache.go` for the
+exact set; it is a hand-maintained mirror of the model file and must be kept
+in sync when cascading relations are added, removed, or changed there.
 
 ### Debugging cache behavior
 
@@ -296,9 +310,10 @@ relation; it does not affect `project:123#viewer` or `project:456#writer`.
   counts for a `CheckRelationships` batch), `fga_sync.cache.write_back`,
   `fga_sync.cache.invalidate`, and `fga_sync.cache.seed`, nested under the
   `nats.process` consumer span for the message being handled.
-- If access checks return wrong/old results, look for `"cache invalidation
-  failed"` or `"cache invalidation lookup error"` in fga-sync logs. The
-  marker for that object+relation pair may have failed to bump or to read.
+- If access checks return wrong/old results, look for `"failed to write cache
+  invalidation marker"` or `"cache invalidation lookup error"` in fga-sync
+  logs. The marker for that object+relation pair may have failed to bump or
+  to read.
 - Manually invalidate a specific object+relation by writing any value to
   `inv.{base32(object#relation)}` (no padding) in the `fga-sync-cache`
   bucket; this forces every cached entry for that pair to be treated as
