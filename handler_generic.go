@@ -87,7 +87,8 @@ func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message
 }
 
 // genericDeleteAccessHandler handles universal delete_access operations.
-// This removes publisher-managed tuples while preserving externally managed team grants.
+// This removes publisher-managed tuples, including global_* team grants, while
+// preserving team grants on other relations.
 //
 // NATS Subject: lfx.fga-sync.delete_access
 //
@@ -119,7 +120,8 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 	// Build object identifier using standard helper
 	object := buildObjectID(genericMsg.ObjectType, data.UID)
 
-	// Use existing generic sync with empty tuples. SyncObjectTuples preserves team grants.
+	// Use the generic sync with empty desired state. It preserves non-global
+	// team grants while deleting publisher-managed global_* team grants.
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, nil)
 	if err != nil {
 		logger.With(

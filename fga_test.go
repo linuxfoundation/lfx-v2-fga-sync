@@ -1313,14 +1313,15 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 	}
 }
 
-// TestSyncObjectTuples_PreserveTeamGrants tests that team member grant tuples are never deleted
-// during a sync operation, regardless of the desired relations list.
+// TestSyncObjectTuples_PreserveTeamGrants tests which team member grant tuples are
+// preserved during a sync operation.
 func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 	tests := []struct {
 		name             string
 		object           string
 		desiredRelations []ClientTupleKey
 		existingTuples   []openfga.Tuple
+		excludeRelations []string
 		expectedWrites   int
 		expectedDeletes  int
 		description      string
@@ -1357,7 +1358,7 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			description:     "should delete stale user tuple but preserve team member grant",
 		},
 		{
-			name:   "multiple team member grants across multiple relations all preserved",
+			name:   "multiple non-global team member grants are preserved",
 			object: "project:proj-3",
 			desiredRelations: []ClientTupleKey{
 				{User: "user:*", Relation: "viewer", Object: "project:proj-3"},
@@ -1371,13 +1372,13 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			},
 			expectedWrites:  0,
 			expectedDeletes: 0,
-			description:     "should preserve all team member grant tuples regardless of relation",
+			description:     "should preserve team member grants on non-global relations",
 		},
 		{
 			// delete-all path: SyncObjectTuples(ctx, object, nil) is called by genericDeleteAccessHandler.
-			// Team member grants are intentionally preserved even on delete-all because teams are managed
-			// externally to the attribute sync/indexing flow.
-			name:             "delete-all path preserves team member grants while removing user tuples",
+			// Non-global team member grants are intentionally preserved even on delete-all because they
+			// are managed externally to the attribute sync/indexing flow.
+			name:             "delete-all path preserves non-global team grants while removing user tuples",
 			object:           "project:proj-4",
 			desiredRelations: nil,
 			existingTuples: []openfga.Tuple{
@@ -1387,7 +1388,30 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			},
 			expectedWrites:  0,
 			expectedDeletes: 2, // user tuples deleted; team member grant preserved
-			description:     "delete-all should remove user tuples but preserve team member grants",
+			description:     "delete-all should remove user tuples but preserve non-global team member grants",
+		},
+		{
+			name:             "stale global team grant is deleted",
+			object:           "project:proj-5",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "team:global-project-writers#member", Relation: "global_writer", Object: "project:proj-5"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 1,
+			description:     "should delete a stale team member grant on a global relation",
+		},
+		{
+			name:             "excluded global team grant is preserved",
+			object:           "project:proj-6",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "team:global-project-writers#member", Relation: "global_writer", Object: "project:proj-6"}},
+			},
+			excludeRelations: []string{"global_writer"},
+			expectedWrites:   0,
+			expectedDeletes:  0,
+			description:      "should preserve an excluded global team member grant",
 		},
 	}
 
@@ -1405,9 +1429,9 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 					if len(req.Writes) != tt.expectedWrites || len(req.Deletes) != tt.expectedDeletes {
 						return false
 					}
-					// Assert no team member grants appear in deletes.
+					// Assert only global team member grants appear in deletes.
 					for _, del := range req.Deletes {
-						if strings.HasPrefix(del.User, "team:") {
+						if strings.HasPrefix(del.User, "team:") && !strings.HasPrefix(del.Relation, "global_") {
 							return false
 						}
 					}
@@ -1420,7 +1444,12 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 
 			service := newFgaService(mockClient, mockCache, false)
-			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations)
+			writes, deletes, err := service.SyncObjectTuples(
+				context.Background(),
+				tt.object,
+				tt.desiredRelations,
+				tt.excludeRelations...,
+			)
 
 			if err != nil {
 				t.Errorf("%s: unexpected error: %v", tt.description, err)
@@ -1431,10 +1460,10 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			if len(deletes) != tt.expectedDeletes {
 				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
 			}
-			// Verify no team member grant tuples appear in deletes.
+			// Verify only global team member grant tuples appear in deletes.
 			for _, del := range deletes {
-				if strings.HasPrefix(del.User, "team:") {
-					t.Errorf("%s: team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
+				if strings.HasPrefix(del.User, "team:") && !strings.HasPrefix(del.Relation, "global_") {
+					t.Errorf("%s: non-global team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
 				}
 			}
 			mockClient.AssertExpectations(t)

@@ -157,6 +157,9 @@ type GenericFGAMessage struct {
   enabling permission inheritance from the parent project.
 - `exclude_relations` lets a publisher manage some relations separately (e.g. members
   managed by a different subject). Those relations are left untouched.
+- Team-subject tuples are preserved when their relation name does not begin
+  with `global_`. A `global_*` team relation is part of the publisher-managed
+  full sync and is removed when omitted unless it appears in `exclude_relations`.
 
 ### `delete_access` (on resource delete)
 
@@ -169,7 +172,9 @@ type GenericFGAMessage struct {
 ```
 
 Removes publisher-managed OpenFGA tuples for that object while preserving
-externally managed `team:*` grants.
+externally managed `team:*` grants on relations whose names do not begin with
+`global_`. Team grants on `global_*` relations are publisher-managed and are
+removed by `delete_access`.
 
 ### `member_put` / `member_remove`
 
