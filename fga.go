@@ -321,10 +321,10 @@ func (s FgaService) SyncObjectTuples(
 				).DebugContext(ctx, "skipping deletion of excluded relation")
 				continue
 			}
-			// Preserve team member grant tuples (e.g. team:my-team#member) — these
-			// are managed by a separate workflow and must not be clobbered by
-			// resource service sync operations.
-			if strings.HasPrefix(tuple.Key.User, "team:") {
+			// Preserve externally managed team grants. Relations prefixed with
+			// global_ are publisher-managed and must remain removable by sync.
+			if strings.HasPrefix(tuple.Key.User, constants.ObjectTypeTeam) &&
+				!strings.HasPrefix(tuple.Key.Relation, "global_") {
 				logger.With(
 					"user", tuple.Key.User,
 					"relation", tuple.Key.Relation,
