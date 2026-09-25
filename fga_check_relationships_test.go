@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 // perKeyErrorKV is a minimal INatsKeyValue implementation that lets a test
@@ -78,10 +80,14 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 	errKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("obj4#viewer@user:userD"))
 	// obj2 is a deliberate miss: no entry, no configured error.
 
+	// Only obj3#viewer has an invalidation marker; obj1's and obj2's pairs
+	// have no marker at all, so they resolve as if never invalidated.
+	obj3InvKey := cachekey.Invalidation("obj3", "viewer")
+
 	kv := &perKeyErrorKV{
 		entries: map[string]jetstream.KeyValueEntry{
-			"inv":  fixedEntry{value: []byte("1"), created: invalidatedBefore},
-			hitKey: fixedEntry{value: []byte("true"), created: now},
+			obj3InvKey: fixedEntry{value: []byte("1"), created: invalidatedBefore},
+			hitKey:     fixedEntry{value: []byte("true"), created: now},
 			// Created before the invalidation cutoff, so this is a stale hit.
 			staleKey: fixedEntry{value: []byte("true"), created: invalidatedBefore.Add(-time.Hour)},
 		},
@@ -199,10 +205,11 @@ func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 	staleKey := "rel." + cacheKeyEncoder.EncodeToString(
 		[]byte("v1_meeting:79915658043#viewer@user:userA"),
 	)
+	invKey := cachekey.Invalidation("v1_meeting:79915658043", "viewer")
 
 	kv := &perKeyErrorKV{
 		entries: map[string]jetstream.KeyValueEntry{
-			"inv": fixedEntry{value: []byte("1"), created: invalidatedBefore},
+			invKey: fixedEntry{value: []byte("1"), created: invalidatedBefore},
 			// Cached as allowed before the last invalidation, so it's stale
 			// and must be re-checked rather than trusted.
 			staleKey: fixedEntry{value: []byte("true"), created: invalidatedBefore.Add(-time.Hour)},
@@ -299,14 +306,14 @@ func (k *concurrencyTrackingKV) PutString(context.Context, string, string) (uint
 func TestCheckRelationshipsBoundsCacheLookupConcurrency(t *testing.T) {
 	const tupleCount = cacheLookupConcurrency * 3
 
+	// No invalidation markers are seeded: every tuple's (object, relation)
+	// pair has no marker, so getLastInvalidation is a guaranteed miss
+	// (jetstream.ErrKeyNotFound) for each of them, still exercising one Get
+	// per unique pair through the same bounded-concurrency path.
 	kv := &concurrencyTrackingKV{
 		sleep:   20 * time.Millisecond,
-		entries: map[string]jetstream.KeyValueEntry{"inv": nil},
+		entries: map[string]jetstream.KeyValueEntry{},
 	}
-	// "inv" has no fixed entry above (invalidation lookup goes through a
-	// separate path); give it a real entry so getLastCacheInvalidation
-	// succeeds without needing another fake type.
-	kv.entries["inv"] = fixedEntry{value: []byte("1"), created: time.Now().Add(-time.Hour)}
 
 	tuples := make([]ClientCheckRequest, 0, tupleCount)
 	expectedResults := make(map[string]openfga.BatchCheckSingleResult, tupleCount)
@@ -411,11 +418,13 @@ func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
 	const concurrentRequests = 4
 	const tupleCount = cacheLookupConcurrency
 
+	// No invalidation markers are seeded (see comment in
+	// TestCheckRelationshipsBoundsCacheLookupConcurrency); every relation
+	// entry below is treated as fresh.
 	kv := &concurrencyTrackingKV{
 		sleep:   20 * time.Millisecond,
-		entries: map[string]jetstream.KeyValueEntry{"inv": nil},
+		entries: map[string]jetstream.KeyValueEntry{},
 	}
-	kv.entries["inv"] = fixedEntry{value: []byte("1"), created: time.Now().Add(-time.Hour)}
 
 	requestTuples := make([][]ClientCheckRequest, concurrentRequests)
 	for r := range concurrentRequests {

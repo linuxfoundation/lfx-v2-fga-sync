@@ -125,7 +125,7 @@ Key invariants enforced there:
 - All sync handlers are generic over `GenericFGAMessage`; new resource types must NOT require fga-sync code changes.
 - `FgaService` stays object-agnostic; domain logic lives in handlers.
 - Subject strings, queue group (`lfx.fga-sync.queue`), and KV bucket name come from `pkg/constants`, never inlined at call sites.
-- Cache invalidation uses a single `inv` timestamp key; every successful OpenFGA write must bump it.
+- Cache invalidation uses per-`(object, relation)` `inv.*` timestamp markers; every successful OpenFGA write/delete bumps the markers for the pairs it touched.
 - Service continues running on individual message failures; sync handlers return errors for subscription-layer logging and only send `OK` replies after successful processing.
 
 ## Performance and Observability
@@ -169,6 +169,7 @@ helm install fga-sync ./charts/lfx-v2-fga-sync \
 - **NATS / OpenFGA connection**: verify `NATS_URL` and `OPENFGA_API_URL`.
 - **Cache or stale access checks**: see the cache behavior and "Debugging Access Issues"
   sections in `docs/fga-sync-contract.md` (covers `/debug/vars` counters, the
-  `inv` invalidation key, and the `scripts/audit/list-tuple-changes` CLI).
+  per-`(object, relation)` `inv.*` invalidation markers, and the
+  `scripts/audit/list-tuple-changes` CLI).
 - **Verbose logging**: set `DEBUG=true`.
 - **Health**: `/livez` and `/readyz`.

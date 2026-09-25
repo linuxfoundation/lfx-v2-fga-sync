@@ -284,19 +284,49 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 | --- | --- |
 | Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
-| Invalidation | A single `inv` timestamp key, every successful OpenFGA write bumps it, making all older cached entries stale |
+| Invalidation | Per-`(object, relation)` timestamp keys (`inv.{encoded-object#relation}`); a write/delete batch bumps the marker for every unique `(object, relation)` pair it touches, making older cached entries for that object and relation stale across all users |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
+
+Invalidation is scoped to `(object, relation)`, not per-user: OpenFGA batch
+writes/deletes are reported at that granularity, and resolving to individual
+users would require reading tuples back before invalidating. A write to
+`project:123#writer` invalidates cached entries for that object and
+relation; it does not affect `project:123#viewer`.
+
+For relations that cascade through the OpenFGA object hierarchy — `project`'s
+`owner`, `writer`, `auditor`, `marketing_ops`, `marketing_auditor`, and
+`b2b_org`'s `writer`, `auditor` (see `charts/lfx-platform/files/model.fga`'s
+`X from parent`/`from child` definitions) — a write also invalidates a
+`(type, relation)` wildcard marker covering every object of that type, since
+an ancestor or descendant write (or a `parent`/`child` edge write itself, i.e.
+reparenting) can change what those relations evaluate to on this object
+without ever writing this object's own tuple. So a write to
+`project:123#writer` *does* affect the cached `writer` result for
+`project:456`, but a write to `project:123#viewer` (non-cascading) still only
+affects `project:123`. See `cascadingRelations` in `fga_cache.go` for the
+exact set; it is a hand-maintained mirror of the model file and must be kept
+in sync when cascading relations are added, removed, or changed there.
 
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.
-- If access checks return wrong/old results, look for `"cache invalidation failed"`
-  in fga-sync logs. The `inv` key may have failed to bump.
-- Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`
-  bucket; this forces every cached entry to be treated as stale on next read.
-- A successful any-type OpenFGA write re-invalidates. When in doubt, trigger any
-  `update_access` on any resource and stale entries clear globally.
+- OTel spans for cache operations: `fga_sync.cache.lookup` (hit/stale/miss
+  counts for a `CheckRelationships` batch), `fga_sync.cache.write_back`,
+  `fga_sync.cache.invalidate`, and `fga_sync.cache.seed`, nested under the
+  `nats.process` consumer span for the message being handled.
+- If access checks return wrong/old results, look for `"failed to write cache
+  invalidation marker"` or `"cache invalidation lookup error"` in fga-sync
+  logs. The marker for that object+relation pair may have failed to bump or
+  to read.
+- Manually invalidate a specific object+relation by writing any value to
+  `inv.{base32(object#relation)}` (no padding) in the `fga-sync-cache`
+  bucket; this forces every cached entry for that pair to be treated as
+  stale on next read. There is no single key that invalidates the whole
+  cache at once.
+- A successful OpenFGA write/delete re-invalidates only the `(object,
+  relation)` pairs it touched. When in doubt, trigger an `update_access` for
+  the specific object+relation in question rather than any resource.
 
 ## Publishing Access Messages (Go Code Example)
 
@@ -370,8 +400,9 @@ Common causes:
   written or removed. Fixing the publisher and republishing corrected data is
   the only recovery path — see LFXV2-2907 for the publisher-side root cause
   and its ownership of the fix.
-- Cache is stale. Any successful OpenFGA write re-invalidates, or manually write to
-  the `inv` KV key.
+- Cache is stale for the object+relation in question. A successful OpenFGA
+  write/delete for that pair re-invalidates it, or manually write to its
+  `inv.{base32(object#relation)}` KV key (see "Debugging cache behavior" above).
 
 ### Auditing recent tuple changes
 

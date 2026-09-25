@@ -18,6 +18,8 @@ import (
 	. "github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 )
 
 // MockNatsKeyValue is a mock implementation of INatsKeyValue for testing
@@ -535,59 +537,60 @@ func TestResponseMessageBuilding(t *testing.T) {
 	}
 }
 
-// TestCacheInvalidationLogic tests the cache invalidation timestamp logic
+// TestCacheInvalidationLogic tests CacheLayer.getLastInvalidation against the
+// real per-(object, relation) invalidation key derived by cachekey.Invalidation.
 func TestCacheInvalidationLogic(t *testing.T) {
 	tests := []struct {
-		name               string
-		setupCache         func(*MockKeyValue)
-		expectInvalidation bool
-		description        string
+		name             string
+		setupCache       func(*MockNatsKeyValue, string)
+		wantZero         bool
+		wantErr          bool
+		wantAfterCreated time.Time
 	}{
 		{
-			name: "no invalidation key",
-			setupCache: func(m *MockKeyValue) {
-				m.SetNotFound("inv")
+			name: "no invalidation marker",
+			setupCache: func(m *MockNatsKeyValue, key string) {
+				m.On("Get", mock.Anything, key).Return(nil, jetstream.ErrKeyNotFound)
 			},
-			expectInvalidation: false,
-			description:        "should handle missing invalidation key",
+			wantZero: true,
 		},
 		{
-			name: "invalidation key exists",
-			setupCache: func(m *MockKeyValue) {
-				m.data["inv"] = []byte("1")
-				m.createdTimes["inv"] = time.Now().Add(-5 * time.Minute)
+			name: "invalidation marker exists",
+			setupCache: func(m *MockNatsKeyValue, key string) {
+				m.On("Get", mock.Anything, key).Return(
+					fixedEntry{created: time.Now().Add(-5 * time.Minute)}, nil,
+				)
 			},
-			expectInvalidation: true,
-			description:        "should read invalidation timestamp",
+			wantAfterCreated: time.Now().Add(-6 * time.Minute),
 		},
 		{
 			name: "cache error",
-			setupCache: func(m *MockKeyValue) {
-				m.SetError(errors.New("cache error"))
+			setupCache: func(m *MockNatsKeyValue, key string) {
+				m.On("Get", mock.Anything, key).Return(nil, errors.New("cache error"))
 			},
-			expectInvalidation: false,
-			description:        "should handle cache errors",
+			wantZero: true,
+			wantErr:  true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mockCache := NewMockKeyValue()
-			tt.setupCache(mockCache)
+			mockKV := new(MockNatsKeyValue)
+			key := cachekey.Invalidation("project:1", "viewer")
+			tt.setupCache(mockKV, key)
+			cache := CacheLayer{bucket: mockKV}
 
-			// Test the invalidation logic
-			ctx := context.Background()
-			entry, err := mockCache.Get(ctx, "inv")
+			got, err := cache.getLastInvalidation(context.Background(), "project:1", "viewer")
 
-			if tt.expectInvalidation {
-				if err != nil {
-					t.Errorf("%s: unexpected error: %v", tt.description, err)
-				}
-				if entry == nil {
-					t.Errorf("%s: expected entry, got nil", tt.description)
-				}
-			} else if err == nil && entry != nil {
-				t.Errorf("%s: expected no entry or error, got entry", tt.description)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			if tt.wantZero {
+				assert.True(t, got.IsZero())
+			} else {
+				assert.True(t, got.After(tt.wantAfterCreated))
 			}
 		})
 	}
@@ -996,8 +999,9 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 
 			// Create mock cache
 			mockCache := new(MockNatsKeyValue)
-			// Mock cache invalidation - called when tuples are deleted
-			mockCache.On("Put", mock.Anything, "inv", []byte("1")).Return(uint64(1), nil).Maybe()
+			// Mock cache invalidation - called (once per unique object+relation
+			// pair touched) when tuples are deleted.
+			mockCache.On("Put", mock.Anything, mock.Anything, []byte("1")).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
 			service := newFgaService(mockClient, mockCache, false)
@@ -1677,15 +1681,15 @@ func TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp(t *testing.T) {
 }
 
 // TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext verifies that
-// FgaService.WriteAndDeleteTuples bumps the cache invalidation key even when
-// the caller's context is already cancelled at call time.
+// FgaService.WriteAndDeleteTuples bumps the cache invalidation marker even
+// when the caller's context is already cancelled at call time.
 //
 // This guards the context.WithoutCancel + WithTimeout invariant introduced to
 // prevent stale auth decisions after partial multi-batch commits: if a batch-2
 // deadline expires after batch-1 committed to OpenFGA, the parent ctx is done.
 // Without a detached context, bucket.Put returns context.Canceled immediately
-// and the inv key is never written, leaving cached positive results fresh for
-// tuples that now exist in the store.
+// and the invalidation marker is never written, leaving cached positive
+// results fresh for tuples that now exist in the store.
 //
 // The test pre-cancels ctx and verifies that MockNatsKeyValue.Put is called
 // with a context whose Err() is nil — i.e. a fresh, live context.
@@ -1706,7 +1710,7 @@ func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
 	// the invalidation context rather than forwarding the cancelled parent ctx.
 	mockKV.On("Put",
 		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
-		"inv",
+		cachekey.Invalidation("project:1", "viewer"),
 		mock.Anything,
 	).Return(uint64(1), nil).Once()
 

@@ -88,7 +88,7 @@ There is no `cmd/`, `internal/`, `api/`, or `gen/` tree. Do not introduce a Goa 
 
 - Cache bucket name comes from `CACHE_BUCKET` (default `fga-sync-cache`). Do not hardcode the bucket name; use `constants.KVBucketNameSyncCache` or the resolved `cacheBucketName`.
 - Cache keys are `rel.{base32-encoded-relation}`. Values are raw text booleans (`true` or `false`); freshness comes from the NATS KV entry timestamp. Do not change either shape without coordinating with consumers and updating `docs/fga-sync-contract.md`.
-- Invalidation is a single `inv` timestamp key. Every successful OpenFGA write must bump it (`invalidateCache`); any cached entry older than `inv` is treated as stale.
+- Invalidation is scoped per `(object, relation)`: `inv.{base32(object#relation)}` timestamp keys. Every write/delete batch bumps the marker for every unique `(object, relation)` pair it touched (`CacheLayer.invalidate`); a cached entry older than its pair's marker is treated as stale. See `docs/fga-sync-contract.md` for the full contract.
 - Stale hits are counted separately at `/debug/vars` (`cache_stale_hits`); do not collapse them into `cache_hits`.
 - Local development against an externally written OpenFGA store should run with `USE_CACHE=false` to avoid serving stale results.
 
