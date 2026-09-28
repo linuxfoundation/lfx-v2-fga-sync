@@ -75,9 +75,9 @@ func TestCheckRelationshipsMixedCacheOutcomes(t *testing.T) {
 	now := time.Now()
 	invalidatedBefore := now.Add(-time.Hour)
 
-	hitKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("obj1#viewer@user:userA"))
-	staleKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("obj3#viewer@user:userC"))
-	errKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("obj4#viewer@user:userD"))
+	hitKey := cachekey.Entry("obj1#viewer@user:userA")
+	staleKey := cachekey.Entry("obj3#viewer@user:userC")
+	errKey := cachekey.Entry("obj4#viewer@user:userD")
 	// obj2 is a deliberate miss: no entry, no configured error.
 
 	// Only obj3#viewer has an invalidation marker; obj1's and obj2's pairs
@@ -202,9 +202,7 @@ func TestCheckRelationshipsMeetingAccessAllowedAndDenied(t *testing.T) {
 func TestCheckRelationshipsRevokedAccessOverridesStaleCache(t *testing.T) {
 	now := time.Now()
 	invalidatedBefore := now.Add(-time.Hour)
-	staleKey := "rel." + cacheKeyEncoder.EncodeToString(
-		[]byte("v1_meeting:79915658043#viewer@user:userA"),
-	)
+	staleKey := cachekey.Entry("v1_meeting:79915658043#viewer@user:userA")
 	invKey := cachekey.Invalidation("v1_meeting:79915658043", "viewer")
 
 	kv := &perKeyErrorKV{
@@ -436,7 +434,7 @@ func TestCheckRelationshipsBoundsServiceWideCacheConcurrency(t *testing.T) {
 			tuples = append(tuples, tuple)
 
 			relationKey := object + "#viewer@" + user
-			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			cacheKey := cachekey.Entry(relationKey)
 			kv.entries[cacheKey] = fixedEntry{value: []byte("true"), created: time.Now().Add(-time.Minute)}
 		}
 		requestTuples[r] = tuples

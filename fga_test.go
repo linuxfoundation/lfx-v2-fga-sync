@@ -55,22 +55,22 @@ func TestCacheKeyEncoding(t *testing.T) {
 		{
 			name:        "simple relation",
 			relationKey: "project:123#writer@user:456",
-			wantPrefix:  "rel.",
+			wantPrefix:  "relinv.",
 		},
 		{
 			name:        "complex relation",
 			relationKey: "org:linux-foundation/project:kernel#maintainer@user:torvalds",
-			wantPrefix:  "rel.",
+			wantPrefix:  "relinv.",
 		},
 		{
 			name:        "wildcard user",
 			relationKey: "project:public#viewer@user:*",
-			wantPrefix:  "rel.",
+			wantPrefix:  "relinv.",
 		},
 		{
 			name:        "group relation",
 			relationKey: "project:123#writer@group:developers",
-			wantPrefix:  "rel.",
+			wantPrefix:  "relinv.",
 		},
 	}
 
@@ -457,8 +457,6 @@ func TestSyncObjectTuples_RelationMapping(t *testing.T) {
 
 // TestCacheKeyGeneration tests the cache key generation for relations
 func TestCacheKeyGeneration(t *testing.T) {
-	encoder := base32.StdEncoding.WithPadding(base32.NoPadding)
-
 	tests := []struct {
 		name    string
 		tuple   ClientBatchCheckItem
@@ -471,7 +469,7 @@ func TestCacheKeyGeneration(t *testing.T) {
 				Relation: "writer",
 				Object:   "project:456",
 			},
-			wantKey: "rel." + encoder.EncodeToString([]byte("project:456#writer@user:123")),
+			wantKey: cachekey.Entry("project:456#writer@user:123"),
 		},
 		{
 			name: "wildcard user",
@@ -480,14 +478,14 @@ func TestCacheKeyGeneration(t *testing.T) {
 				Relation: "viewer",
 				Object:   "project:public",
 			},
-			wantKey: "rel." + encoder.EncodeToString([]byte("project:public#viewer@user:*")),
+			wantKey: cachekey.Entry("project:public#viewer@user:*"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			relationKey := tt.tuple.Object + "#" + tt.tuple.Relation + "@" + tt.tuple.User
-			cacheKey := "rel." + encoder.EncodeToString([]byte(relationKey))
+			cacheKey := cachekey.Entry(relationKey)
 
 			if cacheKey != tt.wantKey {
 				t.Errorf("cache key mismatch: got %s, want %s", cacheKey, tt.wantKey)
@@ -1684,6 +1682,15 @@ func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
 		cachekey.Invalidation("project:1", "viewer"),
 		mock.Anything,
 	).Return(uint64(1), nil).Once()
+	// Every write also fans out a blanket type-wide marker for the written
+	// object's type and every type in its cross-type dependency closure (see
+	// expandTypeWidePairs); this test only asserts on the object-scoped
+	// marker above, so the rest are permitted but not individually checked.
+	mockKV.On("Put",
+		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
+		mock.AnythingOfType("string"),
+		mock.Anything,
+	).Return(uint64(1), nil).Maybe()
 
 	svc := newFgaService(mockClient, mockKV, false)
 

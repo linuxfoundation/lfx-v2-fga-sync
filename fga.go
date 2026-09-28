@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
@@ -179,11 +180,11 @@ func (s FgaService) WriteAndDeleteTuples(
 		pairs := make([]invalidationPair, 0, len(writes)+len(deletes))
 		for _, w := range writes {
 			pairs = append(pairs, invalidationPair{object: w.Object, relation: w.Relation})
-			pairs = append(pairs, expandCascadingPairs(w.Object, w.Relation)...)
+			pairs = append(pairs, expandTypeWidePairs(w.Object)...)
 		}
 		for _, d := range deletes {
 			pairs = append(pairs, invalidationPair{object: d.Object, relation: d.Relation})
-			pairs = append(pairs, expandCascadingPairs(d.Object, d.Relation)...)
+			pairs = append(pairs, expandTypeWidePairs(d.Object)...)
 		}
 		// Use a detached context with a short deadline so a canceled parent
 		// (e.g. expired deadline after batch 1 committed) cannot block the Put.
@@ -375,7 +376,7 @@ func (s FgaService) SyncObjectTuples(
 			// explicit querying of resource-parent relationships (or similar)
 			// which don't resolve back to a user.
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
-			cacheKeysByTuple[relationKey] = "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			cacheKeysByTuple[relationKey] = cachekey.Entry(relationKey)
 		}
 	}
 

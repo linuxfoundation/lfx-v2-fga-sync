@@ -277,7 +277,7 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 
 | Aspect | Detail |
 | --- | --- |
-| Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
+| Cache key | Base32-encoded relation tuple `relinv.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
 | Invalidation | Per-`(object, relation)` timestamp keys (`inv.{encoded-object#relation}`); a write/delete batch bumps the marker for every unique `(object, relation)` pair it touches, making older cached entries for that object and relation stale across all users |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
@@ -289,19 +289,42 @@ users would require reading tuples back before invalidating. A write to
 `project:123#writer` invalidates cached entries for that object and
 relation; it does not affect `project:123#viewer`.
 
-For relations that cascade through the OpenFGA object hierarchy — `project`'s
-`owner`, `writer`, `auditor`, `marketing_ops`, `marketing_auditor`, and
-`b2b_org`'s `writer`, `auditor` (see `charts/lfx-platform/files/model.fga`'s
-`X from parent`/`from child` definitions) — a write also invalidates a
-`(type, relation)` wildcard marker covering every object of that type, since
-an ancestor or descendant write (or a `parent`/`child` edge write itself, i.e.
-reparenting) can change what those relations evaluate to on this object
-without ever writing this object's own tuple. So a write to
-`project:123#writer` *does* affect the cached `writer` result for
-`project:456`, but a write to `project:123#viewer` (non-cascading) still only
-affects `project:123`. See `cascadingRelations` in `fga_cache.go` for the
-exact set; it is a hand-maintained mirror of the model file and must be kept
-in sync when cascading relations are added, removed, or changed there.
+Because OpenFGA relations compose — both within a type (`project.writer`
+building on `project.owner`) and across types (`committee.writer` reading
+`writer_guard from project`) — a write to one object can change what a
+relation evaluates to on a *different* object that never had its own tuple
+written. Per-`(object, relation)` markers alone cannot catch this, so every
+write also bumps a blanket, type-wide marker: `(type:*, *)`. A write to any
+`project:*` tuple bumps the blanket marker for `project` itself (closing every
+intra-type chain on `project` for free, since one marker covers all of that
+type's relations) and for every type in `project`'s transitive dependency
+closure (`committee`, `meeting`, `vote`, `survey`, etc.), closing the
+cross-type chains too. Every cache lookup unconditionally consults both the
+object-scoped marker and its type's blanket marker and takes the later
+timestamp.
+
+### Rolling deployment: cache key prefix rename
+
+Cache entries used a `rel.` prefix before invalidation markers existed at
+all. A pod still running that older code has no notion of the `inv.` markers
+this PR introduces, so during a rolling deploy it could refresh a `rel.`
+entry's timestamp after an already-upgraded pod set an `inv.` marker for the
+same object — making a revoked entry look fresh to the new pod. To make that
+collision structurally impossible, cache entries now use a `relinv.` prefix
+(`pkg/cachekey.Entry`) instead: old pods keep writing the old `rel.` prefix,
+which new pods never read, so old writes simply age out via the bucket's TTL
+without ever being consulted. `inv.` marker keys are unaffected — they are
+new in this PR, so no old pod ever writes them, and there is no collision to
+guard against there. This is a one-time rename tied to introducing the
+invalidation-marker scheme; do not bump it again for unrelated changes.
+
+The direct (non-transitive) edges are hand-maintained in
+`crossTypeDependents` in `fga_cache.go`, mirroring the `X from <type>`
+references in `charts/lfx-platform/files/model.fga`; `fga_cache.go` computes
+the full transitive closure once at init (`typeInvalidationFanout`). Keep
+`crossTypeDependents` in sync when a relation definition gains or loses a
+`from <type>` reference — an under-inclusive edge reintroduces stale-access
+staleness, an over-inclusive one only costs extra cache misses.
 
 ### Debugging cache behavior
 

@@ -65,6 +65,8 @@ func TestInvalidationLookupMemoizesPerPair(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
 		Return(nil, jetstream.ErrKeyNotFound).Once()
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
+		Return(nil, jetstream.ErrKeyNotFound).Once()
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
@@ -72,12 +74,17 @@ func TestInvalidationLookupMemoizesPerPair(t *testing.T) {
 	second := lookup.get(context.Background(), "project:1", "viewer")
 
 	assert.Equal(t, first, second)
-	kv.AssertNumberOfCalls(t, "Get", 1)
+	// Two distinct pairs are consulted (the object-scoped marker and the
+	// type-wide blanket marker), each memoized, so the second get() call
+	// hits the memo for both rather than re-fetching either from the KV.
+	kv.AssertNumberOfCalls(t, "Get", 2)
 }
 
 func TestInvalidationLookupTreatsErrorAsJustInvalidated(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, assert.AnError)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
 		Return(nil, assert.AnError)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
@@ -90,96 +97,109 @@ func TestInvalidationLookupTreatsErrorAsJustInvalidated(t *testing.T) {
 	assert.False(t, got.After(after))
 }
 
-func TestExpandCascadingPairs(t *testing.T) {
+func TestExpandTypeWidePairs(t *testing.T) {
 	tests := []struct {
-		name     string
-		object   string
-		relation string
-		want     []invalidationPair
+		name   string
+		object string
+		want   []invalidationPair
 	}{
 		{
-			name:     "cascading project relation gets a wildcard pair",
-			object:   "project:1",
-			relation: "writer",
-			want:     []invalidationPair{{object: "project:*", relation: "writer"}},
+			name:   "leaf type with no dependents gets only its own blanket marker",
+			object: "committee_invite:1",
+			want:   []invalidationPair{{object: "committee_invite:*", relation: "*"}},
 		},
 		{
-			name:     "cascading b2b_org relation gets a wildcard pair",
-			object:   "b2b_org:1",
-			relation: "auditor",
-			want:     []invalidationPair{{object: "b2b_org:*", relation: "auditor"}},
-		},
-		{
-			name:     "non-cascading project relation gets nothing extra",
-			object:   "project:1",
-			relation: "viewer",
-			want:     nil,
-		},
-		{
-			name:     "non-cascading type gets nothing extra",
-			object:   "committee:1",
-			relation: "writer",
-			want:     nil,
-		},
-		{
-			name:     "project parent edge write fans out to every cascading project relation",
-			object:   "project:1",
-			relation: "parent",
+			// committee's own direct dependents are committee_invite,
+			// groupsio_mailing_list, meeting, v1_meeting, vote, survey; the
+			// closure then absorbs each of THEIR dependents too (meeting ->
+			// meeting_attachment/past_meeting -> past_meeting_attachment,
+			// v1_meeting -> v1_past_meeting, vote -> vote_response, survey
+			// -> survey_response), since a committee change can ripple
+			// through any of those chains.
+			name:   "committee write blanket-invalidates its own and every transitive dependent type",
+			object: "committee:1",
 			want: []invalidationPair{
-				{object: "project:*", relation: "owner"},
-				{object: "project:*", relation: "writer"},
-				{object: "project:*", relation: "auditor"},
-				{object: "project:*", relation: "marketing_ops"},
-				{object: "project:*", relation: "marketing_auditor"},
+				{object: "committee:*", relation: "*"},
+				{object: "committee_invite:*", relation: "*"},
+				{object: "groupsio_mailing_list:*", relation: "*"},
+				{object: "meeting:*", relation: "*"},
+				{object: "meeting_attachment:*", relation: "*"},
+				{object: "past_meeting:*", relation: "*"},
+				{object: "past_meeting_attachment:*", relation: "*"},
+				{object: "v1_meeting:*", relation: "*"},
+				{object: "v1_past_meeting:*", relation: "*"},
+				{object: "vote:*", relation: "*"},
+				{object: "vote_response:*", relation: "*"},
+				{object: "survey:*", relation: "*"},
+				{object: "survey_response:*", relation: "*"},
 			},
 		},
 		{
-			name:     "b2b_org child edge write fans out to every cascading b2b_org relation",
-			object:   "b2b_org:1",
-			relation: "child",
+			name:   "b2b_org/project_membership cycle resolves to a finite closure",
+			object: "b2b_org:1",
 			want: []invalidationPair{
-				{object: "b2b_org:*", relation: "writer"},
-				{object: "b2b_org:*", relation: "auditor"},
+				{object: "b2b_org:*", relation: "*"},
+				{object: "project_membership:*", relation: "*"},
+				{object: "crowdfunding_initiative:*", relation: "*"},
 			},
+		},
+		{
+			name:   "unknown type still gets its own blanket marker",
+			object: "user:1",
+			want:   []invalidationPair{{object: "user:*", relation: "*"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := expandCascadingPairs(tt.object, tt.relation)
+			got := expandTypeWidePairs(tt.object)
 			assert.ElementsMatch(t, tt.want, got)
 		})
 	}
 }
 
-func TestInvalidationLookupCascadingRelationConsultsWildcardMarker(t *testing.T) {
+func TestComputeTypeInvalidationFanoutReachesProjectTransitively(t *testing.T) {
+	fanout := computeTypeInvalidationFanout(crossTypeDependents)
+
+	// mentorship_task depends on mentorship_application, which depends on
+	// mentorship_program, which depends on project: a three-hop chain that
+	// only resolves correctly if the closure keeps iterating past one pass.
+	assert.True(t, fanout["project"]["mentorship_task"],
+		"project's fanout must transitively reach mentorship_task through mentorship_program and mentorship_application")
+	assert.True(t, fanout["project"]["committee_invite"],
+		"project's fanout must transitively reach committee_invite through committee")
+}
+
+func TestInvalidationLookupAlwaysConsultsTypeWideWildcardMarker(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	objectEntry := &MockKeyValueEntry{created: time.Now().Add(-time.Hour)}
 	wildcardEntry := &MockKeyValueEntry{created: time.Now()}
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "writer")).
 		Return(objectEntry, nil)
-	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "writer")).
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
 		Return(wildcardEntry, nil)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
 	got := lookup.get(context.Background(), "project:1", "writer")
 
-	assert.Equal(t, wildcardEntry.created, got, "the later wildcard marker must win over the object-scoped one")
+	assert.Equal(t, wildcardEntry.created, got, "the later blanket marker must win over the object-scoped one")
 	kv.AssertNumberOfCalls(t, "Get", 2)
 }
 
-func TestInvalidationLookupNonCascadingRelationSkipsWildcardLookup(t *testing.T) {
+func TestInvalidationLookupConsultsWildcardMarkerForAnyRelation(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
 		Return(nil, jetstream.ErrKeyNotFound)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
 	lookup.get(context.Background(), "project:1", "viewer")
 
-	kv.AssertNumberOfCalls(t, "Get", 1)
-	kv.AssertNotCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:*", "viewer"))
+	kv.AssertNumberOfCalls(t, "Get", 2)
+	kv.AssertCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:*", "*"))
 }
 
 func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T) {
@@ -268,9 +288,7 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 	_, _, err := service.SyncObjectTuples(context.Background(), "project:resource-1", writes)
 	require.NoError(t, err)
 
-	survivingCacheKey := "rel." + cacheKeyEncoder.EncodeToString(
-		[]byte("project:resource-1#viewer@user:bob"),
-	)
+	survivingCacheKey := cachekey.Entry("project:resource-1#viewer@user:bob")
 
 	// seedPositiveCacheEntries blocks until all cache writes complete, so both
 	// checks below are deterministic by the time SyncObjectTuples has returned.

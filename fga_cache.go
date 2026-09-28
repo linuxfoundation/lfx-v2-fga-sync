@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"encoding/base32"
 	"expvar"
 	"fmt"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	. "github.com/openfga/go-sdk/client"
 
@@ -47,10 +47,9 @@ const (
 )
 
 var (
-	cacheHits       *expvar.Int
-	cacheStaleHits  *expvar.Int
-	cacheMisses     *expvar.Int
-	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
+	cacheHits      *expvar.Int
+	cacheStaleHits *expvar.Int
+	cacheMisses    *expvar.Int
 
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
 	// concurrent KV Get/Put in this file acquires a slot before the
@@ -122,51 +121,111 @@ type invalidationPair struct {
 }
 
 // wildcardObject is the sentinel object used in an invalidationPair to mean
-// "every object of this type", for relations whose evaluated value cascades
-// across the OpenFGA object hierarchy (see cascadingRelations). No real
-// object ID is ever literally "*", so it cannot collide with a genuine
-// object+relation invalidation marker.
+// "every object of this type", paired with wildcardRelation below to form a
+// blanket per-type invalidation marker. No real object ID is ever literally
+// "*", so it cannot collide with a genuine object+relation invalidation
+// marker.
 const wildcardObject = "*"
 
-// cascadingRelations lists, per object type, the relations that compose
-// "X from parent" (or "from child") in charts/lfx-platform/files/model.fga:
-// project.owner/writer/auditor/marketing_ops/marketing_auditor, and
-// b2b_org.writer/auditor. A write to one of these relations on object O does
-// not only change whether O's own relation holds — because the relation
-// cascades, it can also change the *evaluated* result of a check on any
-// descendant (or, for b2b_org, ancestor) object, even though that object was
-// never itself written. The per-(object, relation) invalidation scoping
-// keyed to the tuple actually written cannot express "invalidate every
-// descendant of O", since that set isn't known without a hierarchy walk. So
-// for these relations only, invalidation additionally targets a
-// per-(type, relation) wildcard marker that covers every object of that
-// type, trading some extra cache misses for correctness. Keep in sync with
-// model.fga; a relation that stops cascading (or a new one that starts)
-// should be removed from (or added to) this map.
-var cascadingRelations = map[string]map[string]bool{
+// wildcardRelation is the sentinel relation used alongside wildcardObject to
+// mean "every relation of this type". No real relation name is ever
+// literally "*", so it cannot collide with a genuine marker.
+const wildcardRelation = "*"
+
+// crossTypeDependents lists, for each OpenFGA object type, the OTHER types
+// whose relation definitions read this type via "<relation> from <field>" in
+// charts/lfx-platform/files/model.fga (a DIRECT edge only; the transitive
+// closure across these edges is computed once at init by
+// typeInvalidationFanout below). For example committee.writer is defined as
+// "writer_guard from project", so committee depends on project, hence
+// "project": {..., "committee", ...}.
+//
+// Same-type composition (project.writer building on project.owner,
+// b2b_org.writer cascading through parent/child) needs no entry here: the
+// blanket per-type marker written for the type itself (see
+// expandTypeWidePairs) already invalidates every relation of that same type,
+// so intra-type chains are covered without enumerating them.
+//
+// Keep this in sync with model.fga (owned by lfx-v2-helm): add an edge here
+// whenever a relation definition gains a "from <other type>" reference,
+// remove one when a relation stops referencing that type. Getting an edge
+// wrong in this security-sensitive cache is asymmetric: an over-inclusive
+// edge only costs extra cache misses, an under-inclusive one reintroduces
+// the fail-open staleness this map exists to close.
+// Type name constants for the entries below that recur across multiple map
+// values (a type can be a dependent of more than one other type).
+const (
+	fgaTypeMeeting           = "meeting"
+	fgaTypePastMeeting       = "past_meeting"
+	fgaTypeProjectMembership = "project_membership"
+	fgaTypeSurvey            = "survey"
+	fgaTypeV1Meeting         = "v1_meeting"
+	fgaTypeVote              = "vote"
+)
+
+var crossTypeDependents = map[string][]string{
 	"project": {
-		"owner":             true,
-		"writer":            true,
-		"auditor":           true,
-		"marketing_ops":     true,
-		"marketing_auditor": true,
+		"mentorship_program", "committee", "groupsio_service", fgaTypeMeeting,
+		fgaTypePastMeeting, fgaTypeV1Meeting, "v1_past_meeting", fgaTypeVote, fgaTypeSurvey,
+		fgaTypeProjectMembership, "crowdfunding_initiative",
 	},
-	"b2b_org": {
-		"writer":  true,
-		"auditor": true,
+	"mentorship_program":     {"mentorship_application"},
+	"mentorship_application": {"mentorship_task"},
+	"committee": {
+		"committee_invite", "groupsio_mailing_list", fgaTypeMeeting, fgaTypeV1Meeting,
+		fgaTypeVote, fgaTypeSurvey,
 	},
+	"groupsio_service":       {"groupsio_mailing_list"},
+	fgaTypeMeeting:           {"meeting_attachment", fgaTypePastMeeting},
+	fgaTypePastMeeting:       {"past_meeting_attachment"},
+	fgaTypeV1Meeting:         {"v1_past_meeting"},
+	fgaTypeVote:              {"vote_response"},
+	fgaTypeSurvey:            {"survey_response"},
+	"b2b_org":                {fgaTypeProjectMembership, "crowdfunding_initiative"},
+	fgaTypeProjectMembership: {"b2b_org"},
 }
 
-// hierarchyEdgeRelations names the relation(s), on the same object types
-// listed in cascadingRelations, whose tuple values define the parent/child
-// edges those cascades traverse (project.parent; b2b_org.parent and
-// b2b_org.child). Writing or deleting one of these edge tuples changes which
-// objects a cascading relation reaches without writing that relation
-// directly, so it must trigger the same wildcard invalidation as a direct
-// write to one of that type's cascading relations.
-var hierarchyEdgeRelations = map[string]bool{
-	"parent": true,
-	"child":  true,
+// typeInvalidationFanout is the transitive closure of crossTypeDependents,
+// computed once at init: typeInvalidationFanout[T] is every type (including
+// T itself) whose blanket marker must be written when a tuple on a T object
+// is written or deleted. Computed via fixed-point iteration rather than a
+// naive recursive walk because the graph has at least one real cycle
+// (project_membership depends on b2b_org and vice versa: model.fga defines
+// b2b_org.auditor as including "key_contact from membership" while also
+// defining project_membership.auditor as including "auditor from b2b_org");
+// a memoized depth-first walk would cache an incomplete set for whichever
+// member of the cycle it visits first.
+var typeInvalidationFanout = computeTypeInvalidationFanout(crossTypeDependents)
+
+func computeTypeInvalidationFanout(direct map[string][]string) map[string]map[string]bool {
+	fanout := make(map[string]map[string]bool, len(direct))
+	for t, deps := range direct {
+		set := make(map[string]bool, len(deps)+1)
+		set[t] = true
+		for _, d := range deps {
+			set[d] = true
+		}
+		fanout[t] = set
+	}
+
+	for changed := true; changed; {
+		changed = false
+		for _, set := range fanout {
+			members := make([]string, 0, len(set))
+			for m := range set {
+				members = append(members, m)
+			}
+			for _, m := range members {
+				for transitive := range fanout[m] {
+					if !set[transitive] {
+						set[transitive] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	return fanout
 }
 
 // objectType returns the OpenFGA type portion of an "type:id" object
@@ -178,31 +237,34 @@ func objectType(object string) string {
 	return ""
 }
 
-// expandCascadingPairs returns the wildcard invalidation pair(s) that must
-// additionally be written for a tuple write/delete on (object, relation), on
-// top of the object-scoped pair every write already gets. It returns nil for
-// types/relations outside cascadingRelations/hierarchyEdgeRelations, which
-// is the common case.
-func expandCascadingPairs(object, relation string) []invalidationPair {
+// expandTypeWidePairs returns the blanket invalidation pair(s) that must
+// additionally be written for a tuple write/delete on object, on top of the
+// object-scoped pair every write already gets. It always returns at least
+// one pair (a blanket marker for object's own type), which closes intra-type
+// transitive chains, e.g. project.viewer building on project.auditor_guard
+// building on project.auditor building on project.writer building on
+// project.owner, without needing to enumerate which specific relation
+// depends on which. When the written type has entries in
+// typeInvalidationFanout, it additionally returns a blanket marker for every
+// dependent type, closing cross-type chains such as committee.writer
+// depending on project.writer_guard. See crossTypeDependents for the source
+// mapping this is derived from.
+func expandTypeWidePairs(object string) []invalidationPair {
 	typ := objectType(object)
-	cascading, ok := cascadingRelations[typ]
-	if !ok {
+	if typ == "" {
 		return nil
 	}
 
-	if cascading[relation] {
-		return []invalidationPair{{object: typ + ":" + wildcardObject, relation: relation}}
+	types, ok := typeInvalidationFanout[typ]
+	if !ok {
+		return []invalidationPair{{object: typ + ":" + wildcardObject, relation: wildcardRelation}}
 	}
 
-	if hierarchyEdgeRelations[relation] {
-		pairs := make([]invalidationPair, 0, len(cascading))
-		for r := range cascading {
-			pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
-		}
-		return pairs
+	pairs := make([]invalidationPair, 0, len(types))
+	for t := range types {
+		pairs = append(pairs, invalidationPair{object: t + ":" + wildcardObject, relation: wildcardRelation})
 	}
-
-	return nil
+	return pairs
 }
 
 // invalidate writes an invalidation marker for every unique (object,
@@ -295,29 +357,32 @@ type invalidationLookup struct {
 	cache CacheLayer
 	mu    sync.Mutex
 	memo  map[invalidationPair]time.Time
+	group singleflight.Group
 }
 
 func newInvalidationLookup(cache CacheLayer) *invalidationLookup {
 	return &invalidationLookup{cache: cache, memo: make(map[invalidationPair]time.Time)}
 }
 
-// get returns the last invalidation time for (object, relation). A KV error
-// or an unfulfilled cacheOpSem slot is treated as "just invalidated" (the
-// current time) rather than propagated: the caller cannot verify the cached
-// entry's freshness, so the safe default is to fall through to OpenFGA
-// rather than trust a cache we could not confirm is fresh.
+// get returns the last invalidation time for (object, relation): the later
+// of the object-scoped marker and the blanket per-type marker for object's
+// type (see expandTypeWidePairs). The blanket marker is always consulted,
+// not gated to a hardcoded set of relations, because it fires on any write
+// to any relation of this type, or to a relation of a type this one
+// transitively depends on (typeInvalidationFanout). That closes both the
+// intra-type and cross-type transitive-dependency gaps a narrower
+// per-relation scheme would miss.
 //
-// When (type, relation) is in cascadingRelations, the per-(type, relation)
-// wildcard marker is also consulted and the later of the two timestamps
-// wins: a write to an ancestor/descendant object (or to the parent/child
-// edge itself) invalidates this object's cached result too, even though
-// this object's own (object, relation) marker was never touched. See
-// expandCascadingPairs.
+// A KV error or an unfulfilled cacheOpSem slot is treated as "just
+// invalidated" (the current time) rather than propagated: the caller cannot
+// verify the cached entry's freshness, so the safe default is to fall
+// through to OpenFGA rather than trust a cache we could not confirm is
+// fresh.
 func (l *invalidationLookup) get(ctx context.Context, object, relation string) time.Time {
 	t := l.getOne(ctx, object, relation)
 
-	if cascading, ok := cascadingRelations[objectType(object)]; ok && cascading[relation] {
-		if wt := l.getOne(ctx, objectType(object)+":"+wildcardObject, relation); wt.After(t) {
+	if typ := objectType(object); typ != "" {
+		if wt := l.getOne(ctx, typ+":"+wildcardObject, wildcardRelation); wt.After(t) {
 			t = wt
 		}
 	}
@@ -326,7 +391,11 @@ func (l *invalidationLookup) get(ctx context.Context, object, relation string) t
 }
 
 // getOne returns the last invalidation time for a single, literal (object,
-// relation) marker, memoizing the result within this batch.
+// relation) marker, memoizing the result within this batch. Concurrent
+// callers for the same pair are collapsed onto one KV Get via l.group:
+// without this, every goroutine in a batch racing past the memo check
+// before the first writer populates it would issue its own duplicate
+// round-trip for what is, within one batch, the same read.
 func (l *invalidationLookup) getOne(ctx context.Context, object, relation string) time.Time {
 	pair := invalidationPair{object: object, relation: relation}
 
@@ -337,21 +406,34 @@ func (l *invalidationLookup) getOne(ctx context.Context, object, relation string
 	}
 	l.mu.Unlock()
 
-	var t time.Time
-	var err error
-	if slotErr := withCacheOpSlot(ctx, func() {
-		t, err = l.cache.getLastInvalidation(ctx, object, relation)
-	}); slotErr != nil {
-		t = time.Now()
-	} else if err != nil {
-		logger.With(errKey, err, "object", object, "relation", relation).
-			ErrorContext(ctx, "cache invalidation lookup error; treating entry as stale")
-		t = time.Now()
-	}
+	key := object + "#" + relation
+	v, err, _ := l.group.Do(key, func() (any, error) {
+		var t time.Time
+		var lookupErr error
+		if slotErr := withCacheOpSlot(ctx, func() {
+			t, lookupErr = l.cache.getLastInvalidation(ctx, object, relation)
+		}); slotErr != nil {
+			t = time.Now()
+		} else if lookupErr != nil {
+			logger.With(errKey, lookupErr, "object", object, "relation", relation).
+				ErrorContext(ctx, "cache invalidation lookup error; treating entry as stale")
+			t = time.Now()
+		}
 
-	l.mu.Lock()
-	l.memo[pair] = t
-	l.mu.Unlock()
+		l.mu.Lock()
+		l.memo[pair] = t
+		l.mu.Unlock()
+		return t, nil
+	})
+	if err != nil {
+		// fn above never returns a non-nil error; this is unreachable, but
+		// treat it the same as any other lookup failure if it ever changes.
+		return time.Now()
+	}
+	t, ok := v.(time.Time)
+	if !ok {
+		return time.Now()
+	}
 	return t
 }
 
@@ -364,9 +446,7 @@ func (c CacheLayer) lookupEntry(
 	invLookup *invalidationLookup,
 ) cacheLookupOutcome {
 	relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
-	// Encode relation using base32 without padding to conform to the allowed
-	// characters for NATS subjects.
-	cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+	cacheKey := cachekey.Entry(relationKey)
 	var entry jetstream.KeyValueEntry
 	var errCache error
 	if slotErr := withCacheOpSlot(ctx, func() {
@@ -506,7 +586,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 
 		// Queue the cache write.
 		if shouldCache {
-			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			cacheKey := cachekey.Entry(relationKey)
 			allowedValue := allowed
 			cachePuts = append(cachePuts, func() error {
 				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
