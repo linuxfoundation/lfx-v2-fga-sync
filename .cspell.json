@@ -139,7 +139,10 @@
         "subtests",
         "Acks",
         "errgroup",
-        "gctx"
+        "gctx",
+        "GXSB",
+        "Greaterf",
+        "Equalf"
       ]
     },
     {

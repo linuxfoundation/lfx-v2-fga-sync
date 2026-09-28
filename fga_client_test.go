@@ -25,7 +25,13 @@ import (
 // requests than the connection pool and handler concurrency were sized for.
 func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 	const storeID = "01GXSB9YR785C4FYS3C0RTG7B2"
-	const itemCount = 101 // forces multiple ClientMaxBatchSize (50) chunks
+	// itemCount forces multiple ClientMaxBatchSize (50) chunks: comfortably
+	// more than 200 so at least 5 chunks fire, letting an uncapped/default
+	// execution (SDK default MaxParallelRequests of 10) exceed
+	// batchCheckMaxParallelRequests (4) and fail the assertion below. A
+	// smaller item count (e.g. 101, three chunks) could pass vacuously even
+	// with the parallelism cap silently dropped.
+	const itemCount = 260
 
 	var (
 		mu           sync.Mutex

@@ -57,9 +57,16 @@ const (
 	// batchCheckMaxParallelRequests caps how many outbound HTTP requests a
 	// single BatchCheck call can fan out (the SDK chunks large batches into
 	// ClientMaxBatchSize-sized requests and defaults to 10-way parallelism
-	// per call). Left at the SDK default, subscriptionConcurrency concurrent
-	// handlers could each fan out 10x, blowing past fgaHTTPMaxConnsPerHost.
-	// A value of 1 would bound that worst case exactly, but query-service's
+	// per call). subscriptionConcurrency (main.go) is derived from this
+	// constant and fgaHTTPMaxConnsPerHost as
+	// fgaHTTPMaxConnsPerHost / batchCheckMaxParallelRequests, so that the
+	// worst case of every concurrent handler fanning out
+	// batchCheckMaxParallelRequests requests at once
+	// (subscriptionConcurrency * batchCheckMaxParallelRequests) fits within
+	// the connection pool; changing this constant changes that derived
+	// handler concurrency too, so keep the two aligned rather than treating
+	// either as independently tunable. A value of 1 would let a single
+	// BatchCheck call use the whole pool for one handler, but query-service's
 	// MaxPageSize (1000) means a single batch can chunk into ~20 requests;
 	// fully serializing those all but guarantees hitting
 	// accessCheckHandlerTimeout on the largest pages. 4 keeps the burst

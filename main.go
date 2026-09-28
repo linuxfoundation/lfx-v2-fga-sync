@@ -45,10 +45,14 @@ const (
 	// on OpenFGA serializes every request behind it; these two subjects have
 	// no ordering requirement between distinct messages, unlike the
 	// access-mutation JetStream consumer (see access_mutation.go), so
-	// bounded concurrency is safe here. Sized to match fgaHTTPMaxConnsPerHost
-	// in fga.go so handler concurrency and the OpenFGA connection pool scale
-	// together.
-	subscriptionConcurrency = fgaHTTPMaxConnsPerHost
+	// bounded concurrency is safe here. Derived from fgaHTTPMaxConnsPerHost
+	// and batchCheckMaxParallelRequests (both in fga.go) rather than set
+	// independently: each concurrent handler can fan out up to
+	// batchCheckMaxParallelRequests outbound OpenFGA HTTP requests, so this
+	// is the largest handler concurrency for which that aggregate fan-out
+	// (subscriptionConcurrency * batchCheckMaxParallelRequests) still fits
+	// within the connection pool. At current values, 64 / 4 = 16.
+	subscriptionConcurrency = fgaHTTPMaxConnsPerHost / int(batchCheckMaxParallelRequests)
 )
 
 // Build-time variables set via ldflags
