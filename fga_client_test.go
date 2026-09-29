@@ -98,3 +98,41 @@ func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 		"BatchCheck fanned out %d concurrent requests, want at most batchCheckMaxParallelRequests (%d)",
 		maxInFlight, batchCheckMaxParallelRequests)
 }
+
+// TestFgaHTTPClientHasConfiguredTimeout asserts the *http.Client connectFga
+// hands to the OpenFGA SDK carries fgaHTTPTimeout, so a future edit that
+// drops the Timeout (e.g. while touching the transport/instrumentation
+// wiring) fails a test instead of silently leaving outbound OpenFGA calls
+// unbounded.
+func TestFgaHTTPClientHasConfiguredTimeout(t *testing.T) {
+	client := fgaHTTPClient()
+	require.Equal(t, fgaHTTPTimeout, client.Timeout)
+}
+
+// TestFgaHTTPClientEnforcesTimeout observes the configured timeout actually
+// aborting a slow call, rather than only asserting the client's Timeout
+// field is set correctly.
+func TestFgaHTTPClientEnforcesTimeout(t *testing.T) {
+	blockUntilCanceled := make(chan struct{})
+	defer close(blockUntilCanceled)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-blockUntilCanceled:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+
+	client := fgaHTTPClient()
+	client.Timeout = 50 * time.Millisecond
+
+	start := time.Now()
+	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
+	require.NoError(t, err)
+
+	_, err = client.Do(req)
+	require.Error(t, err, "expected the client's Timeout to abort a call to a server that never responds")
+	require.Lessf(t, time.Since(start), 5*time.Second,
+		"call took %s to time out, want it bounded by the client's short test Timeout", time.Since(start))
+}

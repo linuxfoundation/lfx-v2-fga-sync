@@ -65,11 +65,12 @@ const (
 	// (subscriptionConcurrency * batchCheckMaxParallelRequests) fits within
 	// the connection pool; changing this constant changes that derived
 	// handler concurrency too, so keep the two aligned rather than treating
-	// either as independently tunable. A value of 1 would let a single
-	// BatchCheck call use the whole pool for one handler, but query-service's
-	// MaxPageSize (1000) means a single batch can chunk into ~20 requests;
-	// fully serializing those all but guarantees hitting
-	// accessCheckHandlerTimeout on the largest pages. 4 keeps the burst
+	// either as independently tunable. A value of 1 would fully serialize
+	// each BatchCheck call's outbound requests, one at a time, rather than
+	// fanning them out; query-service's MaxPageSize (1000) means a single
+	// batch can chunk into ~20 requests, and fully serializing those all
+	// but guarantees hitting accessCheckHandlerTimeout on the largest
+	// pages. 4 keeps the burst
 	// multiplier well under the SDK default while cutting the worst-case
 	// round count roughly in half; it does not itself guarantee staying
 	// within the timeout budget for a 1000-item batch — that budget is
@@ -87,6 +88,17 @@ const (
 	// AccessCheckTimeout defaults to 15s, so this must stay below that.
 	accessCheckHandlerTimeout = 10 * time.Second
 )
+
+// fgaHTTPClient returns the *http.Client connectFga hands to the OpenFGA SDK:
+// fgaHTTPTransport's pool wrapped in OpenTelemetry instrumentation, bounded
+// by fgaHTTPTimeout. Split out from connectFga so a test can assert on the
+// constructed client directly instead of only on the transport.
+func fgaHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: otelhttp.NewTransport(fgaHTTPTransport()),
+		Timeout:   fgaHTTPTimeout,
+	}
+}
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
 // except for a connection pool sized for this service's OpenFGA call volume.
@@ -151,10 +163,7 @@ func connectFga() (IFgaClient, error) {
 		ApiUrl:               fgaURL,
 		StoreId:              fgaStoreID,
 		AuthorizationModelId: fgaAuthModelID,
-		HTTPClient: &http.Client{
-			Transport: otelhttp.NewTransport(fgaHTTPTransport()),
-			Timeout:   fgaHTTPTimeout,
-		},
+		HTTPClient:           fgaHTTPClient(),
 	})
 	if err != nil {
 		return nil, err
