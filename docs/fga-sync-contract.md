@@ -351,6 +351,26 @@ the full transitive closure once at init (`typeInvalidationFanout`). Keep
 `from <type>` reference — an under-inclusive edge reintroduces stale-access
 staleness, an over-inclusive one only costs extra cache misses.
 
+### Rolling deployment: legacy global `inv` marker
+
+Before the per-`(object, relation)` `inv.`-prefixed markers above existed,
+fga-sync (and out-of-process direct-OpenFGA writers, e.g.
+`scripts/bootstrap/member-tiers-callers`) invalidated the whole cache with
+one bare `inv` key, bumped on every write regardless of object or relation.
+During a rolling deploy, a pod (or bootstrap script binary) can still be
+running that older code, which only ever writes and reads the bare `inv`
+key — it has no notion of the scoped `inv.`-prefixed markers. To avoid a
+fail-open window where either side of the rollout misses an invalidation the
+other side processed, every writer (`CacheLayer.invalidate`, and the
+bootstrap script) dual-writes both the scoped marker(s) and the legacy bare
+`inv` key, and every reader (`invalidationLookup.get`/`getLegacy`)
+additionally consults the bare `inv` key and takes the latest of all
+timestamps. This accepts a temporary, coarser global cache miss on every
+pod whenever any write happens, in exchange for closing the staleness
+window. `cachekey.LegacyInvalidationKey` documents removal: delete it, its
+write call sites, and its read call sites once every fga-sync pod and every
+out-of-process writer is confirmed running post-`relinv` code.
+
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.

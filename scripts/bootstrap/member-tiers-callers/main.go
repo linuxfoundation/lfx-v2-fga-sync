@@ -141,7 +141,10 @@ func main() {
 	// is persistent — restarting fga-sync only rebinds it and does not clear
 	// existing entries. fga-sync scopes invalidation per (object, relation)
 	// rather than to one global key (see docs/fga-sync-contract.md), so the
-	// marker must be derived for the specific pair these tuples touch.
+	// marker must be derived for the specific pair these tuples touch. Also
+	// bumps the legacy global "inv" key for rollout compatibility with
+	// fga-sync pods still running pre-relinv code — see the comment above
+	// the cachekey.LegacyInvalidationKey Put below.
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
 		log.Fatalf("failed to connect to NATS for cache invalidation: %v", err)
@@ -168,7 +171,18 @@ func main() {
 		log.Fatalf("failed to bump cache invalidation marker: %v", err)
 	}
 
-	fmt.Println("Cache invalidation marker bumped — fga-sync will revalidate cached denials.")
+	// ROLLOUT COMPATIBILITY, REMOVE AFTER FULL ROLLOUT (see
+	// cachekey.LegacyInvalidationKey): also bump the legacy global "inv"
+	// key. During a mixed-version rollout, an fga-sync pod still running
+	// pre-relinv code only ever reads that bare key, never the scoped
+	// marker above, so it would keep serving a cached denial for these
+	// memberships until its cache entries age out. Dual-write both until
+	// every fga-sync pod is confirmed running post-relinv code.
+	if _, err = kv.Put(cachekey.LegacyInvalidationKey, []byte("1")); err != nil {
+		log.Fatalf("failed to bump legacy cache invalidation marker: %v", err)
+	}
+
+	fmt.Println("Cache invalidation markers bumped — fga-sync will revalidate cached denials.")
 
 	if writeErr != nil {
 		log.Fatalf("write error (cache was invalidated; rerun to confirm tuples exist): %v", writeErr)

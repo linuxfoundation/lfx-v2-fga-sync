@@ -46,9 +46,34 @@ func TestCacheLayerInvalidateDedupesPairs(t *testing.T) {
 	}
 	cache.invalidate(context.Background(), pairs)
 
-	kv.AssertNumberOfCalls(t, "Put", 2)
+	// Three Put calls: the two deduped scoped markers, plus the legacy
+	// global "inv" marker that invalidate() always dual-writes alongside
+	// the scoped ones for rolling-deployment compatibility (see
+	// cachekey.LegacyInvalidationKey).
+	kv.AssertNumberOfCalls(t, "Put", 3)
 	kv.AssertCalled(t, "Put", mock.Anything, cachekey.Invalidation("project:1", "viewer"), []byte("1"))
 	kv.AssertCalled(t, "Put", mock.Anything, cachekey.Invalidation("project:2", "viewer"), []byte("1"))
+	kv.AssertCalled(t, "Put", mock.Anything, cachekey.LegacyInvalidationKey, []byte("1"))
+}
+
+// TestCacheLayerInvalidateDualWritesLegacyMarker is the dedicated regression
+// test for the rolling-deployment compatibility fix: every call to
+// invalidate() must dual-write the legacy global "inv" key alongside its
+// scoped (object, relation) markers, even when only a single pair is
+// invalidated, so that an fga-sync pod still running pre-relinv code (which
+// only ever reads that bare key) observes the invalidation too. See
+// cachekey.LegacyInvalidationKey and the "Rolling deployment: legacy global
+// inv marker" section of docs/fga-sync-contract.md.
+func TestCacheLayerInvalidateDualWritesLegacyMarker(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Put", mock.Anything, mock.AnythingOfType("string"), []byte("1")).Return(uint64(1), nil)
+	cache := CacheLayer{bucket: kv}
+
+	cache.invalidate(context.Background(), []invalidationPair{{object: "project:1", relation: "viewer"}})
+
+	kv.AssertNumberOfCalls(t, "Put", 2)
+	kv.AssertCalled(t, "Put", mock.Anything, cachekey.Invalidation("project:1", "viewer"), []byte("1"))
+	kv.AssertCalled(t, "Put", mock.Anything, cachekey.LegacyInvalidationKey, []byte("1"))
 }
 
 func TestCacheLayerInvalidateNoOpOnEmptyOrNilBucket(t *testing.T) {
@@ -145,17 +170,22 @@ func TestExpandTypeWidePairs(t *testing.T) {
 			// b2b_org -> project_membership -> b2b_org is a real cycle
 			// (project_membership.auditor reads "auditor from b2b_org";
 			// b2b_org.auditor reads "key_contact from membership"), so the
-			// closure must terminate rather than loop forever, and must not
-			// write a blanket "*" relation back onto b2b_org itself via the
-			// cross-type fanout (that self-hop is skipped there; the
-			// written object's own type is only ever covered by the
-			// object-scoped marker or cascadingRelations, never a
-			// cross-type-fanout one — see PR/issue #2358).
-			// "global_org_admin" is deliberately not in
-			// cascadingRelations[b2b_org] (writer/auditor only), so this
-			// case isolates the cross-type-only behavior; see
-			// TestExpandTypeWidePairsCascadesSameTypeHierarchy for the
-			// writer/auditor + cascadingRelations interaction.
+			// closure must terminate rather than loop forever. Unlike an
+			// earlier version of this fix, a genuine multi-hop cycle back to
+			// the source type is now preserved rather than discarded (see
+			// computeTypeInvalidationFanout's doc comment), so
+			// typeInvalidationFanout["b2b_org"]["b2b_org"] legitimately
+			// contains {"auditor", "key_contact"} here, producing
+			// b2b_org:*,auditor and b2b_org:*,key_contact markers. Separately,
+			// "global_org_admin" feeds b2b_org's own writer->auditor same-type
+			// cascade via cascadingFeeders/cascadingFanout (see
+			// expandTypeWidePairs), independently producing b2b_org:*,writer
+			// and a second, duplicate b2b_org:*,auditor entry — expandTypeWidePairs
+			// does not dedupe across these two independent mechanisms (only
+			// CacheLayer.invalidate's "seen" map dedupes, at the caller level),
+			// so the duplicate is listed explicitly below rather than papered
+			// over. See TestExpandTypeWidePairsCascadesSameTypeHierarchy for
+			// the writer/auditor + cascadingRelations interaction in isolation.
 			name:     "b2b_org/project_membership cycle resolves to a finite, relation-scoped closure",
 			object:   "b2b_org:1",
 			relation: "global_org_admin",
@@ -165,6 +195,10 @@ func TestExpandTypeWidePairs(t *testing.T) {
 				{object: "project_membership:*", relation: "auditor"},
 				{object: "crowdfunding_initiative:*", relation: "writer"},
 				{object: "crowdfunding_initiative:*", relation: "viewer"},
+				{object: "b2b_org:*", relation: "writer"},
+				{object: "b2b_org:*", relation: "auditor"},
+				{object: "b2b_org:*", relation: "key_contact"},
+				{object: "b2b_org:*", relation: "auditor"},
 			},
 		},
 		{
@@ -191,11 +225,18 @@ func TestExpandTypeWidePairs(t *testing.T) {
 // cascades from/to the written one (see cascadingRelations,
 // hierarchyEdgeRelations).
 func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
-	t.Run("writing a cascading relation bumps only that relation's type-wide marker", func(t *testing.T) {
+	t.Run("writing a cascading relation bumps its own and every downstream cascading relation's type-wide marker", func(t *testing.T) {
+		// owner feeds writer, which in turn feeds auditor (see
+		// cascadingFeeders[fgaTypeProject]), so writing owner must bump the
+		// type-wide marker for all three: a change to owner can change what
+		// "writer from owner" and "auditor from writer" resolve to for other
+		// project objects that inherit from this one.
 		got := expandTypeWidePairs("project:123", "owner")
 		assert.Contains(t, got, invalidationPair{object: "project:*", relation: "owner"})
-		assert.NotContains(t, got, invalidationPair{object: "project:*", relation: "writer"},
-			"writing owner must not also bump writer's type-wide marker; each cascading relation is scoped separately")
+		assert.Contains(t, got, invalidationPair{object: "project:*", relation: "writer"},
+			"writing owner must also bump writer's type-wide marker, since writer cascades from owner")
+		assert.Contains(t, got, invalidationPair{object: "project:*", relation: "auditor"},
+			"writing owner must transitively bump auditor's type-wide marker, since auditor cascades from writer which cascades from owner")
 	})
 
 	t.Run("writing the parent hierarchy edge bumps every cascading relation's type-wide marker", func(t *testing.T) {
@@ -232,20 +273,28 @@ func TestExpandTypeWidePairsCrossTypeIrrelevant(t *testing.T) {
 			// marketing_ops itself cascades same-type via "marketing_ops
 			// from parent" (see cascadingRelations), so it still gets a
 			// same-type project:* marker — but never a cross-type one for
-			// committee/meeting/etc., since no dependent reads it.
+			// committee/meeting/etc., since no dependent reads it. It also
+			// feeds marketing_auditor via cascadingFeeders, so that
+			// downstream relation's type-wide marker is bumped too.
 			relation: "marketing_ops",
 			want: []invalidationPair{
 				{object: "project:123", relation: "*"},
 				{object: "project:*", relation: "marketing_ops"},
+				{object: "project:*", relation: "marketing_auditor"},
 			},
 		},
 		{
 			// global_marketing_ops does not itself cascade same-type (only
 			// marketing_auditor, which composes it, does — and that's
-			// covered by the object-scoped marker), and no dependent reads
-			// it either, so only the object-scoped marker is written.
+			// covered by the object-scoped marker), and no cross-type
+			// dependent reads it either. It does feed marketing_auditor via
+			// cascadingFeeders, though, so that relation's type-wide marker
+			// is still bumped alongside the object-scoped marker.
 			relation: "global_marketing_ops",
-			want:     []invalidationPair{{object: "project:123", relation: "*"}},
+			want: []invalidationPair{
+				{object: "project:123", relation: "*"},
+				{object: "project:*", relation: "marketing_auditor"},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -306,6 +355,35 @@ func TestComputeTypeInvalidationFanoutReachesProjectTransitively(t *testing.T) {
 	// ones that actually read the source.
 	assert.False(t, fanout["project"]["committee"]["member"],
 		"project's fanout must not include committee's member relation, which never reads project")
+}
+
+// TestComputeTypeInvalidationFanoutPreservesMultiHopCycle is the regression
+// test for the cycle-discarding bug: project_membership.auditor reads
+// "auditor from b2b_org" and b2b_org.auditor reads "key_contact from
+// membership", a genuine two-hop cycle from project_membership back to
+// itself via b2b_org. An earlier version of computeTypeInvalidationFanout's
+// fixed-point loop discarded any edge that returned to the source type
+// (treating "dd == t" the same as the already-handled direct "d == t"
+// no-op), which silently dropped this self-entry, so a b2b_org-mediated
+// change never emitted the stale project_membership:* marker it should
+// have. A self-entry produced by a real intermediate hop (b2b_org) must be
+// kept.
+func TestComputeTypeInvalidationFanoutPreservesMultiHopCycle(t *testing.T) {
+	fanout := computeTypeInvalidationFanout(crossTypeDependents)
+
+	assert.True(t, fanout["project_membership"]["project_membership"]["auditor"],
+		"project_membership's fanout must include its own auditor relation, reached via the real "+
+			"project_membership -> b2b_org -> project_membership cycle (b2b_org.auditor reads "+
+			"key_contact from membership; project_membership.auditor reads auditor from b2b_org)")
+
+	// The same cycle, exercised end-to-end through expandTypeWidePairs: a
+	// write to b2b_org's key_contact relation must still emit a type-wide
+	// marker for project_membership:*,auditor, closing the loop rather than
+	// silently dropping it.
+	got := expandTypeWidePairs("b2b_org:1", "key_contact")
+	assert.Contains(t, got, invalidationPair{object: "project_membership:*", relation: "auditor"},
+		"writing b2b_org's key_contact relation must still bump project_membership's type-wide auditor marker "+
+			"despite the cycle back to b2b_org's own type")
 }
 
 func TestInvalidationLookupAlwaysConsultsTypeWideWildcardMarker(t *testing.T) {

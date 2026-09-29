@@ -100,7 +100,10 @@
     "relinv",
     "cachekey",
     "userset",
-    "unioned"
+    "unioned",
+    "dedupe",
+    "dedupes",
+    "deduped"
   ],
   "overrides": [
     {

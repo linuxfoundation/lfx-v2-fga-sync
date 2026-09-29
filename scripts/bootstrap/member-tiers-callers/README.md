@@ -63,6 +63,6 @@ go run ./scripts/bootstrap/member-tiers-callers \
   -lfx-one-client-id     <lfx-one-m2m-client-id>
 ```
 
-After writing the tuples the script bumps the fga-sync JetStream cache's per-`(object, relation)` invalidation marker (`inv.{base32(object#relation)}`, written via `cachekey.Invalidation`) for the caller's `member` relation, so any cached denial for that pair is immediately superseded. It does not bump a single global key.
+After writing the tuples the script bumps the fga-sync JetStream cache's per-`(object, relation)` invalidation marker (`inv.{base32(object#relation)}`, written via `cachekey.Invalidation`) for the caller's `member` relation, so any cached denial for that pair is immediately superseded. It also dual-writes the legacy global `inv` key (`cachekey.LegacyInvalidationKey`) for rollout compatibility with fga-sync pods still running pre-`relinv` code — see "Rolling deployment: legacy global `inv` marker" in `docs/fga-sync-contract.md`. Both markers will be removed once that rollout is complete.
 
 Use `-dry-run` to print the tuples without writing them (no env vars required).

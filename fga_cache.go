@@ -32,8 +32,10 @@ import (
 // pkg/constants already names because more than one call site outside this
 // file references them too).
 const (
-	relMarketingOps = "marketing_ops"
-	relManager      = "manager"
+	relMarketingOps       = "marketing_ops"
+	relManager            = "manager"
+	relMarketingAuditor   = "marketing_auditor"
+	relGlobalMarketingOps = "global_marketing_ops"
 )
 
 const (
@@ -232,7 +234,7 @@ const (
 var cascadingRelations = map[string]map[string]bool{
 	fgaTypeProject: {
 		constants.RelationOwner: true, constants.RelationWriter: true, constants.RelationAuditor: true,
-		relMarketingOps: true, "marketing_auditor": true,
+		relMarketingOps: true, relMarketingAuditor: true,
 	},
 	fgaTypeB2BOrg: {constants.RelationWriter: true, constants.RelationAuditor: true},
 }
@@ -246,6 +248,97 @@ var cascadingRelations = map[string]map[string]bool{
 // write to one of that type's cascading relations — for every relation in
 // cascadingRelations[typ], since re-parenting can change any of them.
 var hierarchyEdgeRelations = map[string]bool{"parent": true, "child": true}
+
+// cascadingFeeders lists, for types in cascadingRelations, DIRECT same-object
+// relation-to-relation edges from model.fga: writing the source relation
+// (map key) on an object changes the EVALUATED value of every destination
+// relation (map value) on that SAME object, via a same-object "or
+// <relation>"/"[<type>#<relation>]" reference — not the parent/child
+// hierarchy edge itself (see hierarchyEdgeRelations for that). For example
+// project.writer is defined as "[user] or owner or writer from parent", so
+// writing project:X's owner changes project:X's own evaluated writer (and
+// transitively auditor, since writer feeds auditor) even though writer's
+// tuple was never written. The source relation need not itself be a
+// cascading relation: b2b_org.owner and b2b_org.global_org_admin are plain
+// [user]/[team#member] grants with no "from parent"/"from child" of their
+// own, but they feed directly into b2b_org.writer, which does cascade — so
+// a write to b2b_org:X's owner can, via X's now-changed writer, also change
+// a DIFFERENT b2b_org object's cached writer/auditor check reached through
+// "writer from parent"/"writer from child". Because the destination
+// relation(s) reached (directly or transitively, see cascadingFanout below)
+// are cascading, the object-scoped wildcardRelation marker (scoped to the
+// written object only) cannot express that cross-object effect, so
+// expandTypeWidePairs additionally emits a type-wide (type:*, relation)
+// marker for every relation in cascadingFanout[typ][relation].
+//
+// Keep in sync with model.fga alongside cascadingRelations/
+// hierarchyEdgeRelations: add an entry whenever a relation gains a
+// same-object reference into a relation listed in cascadingRelations.
+var cascadingFeeders = map[string]map[string][]string{
+	fgaTypeProject: {
+		"global_owner":           {constants.RelationOwner},
+		constants.RelationOwner:  {constants.RelationWriter},
+		constants.RelationWriter: {constants.RelationAuditor},
+		relGlobalMarketingOps:    {relMarketingAuditor},
+		relMarketingOps:          {relMarketingAuditor},
+	},
+	fgaTypeB2BOrg: {
+		constants.RelationOwner:  {constants.RelationWriter},
+		"global_org_admin":       {constants.RelationWriter},
+		constants.RelationWriter: {constants.RelationAuditor},
+	},
+}
+
+// cascadingFanout is the transitive closure of cascadingFeeders, computed
+// once at init the same way typeInvalidationFanout closes
+// crossTypeDependents: cascadingFanout[typ][relation] is the full set of
+// cascading relations (see cascadingRelations) whose type-wide (type:*,
+// relation) marker must additionally be written when relation is written on
+// an object of type typ, so that a single "owner" write on project fans out
+// to both "writer" and "auditor", not just the one directly-fed relation.
+var cascadingFanout = computeCascadingFanout(cascadingFeeders)
+
+func computeCascadingFanout(direct map[string]map[string][]string) map[string]map[string]map[string]bool {
+	fanout := make(map[string]map[string]map[string]bool, len(direct))
+	for typ, edges := range direct {
+		set := make(map[string]map[string]bool, len(edges))
+		for src, targets := range edges {
+			s := set[src]
+			if s == nil {
+				s = make(map[string]bool, len(targets))
+				set[src] = s
+			}
+			for _, d := range targets {
+				s[d] = true
+			}
+		}
+		for changed := true; changed; {
+			changed = false
+			for _, targets := range set {
+				var extra []string
+				for d := range targets {
+					more, ok := set[d]
+					if !ok {
+						continue
+					}
+					for dd := range more {
+						if !targets[dd] {
+							extra = append(extra, dd)
+						}
+					}
+				}
+				for _, e := range extra {
+					if !targets[e] {
+						targets[e] = true
+						changed = true
+					}
+				}
+			}
+		}
+		fanout[typ] = set
+	}
+	return fanout
+}
 
 // crossTypeIrrelevant lists, per source type, WRITABLE relations verified
 // against model.fga to never feed any cross-type dependent's "from <type>"
@@ -277,7 +370,7 @@ var hierarchyEdgeRelations = map[string]bool{"parent": true, "child": true}
 // direct "from project" reference used by at least one dependent, so none
 // of those are excluded.
 var crossTypeIrrelevant = map[string]map[string]bool{
-	fgaTypeProject: {relMarketingOps: true, "global_marketing_ops": true},
+	fgaTypeProject: {relMarketingOps: true, relGlobalMarketingOps: true},
 }
 
 // Relation lists reused across several crossTypeDependents entries below,
@@ -380,9 +473,9 @@ var crossTypeDependents = map[string][]crossTypeEdge{
 		// meeting_coordinator, mentorship_program_admin (all static [user]
 		// grants unrelated to team).
 		{typ: fgaTypeProject, relations: []string{
-			"global_owner", "global_writer", "global_auditor", "global_marketing_ops",
+			"global_owner", "global_writer", "global_auditor", relGlobalMarketingOps,
 			"owner", constants.RelationWriter, "writer_guard", constants.RelationAuditor, "auditor_guard",
-			relMarketingOps, "marketing_auditor", "campaign_manager",
+			relMarketingOps, relMarketingAuditor, "campaign_manager",
 			constants.RelationViewer, "meetings_creator", "mentorship_program_creator",
 		}},
 		// committee.auditor reads [team#member] directly.
@@ -422,6 +515,19 @@ var crossTypeDependents = map[string][]crossTypeEdge{
 // asymmetric-cost tradeoff documented there), so propagating from an
 // intermediate type D to a further type E is likewise unconditional: D's
 // full relation set (as seen by T) is unioned into T's fanout for E.
+//
+// The cycle above also means typeInvalidationFanout[T] can, correctly,
+// contain T itself: walking project_membership -> b2b_org and back to
+// project_membership is a genuine 2-hop cycle, not a no-op self-reference,
+// so fanout[project_membership][project_membership] ends up containing
+// b2b_org's project_membership-directed relations (writer/auditor). That
+// is intentional and required — see the comment inside
+// computeTypeInvalidationFanout's fixed-point loop — because a write to one
+// project_membership object (M1) can, via the type-wide b2b_org marker it
+// bumps, change the evaluated auditor result for a completely different
+// project_membership object (M2); only a type-wide project_membership:*
+// marker can express that, since this layer has no reverse index from M1 to
+// M2.
 var typeInvalidationFanout = computeTypeInvalidationFanout(crossTypeDependents)
 
 func computeTypeInvalidationFanout(direct map[string][]crossTypeEdge) map[string]map[string]map[string]bool {
@@ -469,9 +575,27 @@ func computeTypeInvalidationFanout(direct map[string][]crossTypeEdge) map[string
 					continue
 				}
 				for dd, relations := range fanout[d] {
-					if dd == t {
-						continue
-					}
+					// dd == t here means the walk returned to the source type
+					// through a genuine >=1-hop cycle (d != t was just
+					// checked above, so this is never a trivial direct
+					// self-edge — crossTypeDependents never lists a type as
+					// its own dependent). That is real: project_membership
+					// depends on b2b_org (via key_contact/auditor), and
+					// b2b_org depends back on project_membership (via
+					// writer/auditor: model.fga defines b2b_org.auditor as
+					// including "key_contact from membership" and
+					// project_membership.auditor as including "auditor from
+					// b2b_org"). Writing project_membership:M1's key_contact
+					// bumps a type-wide b2b_org:*'s key_contact/auditor
+					// marker (every b2b_org, since the specific linked org
+					// isn't known here); because that marker is type-wide, it
+					// can affect ANY project_membership whose b2b_org
+					// reference composes auditor from that org — e.g. a
+					// different membership M2 — not just M1. Discarding this
+					// edge would leave no type-wide project_membership:*
+					// marker for that case, so M2's cached auditor check
+					// would stay fresh incorrectly. Do not reintroduce a
+					// dd == t skip here.
 					relList := make([]string, 0, len(relations))
 					for r := range relations {
 						relList = append(relList, r)
@@ -508,11 +632,17 @@ func objectType(object string) string {
 // not invalidate cached checks on the unrelated project:456 (see PR/issue
 // #2358 — unrelated writes must not invalidate untouched results).
 //
-// When relation is a same-type cascading relation, or a hierarchy-edge
-// relation (see cascadingRelations/hierarchyEdgeRelations), it additionally
-// returns a type-wide (type:*, relation) marker for the affected cascading
-// relation(s) of this SAME type, closing the ancestor/descendant gap a
-// purely object-scoped marker cannot express.
+// When relation is a same-type cascading relation, feeds one (directly or
+// transitively — see cascadingFeeders/cascadingFanout), or is a
+// hierarchy-edge relation (see cascadingRelations/hierarchyEdgeRelations),
+// it additionally returns a type-wide (type:*, relation) marker for the
+// affected cascading relation(s) of this SAME type, closing the
+// ancestor/descendant gap a purely object-scoped marker cannot express. For
+// example writing project:123's owner returns markers for project:*'s
+// "owner" AND "writer" AND "auditor" (owner feeds writer, writer feeds
+// auditor), not just "owner" — otherwise a descendant project's cached
+// "writer"/"auditor" check, reached via "writer from parent"/"auditor from
+// parent", would stay fresh despite depending on the now-changed owner.
 //
 // When the written type has OTHER types in typeInvalidationFanout (cross-type
 // dependents) and relation is not listed in crossTypeIrrelevant for this
@@ -547,8 +677,21 @@ func expandTypeWidePairs(object, relation string) []invalidationPair {
 		switch {
 		case cascading[relation]:
 			pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: relation})
+			for r := range cascadingFanout[typ][relation] {
+				pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
+			}
 		case hierarchyEdgeRelations[relation]:
 			for r := range cascading {
+				pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
+			}
+		default:
+			// relation does not itself cascade (e.g. b2b_org's owner and
+			// global_org_admin are plain grants), but it may still feed a
+			// cascading relation on this same object (see cascadingFeeders):
+			// b2b_org.writer includes "... or owner or global_org_admin",
+			// and writer cascades. cascadingFanout[typ][relation] is nil
+			// (safe to range over) when relation feeds nothing cascading.
+			for r := range cascadingFanout[typ][relation] {
 				pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
 			}
 		}
@@ -618,6 +761,29 @@ func (c CacheLayer) invalidate(ctx context.Context, pairs []invalidationPair) {
 			return nil
 		})
 	}
+	// ROLLOUT COMPATIBILITY, REMOVE AFTER FULL ROLLOUT (see
+	// cachekey.LegacyInvalidationKey): dual-write the legacy global "inv"
+	// marker alongside the scoped markers above. Without this, a pod
+	// running old code — which only ever reads the bare "inv" key, never
+	// the "inv."-prefixed scoped markers this method writes — would miss
+	// every invalidation processed by a pod running this code during a
+	// rolling deploy, and could keep serving a cached "true" under its old
+	// "rel."-prefixed entries for the full TTL. This accepts a temporary,
+	// coarser global miss on old pods (every write now bumps their one
+	// shared key, not just the affected pair) in exchange for closing that
+	// fail-open window; delete this write once every pod and
+	// out-of-process writer (e.g. scripts/bootstrap/member-tiers-callers)
+	// is confirmed running post-relinv code.
+	g.Go(func() error {
+		if slotErr := withCacheOpSlot(gctx, func() {
+			if _, err := c.bucket.Put(gctx, cachekey.LegacyInvalidationKey, []byte("1")); err != nil {
+				logger.With(errKey, err).ErrorContext(ctx, "failed to write legacy cache invalidation marker")
+			}
+		}); slotErr != nil {
+			logger.With(errKey, slotErr).ErrorContext(ctx, "failed to write legacy cache invalidation marker")
+		}
+		return nil
+	})
 	// Every closure above always returns nil (failures are logged per-pair,
 	// not propagated), so g.Wait() can only ever return nil here; it is
 	// called solely to block until every marker write finishes.
@@ -648,24 +814,19 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context, object, relation st
 	return lastInvalidation, nil
 }
 
-// legacyInvalidationKey is the single global invalidation marker written by
-// pre-relinv-rollout pods (see CacheLayer.invalidate's predecessor, before
-// per-(object, relation) markers existed): a bare "inv" key with no prefix or
-// encoding, bumped on every write/delete regardless of which object or
-// relation it touched.
-//
-// ROLLOUT COMPATIBILITY, REMOVE AFTER FULL ROLLOUT: during a rolling deploy,
-// an old pod can still be running the pre-relinv code path and process a
-// revoke by writing only this legacy key — it has no notion of the new
-// "inv."-prefixed per-pair markers. A new pod that never reads this key would
-// keep serving a cached "true" for that (object, relation) pair until the
-// cache entry's own TTL expires, a fail-open window spanning the whole
-// rollout. Reading it here and taking the latest of the three timestamps
-// closes that gap. Delete legacyInvalidationKey, getLastLegacyInvalidation,
-// and the getLegacy call site in invalidationLookup.get once every pod in the
-// fleet is confirmed running post-relinv code (no pod can write this key
-// anymore).
-const legacyInvalidationKey = "inv"
+// legacyInvalidationKey aliases cachekey.LegacyInvalidationKey (see its doc
+// for the full rollout-compatibility rationale). This service both writes it
+// (CacheLayer.invalidate, alongside the new scoped markers) and reads it
+// (getLastLegacyInvalidation/getLegacy below): during a rolling deploy, a
+// pod on either side of the rollout — old code that only knows this bare
+// key, or new code that writes/reads the "inv."-prefixed per-pair markers —
+// must still observe an invalidation the other side processed. Delete this
+// alias, the dual-write in CacheLayer.invalidate, getLastLegacyInvalidation,
+// and the getLegacy call site in invalidationLookup.get once every pod in
+// the fleet AND every out-of-process writer (e.g.
+// scripts/bootstrap/member-tiers-callers) is confirmed running post-relinv
+// code (nothing can write or need to read this key anymore).
+const legacyInvalidationKey = cachekey.LegacyInvalidationKey
 
 // getLastLegacyInvalidation reads the legacy global invalidation marker and
 // returns its creation time, or the zero time when it has not been written
