@@ -18,7 +18,7 @@ pending globally.
 | `AccessCheckSubject` | `lfx.access_check.request` | `accessCheckHandler` | Batch access check (used by query-service) |
 | `ReadTuplesSubject` | `lfx.access_check.read_tuples` | `readTuplesHandler` | Read direct tuples for a user + object type |
 | `GenericUpdateAccessSubject` | `lfx.fga-sync.update_access` | `genericUpdateAccessHandler` | JetStream full sync of publisher-managed relations |
-| `GenericDeleteAccessSubject` | `lfx.fga-sync.delete_access` | `genericDeleteAccessHandler` | JetStream removal of publisher-managed relations; preserves `team:*` grants |
+| `GenericDeleteAccessSubject` | `lfx.fga-sync.delete_access` | `genericDeleteAccessHandler` | JetStream removal of publisher-managed relations; deletes `global_*` team grants and preserves other team grants |
 | `GenericMemberPutSubject` | `lfx.fga-sync.member_put` | `genericMemberPutHandler` | JetStream add or update of a per-user relation |
 | `GenericMemberRemoveSubject` | `lfx.fga-sync.member_remove` | `genericMemberRemoveHandler` | JetStream removal of a per-user relation |
 
