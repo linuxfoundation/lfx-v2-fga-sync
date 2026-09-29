@@ -65,7 +65,11 @@ func TestInvalidationLookupMemoizesPerPair(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
 		Return(nil, jetstream.ErrKeyNotFound).Once()
-	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "*")).
+		Return(nil, jetstream.ErrKeyNotFound).Once()
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound).Once()
+	kv.On("Get", mock.Anything, legacyInvalidationKey).
 		Return(nil, jetstream.ErrKeyNotFound).Once()
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
@@ -74,88 +78,200 @@ func TestInvalidationLookupMemoizesPerPair(t *testing.T) {
 	second := lookup.get(context.Background(), "project:1", "viewer")
 
 	assert.Equal(t, first, second)
-	// Two distinct pairs are consulted (the object-scoped marker and the
-	// type-wide blanket marker), each memoized, so the second get() call
-	// hits the memo for both rather than re-fetching either from the KV.
-	kv.AssertNumberOfCalls(t, "Get", 2)
+	// Four distinct markers are consulted on the first call (the
+	// object-scoped literal marker, the object-scoped wildcard-relation
+	// marker, the type-wide marker scoped to this relation, and the
+	// once-per-batch legacy global marker); all four are memoized (the
+	// legacy one via sync.Once), so the second get() call hits the memo for
+	// every one of them rather than re-fetching from the KV.
+	kv.AssertNumberOfCalls(t, "Get", 4)
 }
 
-func TestInvalidationLookupTreatsErrorAsJustInvalidated(t *testing.T) {
+// TestInvalidationLookupTreatsErrorAsForced is the regression test for the
+// clock-dependent staleness hazard: a KV lookup error must force the entry
+// to be treated as stale via an explicit flag (invalidationOutcome.forced),
+// never via a time.Now() timestamp compared against the cached entry's
+// JetStream-server-clock entry.Created(). A wall-clock fallback can be
+// silently "fresh enough" if the JetStream server's clock runs ahead of
+// this pod's, which would wrongly accept a cache entry despite the failed
+// lookup. See invalidationOutcome's doc comment.
+func TestInvalidationLookupTreatsErrorAsForced(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
 		Return(nil, assert.AnError)
-	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "*")).
+		Return(nil, assert.AnError)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "viewer")).
+		Return(nil, assert.AnError)
+	kv.On("Get", mock.Anything, legacyInvalidationKey).
 		Return(nil, assert.AnError)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
-	before := time.Now()
 	got := lookup.get(context.Background(), "project:1", "viewer")
-	after := time.Now()
 
-	assert.False(t, got.Before(before))
-	assert.False(t, got.After(after))
+	assert.True(t, got.forced, "a lookup error must force the entry stale, independent of any clock comparison")
 }
 
 func TestExpandTypeWidePairs(t *testing.T) {
 	tests := []struct {
-		name   string
-		object string
-		want   []invalidationPair
+		name     string
+		object   string
+		relation string
+		want     []invalidationPair
 	}{
 		{
-			name:   "leaf type with no dependents gets only its own blanket marker",
-			object: "committee_invite:1",
-			want:   []invalidationPair{{object: "committee_invite:*", relation: "*"}},
+			name:     "leaf type with no dependents gets only its own object-scoped marker",
+			object:   "committee_invite:1",
+			relation: "viewer",
+			want:     []invalidationPair{{object: "committee_invite:1", relation: "*"}},
 		},
 		{
-			// committee's own direct dependents are committee_invite,
-			// groupsio_mailing_list, meeting, v1_meeting, vote, survey; the
-			// closure then absorbs each of THEIR dependents too (meeting ->
-			// meeting_attachment/past_meeting -> past_meeting_attachment,
-			// v1_meeting -> v1_past_meeting, vote -> vote_response, survey
-			// -> survey_response), since a committee change can ripple
-			// through any of those chains.
-			name:   "committee write blanket-invalidates its own and every transitive dependent type",
-			object: "committee:1",
+			// vote's only direct dependent is vote_response, and only its
+			// "auditor" relation reads "auditor from vote" — vote_response
+			// has no "writer"/"viewer" relation of its own to sweep in, so
+			// this is the smallest hand-verifiable cross-type case. "writer"
+			// is not a cascading relation for vote (vote has no same-type
+			// hierarchy), so no extra type-wide marker for vote itself.
+			name:     "vote write blanket-invalidates only vote_response's auditor relation",
+			object:   "vote:1",
+			relation: "writer",
 			want: []invalidationPair{
-				{object: "committee:*", relation: "*"},
-				{object: "committee_invite:*", relation: "*"},
-				{object: "groupsio_mailing_list:*", relation: "*"},
-				{object: "meeting:*", relation: "*"},
-				{object: "meeting_attachment:*", relation: "*"},
-				{object: "past_meeting:*", relation: "*"},
-				{object: "past_meeting_attachment:*", relation: "*"},
-				{object: "v1_meeting:*", relation: "*"},
-				{object: "v1_past_meeting:*", relation: "*"},
-				{object: "vote:*", relation: "*"},
-				{object: "vote_response:*", relation: "*"},
-				{object: "survey:*", relation: "*"},
-				{object: "survey_response:*", relation: "*"},
+				{object: "vote:1", relation: "*"},
+				{object: "vote_response:*", relation: "auditor"},
 			},
 		},
 		{
-			name:   "b2b_org/project_membership cycle resolves to a finite closure",
-			object: "b2b_org:1",
+			// b2b_org -> project_membership -> b2b_org is a real cycle
+			// (project_membership.auditor reads "auditor from b2b_org";
+			// b2b_org.auditor reads "key_contact from membership"), so the
+			// closure must terminate rather than loop forever, and must not
+			// write a blanket "*" relation back onto b2b_org itself via the
+			// cross-type fanout (that self-hop is skipped there; the
+			// written object's own type is only ever covered by the
+			// object-scoped marker or cascadingRelations, never a
+			// cross-type-fanout one — see PR/issue #2358).
+			// "global_org_admin" is deliberately not in
+			// cascadingRelations[b2b_org] (writer/auditor only), so this
+			// case isolates the cross-type-only behavior; see
+			// TestExpandTypeWidePairsCascadesSameTypeHierarchy for the
+			// writer/auditor + cascadingRelations interaction.
+			name:     "b2b_org/project_membership cycle resolves to a finite, relation-scoped closure",
+			object:   "b2b_org:1",
+			relation: "global_org_admin",
 			want: []invalidationPair{
-				{object: "b2b_org:*", relation: "*"},
-				{object: "project_membership:*", relation: "*"},
-				{object: "crowdfunding_initiative:*", relation: "*"},
+				{object: "b2b_org:1", relation: "*"},
+				{object: "project_membership:*", relation: "writer"},
+				{object: "project_membership:*", relation: "auditor"},
+				{object: "crowdfunding_initiative:*", relation: "writer"},
+				{object: "crowdfunding_initiative:*", relation: "viewer"},
 			},
 		},
 		{
-			name:   "unknown type still gets its own blanket marker",
-			object: "user:1",
-			want:   []invalidationPair{{object: "user:*", relation: "*"}},
+			name:     "unknown type still gets its own object-scoped marker",
+			object:   "user:1",
+			relation: "member",
+			want:     []invalidationPair{{object: "user:1", relation: "*"}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := expandTypeWidePairs(tt.object)
+			got := expandTypeWidePairs(tt.object, tt.relation)
 			assert.ElementsMatch(t, tt.want, got)
 		})
 	}
+}
+
+// TestExpandTypeWidePairsCascadesSameTypeHierarchy is the regression test
+// for the same-type ancestor/descendant cascade gap: writing a cascading
+// relation (or a hierarchy edge) on one object of a type must additionally
+// bump a type-wide (type:*, relation) marker, because the object-scoped
+// marker alone cannot reach a *different* object of the same type that
+// cascades from/to the written one (see cascadingRelations,
+// hierarchyEdgeRelations).
+func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
+	t.Run("writing a cascading relation bumps only that relation's type-wide marker", func(t *testing.T) {
+		got := expandTypeWidePairs("project:123", "owner")
+		assert.Contains(t, got, invalidationPair{object: "project:*", relation: "owner"})
+		assert.NotContains(t, got, invalidationPair{object: "project:*", relation: "writer"},
+			"writing owner must not also bump writer's type-wide marker; each cascading relation is scoped separately")
+	})
+
+	t.Run("writing the parent hierarchy edge bumps every cascading relation's type-wide marker", func(t *testing.T) {
+		got := expandTypeWidePairs("project:123", "parent")
+		for _, r := range []string{"owner", "writer", "auditor", "marketing_ops", "marketing_auditor"} {
+			assert.Contains(t, got, invalidationPair{object: "project:*", relation: r},
+				"re-parenting project:123 must invalidate every cascading relation, since any of them could now resolve differently")
+		}
+	})
+
+	t.Run("b2b_org writer/auditor cascade via both parent and child edges", func(t *testing.T) {
+		got := expandTypeWidePairs("b2b_org:1", "child")
+		assert.Contains(t, got, invalidationPair{object: "b2b_org:*", relation: "writer"})
+		assert.Contains(t, got, invalidationPair{object: "b2b_org:*", relation: "auditor"})
+	})
+
+	t.Run("non-cascading relation gets no type-wide same-type marker", func(t *testing.T) {
+		got := expandTypeWidePairs("project:123", "meeting_coordinator")
+		assert.NotContains(t, got, invalidationPair{object: "project:*", relation: "meeting_coordinator"})
+	})
+}
+
+// TestExpandTypeWidePairsCrossTypeIrrelevant is the regression test for
+// crossTypeIrrelevant: a write to a relation with no possible path into any
+// cross-type dependent's guard must not bump that dependent's type-wide
+// marker, even though project has entries in typeInvalidationFanout for
+// other relations.
+func TestExpandTypeWidePairsCrossTypeIrrelevant(t *testing.T) {
+	tests := []struct {
+		relation string
+		want     []invalidationPair
+	}{
+		{
+			// marketing_ops itself cascades same-type via "marketing_ops
+			// from parent" (see cascadingRelations), so it still gets a
+			// same-type project:* marker — but never a cross-type one for
+			// committee/meeting/etc., since no dependent reads it.
+			relation: "marketing_ops",
+			want: []invalidationPair{
+				{object: "project:123", relation: "*"},
+				{object: "project:*", relation: "marketing_ops"},
+			},
+		},
+		{
+			// global_marketing_ops does not itself cascade same-type (only
+			// marketing_auditor, which composes it, does — and that's
+			// covered by the object-scoped marker), and no dependent reads
+			// it either, so only the object-scoped marker is written.
+			relation: "global_marketing_ops",
+			want:     []invalidationPair{{object: "project:123", relation: "*"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.relation, func(t *testing.T) {
+			got := expandTypeWidePairs("project:123", tt.relation)
+			assert.ElementsMatch(t, tt.want, got,
+				"project.%s never feeds a cross-type dependent's guard", tt.relation)
+		})
+	}
+}
+
+// TestExpandTypeWidePairsIsRelationScoped is the direct regression test for
+// the type-wide fanout being relation-aware rather than a blanket-per-type
+// "*" marker (see PR/issue #2358): a write to project:123 must invalidate
+// committee's project-derived relations, but must never invalidate
+// committee's "member" relation (a plain user grant with nothing to do with
+// project), nor write a blanket all-relations marker for committee at all.
+func TestExpandTypeWidePairsIsRelationScoped(t *testing.T) {
+	pairs := expandTypeWidePairs("project:123", "writer")
+
+	assert.Contains(t, pairs, invalidationPair{object: "committee:*", relation: "writer"})
+	assert.Contains(t, pairs, invalidationPair{object: "committee:*", relation: "auditor"})
+	assert.NotContains(t, pairs, invalidationPair{object: "committee:*", relation: "member"},
+		"committee.member never reads project; a project write must not stale it")
+	assert.NotContains(t, pairs, invalidationPair{object: "committee:*", relation: "*"},
+		"project's fanout must never write a blanket all-relations marker for committee")
 }
 
 func TestComputeTypeInvalidationFanoutReachesProjectTransitively(t *testing.T) {
@@ -164,42 +280,112 @@ func TestComputeTypeInvalidationFanoutReachesProjectTransitively(t *testing.T) {
 	// mentorship_task depends on mentorship_application, which depends on
 	// mentorship_program, which depends on project: a three-hop chain that
 	// only resolves correctly if the closure keeps iterating past one pass.
-	assert.True(t, fanout["project"]["mentorship_task"],
-		"project's fanout must transitively reach mentorship_task through mentorship_program and mentorship_application")
-	assert.True(t, fanout["project"]["committee_invite"],
-		"project's fanout must transitively reach committee_invite through committee")
+	assert.True(t, fanout["project"]["mentorship_task"]["auditor"],
+		"project's fanout must transitively reach mentorship_task's auditor relation through mentorship_program and mentorship_application")
+	assert.True(t, fanout["project"]["committee_invite"]["viewer"],
+		"project's fanout must transitively reach committee_invite's viewer relation through committee")
+
+	// Direct userset edges (team#member / mentorship_approver_team#member):
+	// these types are never referenced via "from <field>" in model.fga, only
+	// directly as "[team#member]"/"[mentorship_approver_team#member]", so a
+	// revoked team membership must still reach every relation that reads it.
+	assert.True(t, fanout["team"]["project"]["global_owner"],
+		"team's fanout must reach project's global_owner relation (reads team#member directly)")
+	assert.True(t, fanout["team"]["committee"]["auditor"],
+		"team's fanout must reach committee's auditor relation (reads team#member directly)")
+	assert.True(t, fanout["team"]["b2b_org"]["auditor"],
+		"team's fanout must reach b2b_org's auditor relation (reads team#member directly)")
+	assert.True(t, fanout["team"]["project_application"]["formation_team"],
+		"team's fanout must reach project_application's formation_team relation (reads team#member directly)")
+	assert.True(t, fanout["mentorship_approver_team"]["mentorship_program"]["global_mentorship_approver"],
+		"mentorship_approver_team's fanout must reach mentorship_program's global_mentorship_approver relation (reads mentorship_approver_team#member directly)")
+
+	// Relation scoping (see PR/issue #2358 — unrelated writes must not
+	// invalidate untouched results): a type showing up in another type's
+	// fanout does not mean EVERY one of its relations is swept in, only the
+	// ones that actually read the source.
+	assert.False(t, fanout["project"]["committee"]["member"],
+		"project's fanout must not include committee's member relation, which never reads project")
 }
 
 func TestInvalidationLookupAlwaysConsultsTypeWideWildcardMarker(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	objectEntry := &MockKeyValueEntry{created: time.Now().Add(-time.Hour)}
+	objectWildcardEntry := &MockKeyValueEntry{created: time.Now().Add(-30 * time.Minute)}
 	wildcardEntry := &MockKeyValueEntry{created: time.Now()}
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "writer")).
 		Return(objectEntry, nil)
-	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "*")).
+		Return(objectWildcardEntry, nil)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "writer")).
 		Return(wildcardEntry, nil)
+	kv.On("Get", mock.Anything, legacyInvalidationKey).
+		Return(nil, jetstream.ErrKeyNotFound)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
 	got := lookup.get(context.Background(), "project:1", "writer")
 
-	assert.Equal(t, wildcardEntry.created, got, "the later blanket marker must win over the object-scoped one")
-	kv.AssertNumberOfCalls(t, "Get", 2)
+	assert.False(t, got.forced)
+	assert.Equal(t, wildcardEntry.created, got.t, "the later blanket marker must win over the object-scoped and object-wildcard ones")
+	kv.AssertNumberOfCalls(t, "Get", 4)
 }
 
 func TestInvalidationLookupConsultsWildcardMarkerForAnyRelation(t *testing.T) {
 	kv := new(MockNatsKeyValue)
 	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
 		Return(nil, jetstream.ErrKeyNotFound)
-	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "*")).
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "*")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, legacyInvalidationKey).
 		Return(nil, jetstream.ErrKeyNotFound)
 	cache := CacheLayer{bucket: kv}
 	lookup := newInvalidationLookup(cache)
 
 	lookup.get(context.Background(), "project:1", "viewer")
 
-	kv.AssertNumberOfCalls(t, "Get", 2)
-	kv.AssertCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:*", "*"))
+	kv.AssertNumberOfCalls(t, "Get", 4)
+	kv.AssertCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:*", "viewer"))
+	kv.AssertCalled(t, "Get", mock.Anything, cachekey.Invalidation("project:1", "*"))
+}
+
+func TestInvalidationLookupConsultsLegacyGlobalMarkerOnce(t *testing.T) {
+	kv := new(MockNatsKeyValue)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "auditor")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:1", "*")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "viewer")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	kv.On("Get", mock.Anything, cachekey.Invalidation("project:*", "auditor")).
+		Return(nil, jetstream.ErrKeyNotFound)
+	legacyEntry := &MockKeyValueEntry{created: time.Now()}
+	kv.On("Get", mock.Anything, legacyInvalidationKey).
+		Return(legacyEntry, nil).Once()
+	cache := CacheLayer{bucket: kv}
+	lookup := newInvalidationLookup(cache)
+
+	got := lookup.get(context.Background(), "project:1", "viewer")
+	got2 := lookup.get(context.Background(), "project:1", "auditor")
+
+	assert.False(t, got.forced)
+	assert.False(t, got2.forced)
+	assert.Equal(t, legacyEntry.created, got.t,
+		"the legacy global marker must win when it is the latest of the timestamps consulted")
+	assert.Equal(t, legacyEntry.created, got2.t,
+		"a second get() call for a different relation on the same object must still observe the legacy marker")
+	// The legacy key is read exactly once across both get() calls, memoized
+	// via sync.Once rather than the per-pair memo map. The object-scoped
+	// wildcard-relation marker (project:1, "*") is also shared between the
+	// two calls and only fetched once. So: 4 calls for the first get()
+	// (object literal, object wildcard, type-wide-for-"viewer", legacy) plus
+	// 2 for the second (object literal for "auditor", type-wide-for-
+	// "auditor" — the object wildcard and legacy are both already memoized).
+	kv.AssertNumberOfCalls(t, "Get", 6)
 }
 
 func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T) {

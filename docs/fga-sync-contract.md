@@ -285,23 +285,43 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 
 Invalidation is scoped to `(object, relation)`, not per-user: OpenFGA batch
 writes/deletes are reported at that granularity, and resolving to individual
-users would require reading tuples back before invalidating. A write to
-`project:123#writer` invalidates cached entries for that object and
-relation; it does not affect `project:123#viewer`.
+users would require reading tuples back before invalidating. Every write
+always bumps the object-scoped marker for the pair it touched — a write to
+`project:123#writer` always invalidates cached entries for `project:123`'s
+`writer` relation. Whether it *also* bumps a broader, type-wide marker
+depends on the relation, per the cascading/cross-type rules below; a write to
+an unrelated relation on an unrelated object must not force every other
+cached check for that type to miss (see issue #2358).
 
 Because OpenFGA relations compose — both within a type (`project.writer`
-building on `project.owner`) and across types (`committee.writer` reading
-`writer_guard from project`) — a write to one object can change what a
-relation evaluates to on a *different* object that never had its own tuple
-written. Per-`(object, relation)` markers alone cannot catch this, so every
-write also bumps a blanket, type-wide marker: `(type:*, *)`. A write to any
-`project:*` tuple bumps the blanket marker for `project` itself (closing every
-intra-type chain on `project` for free, since one marker covers all of that
-type's relations) and for every type in `project`'s transitive dependency
-closure (`committee`, `meeting`, `vote`, `survey`, etc.), closing the
-cross-type chains too. Every cache lookup unconditionally consults both the
-object-scoped marker and its type's blanket marker and takes the later
-timestamp.
+building on `project.owner`, or cascading down/up a `parent`/`child`
+hierarchy) and across types (`committee.writer` reading `writer_guard from
+project`) — a write to one object can change what a relation evaluates to on
+a *different* object that never had its own tuple written. Per-`(object,
+relation)` markers alone cannot catch this, so two additional, narrowly
+scoped type-wide markers exist:
+
+- **Same-type cascade**: relations in `cascadingRelations` (`fga_cache.go`) —
+  `project.owner/writer/auditor/marketing_ops/marketing_auditor` (cascade via
+  `parent`) and `b2b_org.writer/auditor` (cascade via `parent`/`child`) — and
+  writes to the hierarchy-edge relations themselves (`parent`, `child`) bump
+  a `(type:*, relation)` marker for that specific relation (or, for an edge
+  write, for every relation the type cascades), so a write to an
+  ancestor/descendant/edge invalidates the whole cascade without needing a
+  hierarchy walk.
+- **Cross-type fanout**: a write to a relation that feeds some dependent
+  type's guard (per `crossTypeDependents`/`typeInvalidationFanout`) bumps a
+  `(dependentType:*, dependentRelation)` marker for every dependent relation
+  reached transitively — unless the written relation is listed in
+  `crossTypeIrrelevant` for its type (verified against `model.fga` to never
+  feed any dependent's guard), in which case this fanout is skipped.
+
+A write to a relation that is neither a same-type cascade relation, a
+hierarchy edge, nor cross-type-relevant (e.g. `project:123#executive_director`)
+only bumps its own object-scoped marker — it does not touch any `type:*`
+marker. Every cache lookup for a relation that participates in either
+type-wide mechanism consults both its object-scoped marker and the relevant
+`type:*` marker(s) and takes the later timestamp.
 
 ### Rolling deployment: cache key prefix rename
 
@@ -342,9 +362,18 @@ staleness, an over-inclusive one only costs extra cache misses.
   bucket; this forces every cached entry for that pair to be treated as
   stale on next read. There is no single key that invalidates the whole
   cache at once.
-- A successful OpenFGA write/delete re-invalidates only the `(object,
-  relation)` pairs it touched. When in doubt, trigger an `update_access` for
-  the specific object+relation in question rather than any resource.
+- A successful OpenFGA write/delete always re-invalidates the `(object,
+  relation)` pairs it touched, and *additionally* bumps a type-wide marker
+  only when the written relation is a same-type cascade/hierarchy-edge
+  relation or feeds a cross-type dependent (see above) — so a targeted write
+  to a cascading or cross-type-relevant relation can appear to invalidate
+  more than the touched pair, but a write to an unrelated relation should
+  not. If you observe widespread stale misses after a write to a relation
+  that is *not* in `cascadingRelations`/`hierarchyEdgeRelations` and is
+  listed in `crossTypeIrrelevant` (or has no cross-type dependents at all),
+  that is unexpected and worth investigating as a bug. When in doubt, trigger
+  an `update_access` for the specific object+relation in question rather than
+  any resource.
 
 ## Publishing Access Messages (Go Code Example)
 
