@@ -322,9 +322,10 @@ scoped type-wide markers exist:
   feed any dependent's guard), in which case this fanout is skipped.
 
 A write to a relation that is neither a same-type cascade relation, a
-hierarchy edge, nor cross-type-relevant (e.g. `project:123#executive_director`)
-only bumps its own object-scoped marker — it does not touch any `type:*`
-marker. Every cache lookup for a relation that participates in either
+hierarchy edge, nor cross-type-relevant (e.g. `project:123#global_marketing_ops`
+— `marketing_ops` itself is excluded here since it is a same-type cascade
+relation) only bumps its own object-scoped marker — it does not touch any
+`type:*` marker. Every cache lookup for a relation that participates in either
 type-wide mechanism consults both its object-scoped marker and the relevant
 `type:*` marker(s) and takes the later timestamp.
 
@@ -344,12 +345,15 @@ guard against there. This is a one-time rename tied to introducing the
 invalidation-marker scheme; do not bump it again for unrelated changes.
 
 The direct (non-transitive) edges are hand-maintained in
-`crossTypeDependents` in `fga_cache.go`, mirroring the `X from <type>`
-references in `charts/lfx-platform/files/model.fga`; `fga_cache.go` computes
-the full transitive closure once at init (`typeInvalidationFanout`). Keep
-`crossTypeDependents` in sync when a relation definition gains or loses a
-`from <type>` reference — an under-inclusive edge reintroduces stale-access
-staleness, an over-inclusive one only costs extra cache misses.
+`crossTypeDependents` in `fga_cache.go`, mirroring both the `X from <type>`
+references AND the `[<type>#relation]` direct userset references in
+`charts/lfx-platform/files/model.fga` (e.g. `team#member` and
+`mentorship_approver_team#member`); `fga_cache.go` computes the full
+transitive closure once at init (`typeInvalidationFanout`). Keep
+`crossTypeDependents` in sync when a relation definition gains or loses
+either a `from <type>` reference or a direct `[<type>#relation]` userset
+reference — an under-inclusive edge reintroduces stale-access staleness, an
+over-inclusive one only costs extra cache misses.
 
 ### Rolling deployment: legacy global `inv` marker
 
@@ -385,8 +389,12 @@ out-of-process writer is confirmed running post-`relinv` code.
 - Manually invalidate a specific object+relation by writing any value to
   `inv.{base32(object#relation)}` (no padding) in the `fga-sync-cache`
   bucket; this forces every cached entry for that pair to be treated as
-  stale on next read. There is no single key that invalidates the whole
-  cache at once.
+  stale on next read. Outside of the rollout window described above, there
+  is no other single key that invalidates the whole cache at once — but
+  during the rollout, every lookup still additionally consults the bare
+  legacy `inv` key (see "Rolling deployment: legacy global `inv` marker"),
+  so writing that key remains available as a manual global invalidation
+  until the legacy read path is removed.
 - A successful OpenFGA write/delete always re-invalidates the `(object,
   relation)` pairs it touched, and *additionally* bumps a type-wide marker
   only when the written relation is a same-type cascade/hierarchy-edge
