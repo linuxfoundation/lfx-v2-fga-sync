@@ -103,7 +103,9 @@
     "unioned",
     "dedupe",
     "dedupes",
-    "deduped"
+    "deduped",
+    "reparenting",
+    "Reparenting"
   ],
   "overrides": [
     {
