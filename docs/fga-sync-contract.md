@@ -323,12 +323,21 @@ scoped type-wide markers exist:
   transitive closure, `cascadingFanout`, is what `expandTypeWidePairs`
   consults to bump a `(type:*, relation)` marker for every relation reached.
   For example `project.executive_director` is a plain `[user]` grant with no
-  `from parent` of its own, but it feeds `project.auditor`, `project.
-  marketing_auditor`, and `project.campaign_manager` same-object — all three
-  of which cascade (directly or transitively) — so writing
-  `project:123#executive_director` bumps `project:*`'s `auditor`,
-  `marketing_auditor`, and `campaign_manager` markers even though
+  `from parent` of its own, but it feeds `project.auditor` and `project.
+  marketing_auditor` same-object — both of which cascade (directly or
+  transitively) — so writing `project:123#executive_director` bumps
+  `project:*`'s `auditor` and `marketing_auditor` markers even though
   `executive_director` itself never appears in `cascadingRelations`.
+  `project.campaign_manager` is also fed same-object by
+  `executive_director` (per model.fga), but is deliberately excluded from
+  this feeder edge: `campaign_manager` itself doesn't cascade, and neither
+  does `executive_director`, so a write to one project's
+  `executive_director` can only ever change that SAME project's
+  `campaign_manager` — already covered by the object-scoped marker — and
+  bumping a type-wide marker for it would invalidate every project's
+  `campaign_manager` cache for no cross-object benefit. `marketing_ops`
+  *is* listed as a `campaign_manager` feeder, though, since `marketing_ops`
+  itself cascades via `marketing_ops from parent`.
 - **Cross-type fanout**: a write to a relation that feeds some dependent
   type's guard (per `crossTypeDependents`/`typeInvalidationFanout`) bumps a
   `(dependentType:*, dependentRelation)` marker for every dependent relation

@@ -251,7 +251,14 @@ var cascadingRelations = map[string]map[string]bool{
 // which objects a cascading relation reaches without writing that relation
 // directly, so it must trigger the same type-wide invalidation as a direct
 // write to one of that type's cascading relations — for every relation in
-// cascadingRelations[typ], since re-parenting can change any of them.
+// cascadingRelations[typ], since re-parenting can change any of them. It
+// must also expand each of those through cascadingFanout[typ], the same
+// way the cascading[relation] branch below does: a descendant's derived
+// relations (writer_guard, auditor_guard, viewer, meetings_creator,
+// mentorship_program_creator, and campaign_manager via marketing_ops) read
+// a cascading relation on that SAME descendant object, so reparenting
+// changes their evaluated value too, not just the base cascading relations
+// themselves.
 var hierarchyEdgeRelations = map[string]bool{"parent": true, "child": true}
 
 // cascadingFeeders lists, for types in cascadingRelations, DIRECT same-object
@@ -282,15 +289,25 @@ var hierarchyEdgeRelations = map[string]bool{"parent": true, "child": true}
 // are same-object reads of writer/auditor but do not themselves compose
 // "from parent", so they are correctly absent from cascadingRelations — yet
 // project.viewer, project.meetings_creator, and
-// project.mentorship_program_creator all read writer_guard/auditor_guard,
-// and project.campaign_manager reads executive_director/marketing_ops/
-// global_marketing_ops directly. Without listing writer_guard/auditor_guard
-// (and executive_director/marketing_ops/global_marketing_ops for
-// campaign_manager) as sources here, a write to project:123's owner/writer/
-// auditor/marketing_ops/executive_director would never bump the type-wide
-// marker for any of these six relations, so a cached check for
-// project:456#viewer (a descendant of 123) would stay "fresh" despite its
-// evaluated value having changed.
+// project.mentorship_program_creator all read writer_guard/auditor_guard.
+// Without listing writer_guard/auditor_guard as sources here, a write to
+// project:123's owner/writer/auditor would never bump the type-wide marker
+// for any of these relations, so a cached check for project:456#viewer (a
+// descendant of 123) would stay "fresh" despite its evaluated value having
+// changed.
+//
+// project.campaign_manager ("executive_director or marketing_ops or
+// global_marketing_ops") is the one case where a destination's sources must
+// be split: only marketing_ops itself cascades ("marketing_ops from
+// parent"), so only it is listed as a campaign_manager source below.
+// executive_director and global_marketing_ops are plain grants with no
+// "from parent" of their own — writing either can only ever change
+// campaign_manager on the SAME object, which the unconditional
+// object-scoped wildcardRelation marker (see expandTypeWidePairs) already
+// covers, so listing them here would bump the type-wide (project:*,
+// campaign_manager) marker for every project in the store on every
+// executive_director/global_marketing_ops write, for no cross-object
+// benefit — exactly the cold-cache cost this cache exists to avoid.
 //
 // Keep in sync with model.fga alongside cascadingRelations/
 // hierarchyEdgeRelations: add an entry whenever a relation gains a
@@ -304,8 +321,8 @@ var cascadingFeeders = map[string]map[string][]string{
 		constants.RelationAuditor:           {relAuditorGuard},
 		relWriterGuard:                      {relMeetingsCreator, relMentorshipProgramCreator},
 		relAuditorGuard:                     {constants.RelationViewer},
-		constants.RelationExecutiveDirector: {constants.RelationAuditor, relMarketingAuditor, relCampaignManager},
-		relGlobalMarketingOps:               {relMarketingAuditor, relCampaignManager},
+		constants.RelationExecutiveDirector: {constants.RelationAuditor, relMarketingAuditor},
+		relGlobalMarketingOps:               {relMarketingAuditor},
 		relMarketingOps:                     {relMarketingAuditor, relCampaignManager},
 	},
 	fgaTypeB2BOrg: {
@@ -709,6 +726,9 @@ func expandTypeWidePairs(object, relation string) []invalidationPair {
 		case hierarchyEdgeRelations[relation]:
 			for r := range cascading {
 				pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: r})
+				for fanoutRelation := range cascadingFanout[typ][r] {
+					pairs = append(pairs, invalidationPair{object: typ + ":" + wildcardObject, relation: fanoutRelation})
+				}
 			}
 		default:
 			// relation does not itself cascade (e.g. b2b_org's owner and

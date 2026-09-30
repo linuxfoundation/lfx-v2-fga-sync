@@ -248,6 +248,24 @@ func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
 		}
 	})
 
+	t.Run("writing the parent hierarchy edge also bumps every derived relation fed by a cascading relation", func(t *testing.T) {
+		// Reparenting project:123 changes what owner/writer/auditor/
+		// marketing_ops resolve to for project:123's descendants, which
+		// changes those descendants' writer_guard/auditor_guard/viewer/
+		// meetings_creator/mentorship_program_creator/campaign_manager too,
+		// since each reads a cascading relation same-object (see
+		// cascadingFeeders). Regression test for the gap where this branch
+		// bumped only the base cascading relations, not their fanout.
+		got := expandTypeWidePairs("project:123", "parent")
+		for _, r := range []string{
+			relWriterGuard, relAuditorGuard, constants.RelationViewer,
+			relMeetingsCreator, relMentorshipProgramCreator, relCampaignManager,
+		} {
+			assert.Contains(t, got, invalidationPair{object: "project:*", relation: r},
+				"re-parenting project:123 must invalidate %q, which is fed by a cascading relation", r)
+		}
+	})
+
 	t.Run("b2b_org writer/auditor cascade via both parent and child edges", func(t *testing.T) {
 		got := expandTypeWidePairs("b2b_org:1", "child")
 		assert.Contains(t, got, invalidationPair{object: "b2b_org:*", relation: "writer"})
@@ -263,8 +281,7 @@ func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
 // TestCascadingFanoutReachesDerivedGuardRelations is the regression test for
 // the missing-feeder-destination gap: project's writer_guard/auditor_guard/
 // viewer/meetings_creator/mentorship_program_creator/campaign_manager all
-// read a cascading relation (owner/writer/auditor/marketing_ops/
-// global_marketing_ops/executive_director) same-object in model.fga —
+// read a cascading relation same-object in model.fga —
 //
 //	writer_guard: writer or global_writer
 //	auditor_guard: auditor or global_auditor
@@ -280,10 +297,19 @@ func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
 // project's owner/writer/auditor never invalidated a descendant's cached
 // writer_guard/auditor_guard/viewer/meetings_creator/
 // mentorship_program_creator check, and a write to executive_director never
-// invalidated a descendant's cached auditor/marketing_auditor/
-// campaign_manager check (see also
-// TestExpandTypeWidePairsCascadesSameTypeHierarchy for the owner-\>writer-\>
-// auditor case already covered before this fix).
+// invalidated a descendant's cached auditor/marketing_auditor check (see
+// also TestExpandTypeWidePairsCascadesSameTypeHierarchy for the
+// owner-\>writer-\>auditor case already covered before this fix).
+//
+// campaign_manager is deliberately NOT fed by executive_director or
+// global_marketing_ops, even though both compose it same-object in
+// model.fga: neither cascades ("from parent"), so a write to either can
+// only ever change campaign_manager on the SAME object — already covered
+// by the unconditional object-scoped wildcardRelation marker — and listing
+// them here would bump the type-wide (project:*, campaign_manager) marker
+// for every project in the store for no cross-object benefit. Only
+// marketing_ops (which does cascade) is listed as a campaign_manager
+// source.
 func TestCascadingFanoutReachesDerivedGuardRelations(t *testing.T) {
 	fanout := cascadingFanout[fgaTypeProject]
 
@@ -299,21 +325,28 @@ func TestCascadingFanoutReachesDerivedGuardRelations(t *testing.T) {
 			"campaign_manager is only fed by executive_director/marketing_ops/global_marketing_ops, none of which owner reaches")
 	})
 
-	t.Run("executive_director feeds auditor, marketing_auditor, and campaign_manager directly, plus auditor_guard/viewer transitively", func(t *testing.T) {
+	t.Run("executive_director feeds auditor and marketing_auditor directly, plus auditor_guard/viewer transitively, but not campaign_manager", func(t *testing.T) {
 		for _, r := range []string{
-			constants.RelationAuditor, relMarketingAuditor, "campaign_manager",
+			constants.RelationAuditor, relMarketingAuditor,
 			"auditor_guard", constants.RelationViewer,
 		} {
 			assert.True(t, fanout[constants.RelationExecutiveDirector][r],
 				"executive_director must reach %q", r)
 		}
+		assert.False(t, fanout[constants.RelationExecutiveDirector]["campaign_manager"],
+			"executive_director does not cascade (plain [user] grant), so writing it can only change campaign_manager on the SAME object — already covered by the object-scoped marker, not a type-wide one")
 	})
 
-	t.Run("marketing_ops and global_marketing_ops both feed campaign_manager in addition to marketing_auditor", func(t *testing.T) {
-		for _, src := range []string{relMarketingOps, relGlobalMarketingOps} {
-			assert.True(t, fanout[src][relMarketingAuditor], "%s must feed marketing_auditor", src)
-			assert.True(t, fanout[src]["campaign_manager"], "%s must feed campaign_manager", src)
-		}
+	t.Run("global_marketing_ops feeds marketing_auditor but not campaign_manager", func(t *testing.T) {
+		assert.True(t, fanout[relGlobalMarketingOps][relMarketingAuditor], "global_marketing_ops must feed marketing_auditor")
+		assert.False(t, fanout[relGlobalMarketingOps]["campaign_manager"],
+			"global_marketing_ops does not cascade (plain [team#member] grant), so writing it can only change campaign_manager on the SAME object")
+	})
+
+	t.Run("marketing_ops feeds both marketing_auditor and campaign_manager, since marketing_ops itself cascades", func(t *testing.T) {
+		assert.True(t, fanout[relMarketingOps][relMarketingAuditor], "marketing_ops must feed marketing_auditor")
+		assert.True(t, fanout[relMarketingOps]["campaign_manager"],
+			"marketing_ops cascades (\"marketing_ops from parent\"), so a descendant's campaign_manager (which reads the descendant's own marketing_ops, itself inherited from this object) can change too")
 	})
 }
 
@@ -348,15 +381,17 @@ func TestExpandTypeWidePairsCrossTypeIrrelevant(t *testing.T) {
 			// global_marketing_ops does not itself cascade same-type (only
 			// marketing_auditor, which composes it, does — and that's
 			// covered by the object-scoped marker), and no cross-type
-			// dependent reads it either. It does feed marketing_auditor AND
-			// campaign_manager via cascadingFeeders, though, so both
-			// relations' type-wide markers are still bumped alongside the
-			// object-scoped marker.
+			// dependent reads it either. It does feed marketing_auditor via
+			// cascadingFeeders, so that relation's type-wide marker is
+			// bumped alongside the object-scoped marker — but NOT
+			// campaign_manager: global_marketing_ops is a plain
+			// [team#member] grant with no "from parent", so writing it can
+			// only ever change campaign_manager on the SAME object, which
+			// the object-scoped marker above already covers.
 			relation: "global_marketing_ops",
 			want: []invalidationPair{
 				{object: "project:123", relation: "*"},
 				{object: "project:*", relation: "marketing_auditor"},
-				{object: "project:*", relation: "campaign_manager"},
 			},
 		},
 	}
