@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	. "github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/mock"
@@ -135,9 +134,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("BatchCheck", mock.Anything, mock.Anything).
 					Return((*openfga.BatchCheckResponse)(nil), fakeStatusErr{code: 500})
-				mockKV := new(MockNatsKeyValue)
-				mockKV.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
-				return newFgaService(mc, mockKV, false)
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.CheckRelationships(ctx, []ClientCheckRequest{
@@ -213,9 +210,7 @@ func TestFgaService_RecordsErrorOnSpan(t *testing.T) {
 				mc := new(MockFgaClient)
 				mc.On("BatchCheck", mock.Anything, mock.Anything).
 					Return((*openfga.BatchCheckResponse)(nil), fakeStatusErr{code: 422})
-				mockKV := new(MockNatsKeyValue)
-				mockKV.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
-				return newFgaService(mc, mockKV, false)
+				return newFgaService(mc, nil, false)
 			},
 			run: func(ctx context.Context, svc FgaService) error {
 				_, err := svc.CheckRelationships(ctx, []ClientCheckRequest{

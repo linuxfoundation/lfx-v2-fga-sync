@@ -94,7 +94,18 @@
     "cloudops",
     "triggerer",
     "zizmor",
-    "authorizationmodel"
+    "authorizationmodel",
+    "fanout",
+    "Fanout",
+    "relinv",
+    "cachekey",
+    "userset",
+    "unioned",
+    "dedupe",
+    "dedupes",
+    "deduped",
+    "reparenting",
+    "Reparenting"
   ],
   "overrides": [
     {
