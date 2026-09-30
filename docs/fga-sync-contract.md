@@ -314,6 +314,21 @@ scoped type-wide markers exist:
   write, for every relation the type cascades), so a write to an
   ancestor/descendant/edge invalidates the whole cascade without needing a
   hierarchy walk.
+- **Same-object feeder fanout**: a relation need not itself be in
+  `cascadingRelations` to need a type-wide marker — it only needs to
+  same-object-read (directly, or transitively through another feeder) a
+  relation that is. `cascadingFeeders` (`fga_cache.go`) lists these DIRECT
+  same-object edges (e.g. `project.owner` feeds `project.writer`, which feeds
+  `project.writer_guard`, which feeds `project.meetings_creator`); its
+  transitive closure, `cascadingFanout`, is what `expandTypeWidePairs`
+  consults to bump a `(type:*, relation)` marker for every relation reached.
+  For example `project.executive_director` is a plain `[user]` grant with no
+  `from parent` of its own, but it feeds `project.auditor`, `project.
+  marketing_auditor`, and `project.campaign_manager` same-object — all three
+  of which cascade (directly or transitively) — so writing
+  `project:123#executive_director` bumps `project:*`'s `auditor`,
+  `marketing_auditor`, and `campaign_manager` markers even though
+  `executive_director` itself never appears in `cascadingRelations`.
 - **Cross-type fanout**: a write to a relation that feeds some dependent
   type's guard (per `crossTypeDependents`/`typeInvalidationFanout`) bumps a
   `(dependentType:*, dependentRelation)` marker for every dependent relation
@@ -321,12 +336,19 @@ scoped type-wide markers exist:
   `crossTypeIrrelevant` for its type (verified against `model.fga` to never
   feed any dependent's guard), in which case this fanout is skipped.
 
-A write to a relation that is neither a same-type cascade relation, a
-hierarchy edge, nor cross-type-relevant (e.g. `project:123#global_marketing_ops`
-— `marketing_ops` itself is excluded here since it is a same-type cascade
-relation) only bumps its own object-scoped marker — it does not touch any
-`type:*` marker. Every cache lookup for a relation that participates in either
-type-wide mechanism consults both its object-scoped marker and the relevant
+A write to a relation that participates in none of these three mechanisms
+only bumps its own object-scoped marker — it does not touch any `type:*`
+marker. `meeting_attachment`'s relations (`writer`/`auditor`/`participant`/
+`viewer`) are a clean example: `meeting_attachment` is a leaf type — it is
+never a source key in `cascadingFeeders`/`cascadingRelations`,
+`crossTypeDependents`, or `typeInvalidationFanout` — so writing
+`meeting_attachment:123#writer` only ever invalidates `meeting_attachment:
+123`'s own object-scoped marker; no `type:*` marker for any type is touched.
+Note that `project`'s own relations are not a useful example here: every
+writable `project` relation either cascades directly, feeds a relation that
+cascades, or is cross-type-relevant to some dependent, so none of them
+qualifies. Every cache lookup for a relation that participates in any of the
+three mechanisms consults both its object-scoped marker and the relevant
 `type:*` marker(s) and takes the later timestamp.
 
 ### Rolling deployment: cache key prefix rename

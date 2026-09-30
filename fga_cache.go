@@ -32,10 +32,15 @@ import (
 // pkg/constants already names because more than one call site outside this
 // file references them too).
 const (
-	relMarketingOps       = "marketing_ops"
-	relManager            = "manager"
-	relMarketingAuditor   = "marketing_auditor"
-	relGlobalMarketingOps = "global_marketing_ops"
+	relMarketingOps             = "marketing_ops"
+	relManager                  = "manager"
+	relMarketingAuditor         = "marketing_auditor"
+	relGlobalMarketingOps       = "global_marketing_ops"
+	relWriterGuard              = "writer_guard"
+	relAuditorGuard             = "auditor_guard"
+	relCampaignManager          = "campaign_manager"
+	relMeetingsCreator          = "meetings_creator"
+	relMentorshipProgramCreator = "mentorship_program_creator"
 )
 
 const (
@@ -271,16 +276,37 @@ var hierarchyEdgeRelations = map[string]bool{"parent": true, "child": true}
 // expandTypeWidePairs additionally emits a type-wide (type:*, relation)
 // marker for every relation in cascadingFanout[typ][relation].
 //
+// The destination relation need not itself be cascading either, so long as
+// it transitively reaches one: project.writer_guard ("writer or
+// global_writer") and project.auditor_guard ("auditor or global_auditor")
+// are same-object reads of writer/auditor but do not themselves compose
+// "from parent", so they are correctly absent from cascadingRelations — yet
+// project.viewer, project.meetings_creator, and
+// project.mentorship_program_creator all read writer_guard/auditor_guard,
+// and project.campaign_manager reads executive_director/marketing_ops/
+// global_marketing_ops directly. Without listing writer_guard/auditor_guard
+// (and executive_director/marketing_ops/global_marketing_ops for
+// campaign_manager) as sources here, a write to project:123's owner/writer/
+// auditor/marketing_ops/executive_director would never bump the type-wide
+// marker for any of these six relations, so a cached check for
+// project:456#viewer (a descendant of 123) would stay "fresh" despite its
+// evaluated value having changed.
+//
 // Keep in sync with model.fga alongside cascadingRelations/
 // hierarchyEdgeRelations: add an entry whenever a relation gains a
-// same-object reference into a relation listed in cascadingRelations.
+// same-object reference into a relation listed in cascadingRelations, OR
+// into a relation that itself (directly or transitively) reads one.
 var cascadingFeeders = map[string]map[string][]string{
 	fgaTypeProject: {
-		"global_owner":           {constants.RelationOwner},
-		constants.RelationOwner:  {constants.RelationWriter},
-		constants.RelationWriter: {constants.RelationAuditor},
-		relGlobalMarketingOps:    {relMarketingAuditor},
-		relMarketingOps:          {relMarketingAuditor},
+		"global_owner":                      {constants.RelationOwner},
+		constants.RelationOwner:             {constants.RelationWriter},
+		constants.RelationWriter:            {constants.RelationAuditor, relWriterGuard},
+		constants.RelationAuditor:           {relAuditorGuard},
+		relWriterGuard:                      {relMeetingsCreator, relMentorshipProgramCreator},
+		relAuditorGuard:                     {constants.RelationViewer},
+		constants.RelationExecutiveDirector: {constants.RelationAuditor, relMarketingAuditor, relCampaignManager},
+		relGlobalMarketingOps:               {relMarketingAuditor, relCampaignManager},
+		relMarketingOps:                     {relMarketingAuditor, relCampaignManager},
 	},
 	fgaTypeB2BOrg: {
 		constants.RelationOwner:  {constants.RelationWriter},
@@ -474,9 +500,9 @@ var crossTypeDependents = map[string][]crossTypeEdge{
 		// grants unrelated to team).
 		{typ: fgaTypeProject, relations: []string{
 			"global_owner", "global_writer", "global_auditor", relGlobalMarketingOps,
-			"owner", constants.RelationWriter, "writer_guard", constants.RelationAuditor, "auditor_guard",
-			relMarketingOps, relMarketingAuditor, "campaign_manager",
-			constants.RelationViewer, "meetings_creator", "mentorship_program_creator",
+			"owner", constants.RelationWriter, relWriterGuard, constants.RelationAuditor, relAuditorGuard,
+			relMarketingOps, relMarketingAuditor, relCampaignManager,
+			constants.RelationViewer, relMeetingsCreator, relMentorshipProgramCreator,
 		}},
 		// committee.auditor reads [team#member] directly.
 		{typ: fgaTypeCommittee, relations: []string{

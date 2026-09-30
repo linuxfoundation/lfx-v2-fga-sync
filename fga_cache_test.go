@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/cachekey"
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 )
 
 type cacheWriteRecorder struct {
@@ -259,6 +260,63 @@ func TestExpandTypeWidePairsCascadesSameTypeHierarchy(t *testing.T) {
 	})
 }
 
+// TestCascadingFanoutReachesDerivedGuardRelations is the regression test for
+// the missing-feeder-destination gap: project's writer_guard/auditor_guard/
+// viewer/meetings_creator/mentorship_program_creator/campaign_manager all
+// read a cascading relation (owner/writer/auditor/marketing_ops/
+// global_marketing_ops/executive_director) same-object in model.fga —
+//
+//	writer_guard: writer or global_writer
+//	auditor_guard: auditor or global_auditor
+//	viewer: [user:*] or auditor_guard or meeting_coordinator
+//	meetings_creator: writer_guard or meeting_coordinator
+//	mentorship_program_creator: writer_guard or mentorship_program_admin
+//	campaign_manager: executive_director or marketing_ops or global_marketing_ops
+//
+// — but are intentionally absent from cascadingRelations (they don't
+// themselves compose "from parent"). Before cascadingFeeders[fgaTypeProject]
+// listed them as destinations, none of these six relations ever got a
+// type-wide (project:*, relation) marker, so a write to an ancestor
+// project's owner/writer/auditor never invalidated a descendant's cached
+// writer_guard/auditor_guard/viewer/meetings_creator/
+// mentorship_program_creator check, and a write to executive_director never
+// invalidated a descendant's cached auditor/marketing_auditor/
+// campaign_manager check (see also
+// TestExpandTypeWidePairsCascadesSameTypeHierarchy for the owner-\>writer-\>
+// auditor case already covered before this fix).
+func TestCascadingFanoutReachesDerivedGuardRelations(t *testing.T) {
+	fanout := cascadingFanout[fgaTypeProject]
+
+	t.Run("owner transitively reaches every guard/derived relation it feeds, but not campaign_manager", func(t *testing.T) {
+		for _, r := range []string{
+			"writer", "auditor", "writer_guard", "auditor_guard",
+			"viewer", "meetings_creator", "mentorship_program_creator",
+		} {
+			assert.True(t, fanout["owner"][r],
+				"owner must transitively reach %q: owner -> writer -> {auditor, writer_guard} -> {auditor_guard, meetings_creator, mentorship_program_creator} -> viewer", r)
+		}
+		assert.False(t, fanout["owner"]["campaign_manager"],
+			"campaign_manager is only fed by executive_director/marketing_ops/global_marketing_ops, none of which owner reaches")
+	})
+
+	t.Run("executive_director feeds auditor, marketing_auditor, and campaign_manager directly, plus auditor_guard/viewer transitively", func(t *testing.T) {
+		for _, r := range []string{
+			constants.RelationAuditor, relMarketingAuditor, "campaign_manager",
+			"auditor_guard", constants.RelationViewer,
+		} {
+			assert.True(t, fanout[constants.RelationExecutiveDirector][r],
+				"executive_director must reach %q", r)
+		}
+	})
+
+	t.Run("marketing_ops and global_marketing_ops both feed campaign_manager in addition to marketing_auditor", func(t *testing.T) {
+		for _, src := range []string{relMarketingOps, relGlobalMarketingOps} {
+			assert.True(t, fanout[src][relMarketingAuditor], "%s must feed marketing_auditor", src)
+			assert.True(t, fanout[src]["campaign_manager"], "%s must feed campaign_manager", src)
+		}
+	})
+}
+
 // TestExpandTypeWidePairsCrossTypeIrrelevant is the regression test for
 // crossTypeIrrelevant: a write to a relation with no possible path into any
 // cross-type dependent's guard must not bump that dependent's type-wide
@@ -274,26 +332,31 @@ func TestExpandTypeWidePairsCrossTypeIrrelevant(t *testing.T) {
 			// from parent" (see cascadingRelations), so it still gets a
 			// same-type project:* marker — but never a cross-type one for
 			// committee/meeting/etc., since no dependent reads it. It also
-			// feeds marketing_auditor via cascadingFeeders, so that
-			// downstream relation's type-wide marker is bumped too.
+			// feeds marketing_auditor AND campaign_manager via
+			// cascadingFeeders ("campaign_manager: executive_director or
+			// marketing_ops or global_marketing_ops"), so both downstream
+			// relations' type-wide markers are bumped too.
 			relation: "marketing_ops",
 			want: []invalidationPair{
 				{object: "project:123", relation: "*"},
 				{object: "project:*", relation: "marketing_ops"},
 				{object: "project:*", relation: "marketing_auditor"},
+				{object: "project:*", relation: "campaign_manager"},
 			},
 		},
 		{
 			// global_marketing_ops does not itself cascade same-type (only
 			// marketing_auditor, which composes it, does — and that's
 			// covered by the object-scoped marker), and no cross-type
-			// dependent reads it either. It does feed marketing_auditor via
-			// cascadingFeeders, though, so that relation's type-wide marker
-			// is still bumped alongside the object-scoped marker.
+			// dependent reads it either. It does feed marketing_auditor AND
+			// campaign_manager via cascadingFeeders, though, so both
+			// relations' type-wide markers are still bumped alongside the
+			// object-scoped marker.
 			relation: "global_marketing_ops",
 			want: []invalidationPair{
 				{object: "project:123", relation: "*"},
 				{object: "project:*", relation: "marketing_auditor"},
+				{object: "project:*", relation: "campaign_manager"},
 			},
 		},
 	}
