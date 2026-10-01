@@ -22,7 +22,7 @@ const accessCheckHandlerTimeout = 10 * time.Second
 // accessCheckHandler handles access check requests from the NATS server.
 func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMsg) error {
 	// Bound the total time this handler may run (see accessCheckHandlerTimeout
-	// in fga.go) so a slow or hung downstream call can't hold this handler's
+	// above) so a slow or hung downstream call can't hold this handler's
 	// concurrency slot open indefinitely.
 	ctx, cancel := context.WithTimeout(ctx, accessCheckHandlerTimeout)
 	defer cancel()
