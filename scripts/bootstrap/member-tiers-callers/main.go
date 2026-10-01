@@ -167,7 +167,7 @@ func main() {
 // "inv" key so fga-sync treats cached access-check denials as stale. Returns
 // an error on any step; callers log and exit on failure. The function owns the
 // NATS connection lifecycle via defer so it always closes cleanly, avoiding
-// the exitAfterDefer antipattern (gocritic) that occurs when log.Fatalf is
+// the exitAfterDefer anti-pattern (gocritic) that occurs when log.Fatalf is
 // invoked after `defer nc.Close()` in main.
 func invalidateCache(natsURL, cacheBucket string) error {
 	nc, err := nats.Connect(natsURL)
