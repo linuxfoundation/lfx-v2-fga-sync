@@ -33,6 +33,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -42,6 +43,11 @@ import (
 )
 
 const teamMemberTiersCaller = constants.ObjectTypeTeam + "member_tiers_caller"
+
+// validBucketName matches the character set JetStream permits for KV bucket
+// names (alphanumeric, '-', '_'). Used to sanitize the CACHE_BUCKET env var
+// before it flows into log messages or JetStream calls.
+var validBucketName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // duplicateWriteIgnore instructs OpenFGA to treat writes of already-existing
 // tuples as no-ops instead of errors, making reruns safe.
@@ -138,29 +144,16 @@ func main() {
 	// before this bootstrap run is immediately superseded. The JetStream KV
 	// bucket is persistent — restarting fga-sync only rebinds it and does not
 	// clear existing entries.
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		log.Fatalf("failed to connect to NATS for cache invalidation: %v", err)
-	}
-	defer nc.Close()
-
-	js, err := nc.JetStream()
-	if err != nil {
-		log.Fatalf("failed to get JetStream context: %v", err)
-	}
-
 	cacheBucket := os.Getenv("CACHE_BUCKET")
 	if cacheBucket == "" {
 		cacheBucket = constants.KVBucketNameSyncCache
 	}
-
-	kv, err := js.KeyValue(cacheBucket)
-	if err != nil {
-		log.Fatalf("failed to bind to cache bucket %q: %v", cacheBucket, err)
+	if !validBucketName.MatchString(cacheBucket) {
+		log.Fatalf("invalid CACHE_BUCKET: must match %s", validBucketName.String())
 	}
 
-	if _, err = kv.Put("inv", []byte("1")); err != nil {
-		log.Fatalf("failed to bump cache invalidation key: %v", err)
+	if err := invalidateCache(natsURL, cacheBucket); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	fmt.Println("Cache invalidation key bumped — fga-sync will revalidate cached denials.")
@@ -168,4 +161,33 @@ func main() {
 	if writeErr != nil {
 		log.Fatalf("write error (cache was invalidated; rerun to confirm tuples exist): %v", writeErr)
 	}
+}
+
+// invalidateCache connects to NATS, binds to the given KV bucket, and bumps the
+// "inv" key so fga-sync treats cached access-check denials as stale. Returns
+// an error on any step; callers log and exit on failure. The function owns the
+// NATS connection lifecycle via defer so it always closes cleanly, avoiding
+// the exitAfterDefer anti-pattern (gocritic) that occurs when log.Fatalf is
+// invoked after `defer nc.Close()` in main.
+func invalidateCache(natsURL, cacheBucket string) error {
+	nc, err := nats.Connect(natsURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to NATS for cache invalidation: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("failed to get JetStream context: %w", err)
+	}
+
+	kv, err := js.KeyValue(cacheBucket)
+	if err != nil {
+		return fmt.Errorf("failed to bind to cache bucket %q: %w", cacheBucket, err)
+	}
+
+	if _, err := kv.Put("inv", []byte("1")); err != nil {
+		return fmt.Errorf("failed to bump cache invalidation key: %w", err)
+	}
+	return nil
 }
