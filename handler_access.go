@@ -6,7 +6,18 @@ package main
 
 import (
 	"context"
+	"time"
 )
+
+// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
+// spend, covering the full cache-lookup-then-BatchCheck flow, not just one
+// outbound call. Without it, a slow or hung OpenFGA call can hold one of
+// this service's limited concurrent-handler slots open indefinitely, long
+// after the calling service (query-service) has given up: its
+// AccessCheckTimeout defaults to 15s, so this must stay below that. See
+// fgaHTTPTimeout and batchCheckMaxParallelRequests in fga.go for the rest of
+// this timeout budget's rationale.
+const accessCheckHandlerTimeout = 10 * time.Second
 
 // accessCheckHandler handles access check requests from the NATS server.
 func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMsg) error {

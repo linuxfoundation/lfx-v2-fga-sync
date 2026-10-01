@@ -91,7 +91,9 @@ func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Greater(t, requestCount, 1, "expected the SDK to chunk 101 items into multiple requests")
+	require.Greaterf(t, requestCount, int(batchCheckMaxParallelRequests),
+		"expected the SDK to chunk %d items into more than batchCheckMaxParallelRequests (%d) requests, got %d",
+		itemCount, batchCheckMaxParallelRequests, requestCount)
 	require.Greaterf(t, maxInFlight, 1,
 		"requests never overlapped (maxInFlight=%d); the parallelism assertion below would pass vacuously", maxInFlight)
 	require.LessOrEqualf(t, maxInFlight, int(batchCheckMaxParallelRequests),
@@ -107,6 +109,30 @@ func TestFgaAdapterBatchCheckBoundsParallelism(t *testing.T) {
 func TestFgaHTTPClientHasConfiguredTimeout(t *testing.T) {
 	client := fgaHTTPClient()
 	require.Equal(t, fgaHTTPTimeout, client.Timeout)
+}
+
+// TestConnectFgaWiresConfiguredTimeout asserts connectFga itself - not just
+// fgaHTTPClient in isolation - hands the OpenFGA SDK a client carrying
+// fgaHTTPTimeout. connectFga is the function that actually wires a client
+// into production use (fga.go); a future refactor that builds the
+// *http.Client inline again, bypassing fgaHTTPClient, would otherwise
+// silently drop the timeout without failing the suite.
+func TestConnectFgaWiresConfiguredTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("OPENFGA_API_URL", server.URL)
+	t.Setenv("OPENFGA_STORE_ID", "01GXSB9YR785C4FYS3C0RTG7B2")
+	t.Setenv("OPENFGA_AUTH_MODEL_ID", "01GXSA8YR785C4FYS3C0RTG7B1")
+
+	fgaClient, err := connectFga()
+	require.NoError(t, err)
+
+	adapter, ok := fgaClient.(FgaAdapter)
+	require.True(t, ok, "connectFga did not return a FgaAdapter")
+	require.Equal(t, fgaHTTPTimeout, adapter.GetConfig().HTTPClient.Timeout)
 }
 
 // TestFgaHTTPClientEnforcesTimeout observes the configured timeout actually

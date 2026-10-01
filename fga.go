@@ -45,11 +45,12 @@ const (
 	fgaHTTPMaxIdleConnsPerHost = 64
 	fgaHTTPMaxConnsPerHost     = 64
 
-	// fgaHTTPTimeout bounds every outbound OpenFGA HTTP request. The SDK
-	// ships a default request timeout, but that default only applies to the
-	// SDK's own http.Client; this service supplies its own client (see
-	// connectFga) to configure the connection pool above, which otherwise
-	// leaves the request completely unbounded. Kept below
+	// fgaHTTPTimeout bounds every outbound OpenFGA HTTP request. The OpenFGA
+	// SDK applies no request timeout of its own when a custom HTTPClient
+	// isn't supplied (its fallback is http.DefaultClient, which has none);
+	// this service supplies its own client (see connectFga) to configure the
+	// connection pool above, and fgaHTTPTimeout must set the deadline
+	// explicitly or the request is completely unbounded. Kept below
 	// accessCheckHandlerTimeout so a hung OpenFGA call cannot itself be the
 	// sole reason the handler deadline trips uninformatively.
 	fgaHTTPTimeout = 8 * time.Second
@@ -70,23 +71,17 @@ const (
 	// fanning them out; query-service's MaxPageSize (1000) means a single
 	// batch can chunk into ~20 requests, and fully serializing those all
 	// but guarantees hitting accessCheckHandlerTimeout on the largest
-	// pages. 4 keeps the burst
-	// multiplier well under the SDK default while cutting the worst-case
-	// round count roughly in half; it does not itself guarantee staying
-	// within the timeout budget for a 1000-item batch — that budget is
-	// still enforced by fgaHTTPTimeout/accessCheckHandlerTimeout, and a
-	// batch that large will legitimately time out rather than hang
-	// indefinitely. Revisit once production tracing gives real batch-size
-	// and latency data.
+	// pages. 4 keeps the burst multiplier well under the SDK default (10)
+	// while cutting a fully-serialized 20-chunk batch from 20 rounds to 5;
+	// that's 2.5x more rounds than the SDK default's 2, so a max-size batch
+	// needs to average ~2s or less per chunk to stay inside
+	// accessCheckHandlerTimeout. It does not itself guarantee staying within
+	// the timeout budget for a 1000-item batch — that budget is still
+	// enforced by fgaHTTPTimeout/accessCheckHandlerTimeout, and a batch that
+	// large will legitimately time out rather than hang indefinitely.
+	// Revisit once production tracing gives real batch-size and latency
+	// data.
 	batchCheckMaxParallelRequests int32 = 4
-
-	// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
-	// spend, covering the full cache-lookup-then-BatchCheck flow, not just
-	// one outbound call. Without it, a slow or hung OpenFGA call can hold one
-	// of this service's limited concurrent-handler slots open indefinitely,
-	// long after the calling service (query-service) has given up: its
-	// AccessCheckTimeout defaults to 15s, so this must stay below that.
-	accessCheckHandlerTimeout = 10 * time.Second
 )
 
 // fgaHTTPClient returns the *http.Client connectFga hands to the OpenFGA SDK:
