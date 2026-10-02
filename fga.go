@@ -44,7 +44,56 @@ const (
 	fgaHTTPMaxIdleConns        = 100
 	fgaHTTPMaxIdleConnsPerHost = 64
 	fgaHTTPMaxConnsPerHost     = 64
+
+	// fgaHTTPTimeout bounds every outbound OpenFGA HTTP request. The OpenFGA
+	// SDK applies no request timeout of its own when a custom HTTPClient
+	// isn't supplied (its fallback is http.DefaultClient, which has none);
+	// this service supplies its own client (see connectFga) to configure the
+	// connection pool above, and fgaHTTPTimeout must set the deadline
+	// explicitly or the request is completely unbounded. Kept below
+	// accessCheckHandlerTimeout so a hung OpenFGA call cannot itself be the
+	// sole reason the handler deadline trips uninformatively.
+	fgaHTTPTimeout = 8 * time.Second
+
+	// batchCheckMaxParallelRequests caps how many outbound HTTP requests a
+	// single BatchCheck call can fan out (the SDK chunks large batches into
+	// ClientMaxBatchSize-sized requests and defaults to 10-way parallelism
+	// per call). subscriptionConcurrency (main.go) is derived from this
+	// constant and fgaHTTPMaxConnsPerHost as
+	// fgaHTTPMaxConnsPerHost / batchCheckMaxParallelRequests, so that the
+	// worst case of every concurrent handler fanning out
+	// batchCheckMaxParallelRequests requests at once
+	// (subscriptionConcurrency * batchCheckMaxParallelRequests) fits within
+	// the connection pool; changing this constant changes that derived
+	// handler concurrency too, so keep the two aligned rather than treating
+	// either as independently tunable. A value of 1 would fully serialize
+	// each BatchCheck call's outbound requests, one at a time, rather than
+	// fanning them out; query-service's MaxPageSize (1000) means a single
+	// batch can chunk into ~20 requests, and fully serializing those all
+	// but guarantees hitting accessCheckHandlerTimeout on the largest
+	// pages. 4 keeps the burst multiplier well under the SDK default (10)
+	// while cutting a fully-serialized 20-chunk batch from 20 rounds to 5;
+	// that's 2.5x more rounds than the SDK default's 2, so a max-size batch
+	// needs to average ~2s or less per chunk to stay inside
+	// accessCheckHandlerTimeout. It does not itself guarantee staying within
+	// the timeout budget for a 1000-item batch — that budget is still
+	// enforced by fgaHTTPTimeout/accessCheckHandlerTimeout, and a batch that
+	// large will legitimately time out rather than hang indefinitely.
+	// Revisit once production tracing gives real batch-size and latency
+	// data.
+	batchCheckMaxParallelRequests int32 = 4
 )
+
+// fgaHTTPClient returns the *http.Client connectFga hands to the OpenFGA SDK:
+// fgaHTTPTransport's pool wrapped in OpenTelemetry instrumentation, bounded
+// by fgaHTTPTimeout. Split out from connectFga so a test can assert on the
+// constructed client directly instead of only on the transport.
+func fgaHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: otelhttp.NewTransport(fgaHTTPTransport()),
+		Timeout:   fgaHTTPTimeout,
+	}
+}
 
 // fgaHTTPTransport returns an *http.Transport matching http.DefaultTransport
 // except for a connection pool sized for this service's OpenFGA call volume.
@@ -109,9 +158,7 @@ func connectFga() (IFgaClient, error) {
 		ApiUrl:               fgaURL,
 		StoreId:              fgaStoreID,
 		AuthorizationModelId: fgaAuthModelID,
-		HTTPClient: &http.Client{
-			Transport: otelhttp.NewTransport(fgaHTTPTransport()),
-		},
+		HTTPClient:           fgaHTTPClient(),
 	})
 	if err != nil {
 		return nil, err

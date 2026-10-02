@@ -30,9 +30,11 @@ const (
 
 	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
 	// process. cacheLookupConcurrency bounds one request's fan-out, but the
-	// subscription layer admits subscriptionConcurrency (64) handlers at once,
-	// so per-request limits alone permit ~4,096 simultaneous KV round-trips per
-	// pod. The cache bucket is single-replica (see the chart's
+	// subscription layer admits subscriptionConcurrency (main.go; currently
+	// 16) handlers at once, so per-request limits alone permit
+	// cacheLookupConcurrency * subscriptionConcurrency (currently ~1,024)
+	// simultaneous KV round-trips per pod. The cache bucket is single-replica
+	// (see the chart's
 	// nats-kv-bucket.yaml, which sets no replicas field), so every pod's cache
 	// traffic funnels into one JetStream node; cluster-wide pressure is this
 	// value times application.replicas (3 in prod). Sized at 2x
