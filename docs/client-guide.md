@@ -121,6 +121,9 @@ All messages use the **GenericFGAMessage** envelope:
 **Subject:** `lfx.fga-sync.update_access`
 
 Updates or creates access control for a resource. This is a full sync operation - any relations not included will be removed.
+Team-subject tuples on relations not prefixed `global_` are preserved. A
+`global_*` team relation is removed when omitted unless it is listed in
+`exclude_relations`.
 
 ### Data Fields
 
@@ -296,7 +299,9 @@ if err := nc.Publish("lfx.fga-sync.update_access", payload); err != nil {
 **Subject:** `lfx.fga-sync.delete_access`
 
 Deletes publisher-managed access control tuples for a resource while preserving
-externally managed `team:*` grants. Typically used when a resource is deleted.
+externally managed `team:*` grants on relations whose names do not begin with
+`global_`. Team grants on `global_*` relations are removed. Typically used when
+a resource is deleted.
 
 ### Data Fields
 
@@ -918,7 +923,7 @@ The repo does not publish canonical latency numbers. In general:
 | Operation | Cost driver |
 |-----------|-------------|
 | `update_access` | Reads current object tuples, computes diff, writes/deletes changed tuples |
-| `delete_access` | Reads current object tuples, then deletes publisher-managed tuples while retaining `team:*` grants |
+| `delete_access` | Reads current object tuples, deletes `global_*` team grants, and retains team grants on other relations |
 | `member_put` (new) | Reads current object tuples, writes missing relations |
 | `member_put` (existing) | Reads current object tuples, skips writes when relations already exist |
 | `member_put` (mutually exclusive) | Reads current object tuples, deletes mutually exclusive relations, writes desired relations |

@@ -51,7 +51,7 @@ func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T
 				On("Write", mock.Anything, mock.Anything, mock.Anything).
 				Return(&client.ClientWriteResponse{}, tt.writeErr)
 			cache := &cacheWriteRecorder{writes: make(chan string, 1)}
-			service := FgaService{client: fgaClient, cacheBucket: cache}
+			service := newFgaService(fgaClient, cache, false)
 			tuple := client.ClientTupleKey{User: "user:alice", Relation: "writer", Object: "project:resource-1"}
 
 			_, _, err := service.SyncObjectTuples(
@@ -107,7 +107,7 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 		Once()
 
 	cache := &cacheWriteRecorder{writes: make(chan string, 2)}
-	service := FgaService{client: fgaClient, cacheBucket: cache}
+	service := newFgaService(fgaClient, cache, false)
 
 	writes := []client.ClientTupleKey{
 		{User: "user:alice", Relation: "writer", Object: "project:resource-1"},

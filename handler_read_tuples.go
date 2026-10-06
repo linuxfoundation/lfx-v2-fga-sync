@@ -78,9 +78,9 @@ func (h *HandlerService) readTuplesHandler(ctx context.Context, message INatsMsg
 	}
 
 	if message.Reply() != "" {
-		if errRespond := message.Respond(data); errRespond != nil {
-			logger.With(errKey, errRespond).WarnContext(ctx, "failed to send read tuples reply")
-			return errRespond
+		err = h.reply(ctx, message, data)
+		if err != nil {
+			return err
 		}
 		logger.With(
 			"user", req.User,

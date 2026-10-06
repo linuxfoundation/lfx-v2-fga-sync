@@ -159,9 +159,7 @@ func TestExtractCheckRequests(t *testing.T) {
 		},
 	}
 
-	fgaService := FgaService{
-		client: &MockFgaClient{},
-	}
+	fgaService := newFgaService(&MockFgaClient{}, nil, false)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -337,13 +335,11 @@ func TestReadObjectTuples(t *testing.T) {
 			mockClient := new(MockFgaClient)
 			tt.mockSetup(mockClient)
 
-			fgaService := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
 			ctx := context.Background()
-			tuples, err := fgaService.ReadObjectTuples(ctx, tt.object)
+			tuples, err := store.ReadObjectTuples(ctx, tt.object)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -773,13 +769,11 @@ func TestGetTuplesByRelation(t *testing.T) {
 			mockClient := new(MockFgaClient)
 			tt.mockSetup(mockClient)
 
-			fgaService := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
 			ctx := context.Background()
-			tuples, err := fgaService.GetTuplesByRelation(ctx, tt.object, tt.relation)
+			tuples, err := store.GetTuplesByRelation(ctx, tt.object, tt.relation)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -1006,10 +1000,7 @@ func TestDeleteTuplesByUserAndObject(t *testing.T) {
 			mockCache.On("Put", mock.Anything, "inv", []byte("1")).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			service := newFgaService(mockClient, mockCache, false)
 
 			// Execute the function
 			err := service.DeleteTuplesByUserAndObject(context.Background(), tt.user, tt.object)
@@ -1126,12 +1117,10 @@ func TestGetTuplesByUserAndObject(t *testing.T) {
 			tt.mockSetup(mockClient)
 
 			// Create service with mock client
-			service := FgaService{
-				client: mockClient,
-			}
+			store := TupleStore{client: mockClient}
 
 			// Execute the function
-			tuples, err := service.GetTuplesByUserAndObject(context.Background(), tt.user, tt.object)
+			tuples, err := store.GetTuplesByUserAndObject(context.Background(), tt.user, tt.object)
 
 			// Verify error expectations
 			if tt.expectError && err == nil {
@@ -1291,10 +1280,7 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 
 			// Create service with mock client and cache
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			service := newFgaService(mockClient, mockCache, false)
 			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations, tt.excludeRelations...)
 
 			// Verify no error
@@ -1327,14 +1313,15 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 	}
 }
 
-// TestSyncObjectTuples_PreserveTeamGrants tests that team member grant tuples are never deleted
-// during a sync operation, regardless of the desired relations list.
+// TestSyncObjectTuples_PreserveTeamGrants tests which team member grant tuples are
+// preserved during a sync operation.
 func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 	tests := []struct {
 		name             string
 		object           string
 		desiredRelations []ClientTupleKey
 		existingTuples   []openfga.Tuple
+		excludeRelations []string
 		expectedWrites   int
 		expectedDeletes  int
 		description      string
@@ -1371,7 +1358,7 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			description:     "should delete stale user tuple but preserve team member grant",
 		},
 		{
-			name:   "multiple team member grants across multiple relations all preserved",
+			name:   "multiple non-global team member grants are preserved",
 			object: "project:proj-3",
 			desiredRelations: []ClientTupleKey{
 				{User: "user:*", Relation: "viewer", Object: "project:proj-3"},
@@ -1385,13 +1372,13 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			},
 			expectedWrites:  0,
 			expectedDeletes: 0,
-			description:     "should preserve all team member grant tuples regardless of relation",
+			description:     "should preserve team member grants on non-global relations",
 		},
 		{
 			// delete-all path: SyncObjectTuples(ctx, object, nil) is called by genericDeleteAccessHandler.
-			// Team member grants are intentionally preserved even on delete-all because teams are managed
-			// externally to the attribute sync/indexing flow.
-			name:             "delete-all path preserves team member grants while removing user tuples",
+			// Non-global team member grants are intentionally preserved even on delete-all because they
+			// are managed externally to the attribute sync/indexing flow.
+			name:             "delete-all path preserves non-global team grants while removing user tuples",
 			object:           "project:proj-4",
 			desiredRelations: nil,
 			existingTuples: []openfga.Tuple{
@@ -1401,7 +1388,30 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			},
 			expectedWrites:  0,
 			expectedDeletes: 2, // user tuples deleted; team member grant preserved
-			description:     "delete-all should remove user tuples but preserve team member grants",
+			description:     "delete-all should remove user tuples but preserve non-global team member grants",
+		},
+		{
+			name:             "stale global team grant is deleted",
+			object:           "project:proj-5",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "team:global-project-writers#member", Relation: "global_writer", Object: "project:proj-5"}},
+			},
+			expectedWrites:  0,
+			expectedDeletes: 1,
+			description:     "should delete a stale team member grant on a global relation",
+		},
+		{
+			name:             "excluded global team grant is preserved",
+			object:           "project:proj-6",
+			desiredRelations: nil,
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "team:global-project-writers#member", Relation: "global_writer", Object: "project:proj-6"}},
+			},
+			excludeRelations: []string{"global_writer"},
+			expectedWrites:   0,
+			expectedDeletes:  0,
+			description:      "should preserve an excluded global team member grant",
 		},
 	}
 
@@ -1419,9 +1429,9 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 					if len(req.Writes) != tt.expectedWrites || len(req.Deletes) != tt.expectedDeletes {
 						return false
 					}
-					// Assert no team member grants appear in deletes.
+					// Assert only global team member grants appear in deletes.
 					for _, del := range req.Deletes {
-						if strings.HasPrefix(del.User, "team:") {
+						if strings.HasPrefix(del.User, "team:") && !strings.HasPrefix(del.Relation, "global_") {
 							return false
 						}
 					}
@@ -1433,11 +1443,13 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			mockCache.On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 			mockCache.On("PutString", mock.Anything, mock.Anything, mock.Anything).Return(uint64(1), nil).Maybe()
 
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
-			writes, deletes, err := service.SyncObjectTuples(context.Background(), tt.object, tt.desiredRelations)
+			service := newFgaService(mockClient, mockCache, false)
+			writes, deletes, err := service.SyncObjectTuples(
+				context.Background(),
+				tt.object,
+				tt.desiredRelations,
+				tt.excludeRelations...,
+			)
 
 			if err != nil {
 				t.Errorf("%s: unexpected error: %v", tt.description, err)
@@ -1448,10 +1460,10 @@ func TestSyncObjectTuples_PreserveTeamGrants(t *testing.T) {
 			if len(deletes) != tt.expectedDeletes {
 				t.Errorf("%s: expected %d deletes, got %d", tt.description, tt.expectedDeletes, len(deletes))
 			}
-			// Verify no team member grant tuples appear in deletes.
+			// Verify only global team member grant tuples appear in deletes.
 			for _, del := range deletes {
-				if strings.HasPrefix(del.User, "team:") {
-					t.Errorf("%s: team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
+				if strings.HasPrefix(del.User, "team:") && !strings.HasPrefix(del.Relation, "global_") {
+					t.Errorf("%s: non-global team member grant '%s#%s' found in deletes list", tt.description, del.User, del.Relation)
 				}
 			}
 			mockClient.AssertExpectations(t)
@@ -1592,15 +1604,11 @@ func TestWriteAndDeleteTuplesBatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockClient := new(MockFgaClient)
-			mockCache := NewMockKeyValue()
 			tt.mockSetup(mockClient)
 
-			service := FgaService{
-				client:      mockClient,
-				cacheBucket: mockCache,
-			}
+			store := TupleStore{client: mockClient}
 
-			skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
+			skipped, err := store.writeAndDeleteTuplesBatch(context.Background(), tt.writes, tt.deletes)
 
 			if tt.expectError && err == nil {
 				t.Errorf("%s: expected error but got nil", tt.description)
@@ -1631,16 +1639,15 @@ func TestWriteCollisionIgnoreOptions(t *testing.T) {
 // mixes a genuinely new tuple with one OpenFGA reports as invalid.
 func TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions(t *testing.T) {
 	mockClient := new(MockFgaClient)
-	mockCache := NewMockKeyValue()
 	wantOptions := writeCollisionIgnoreOptions
 
 	mockClient.On("Write", mock.Anything, mock.Anything, wantOptions).
 		Return(&ClientWriteResponse{}, nil).Once()
 
-	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	store := TupleStore{client: mockClient}
 	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
 
-	_, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, nil)
+	_, err := store.writeAndDeleteTuplesBatch(context.Background(), writes, nil)
 
 	assert.NoError(t, err)
 	mockClient.AssertExpectations(t)
@@ -1653,19 +1660,67 @@ func TestWriteAndDeleteTuplesBatchPassesCollisionIgnoreOptions(t *testing.T) {
 // all, so extractInvalidTuple's skip path is not exercised.
 func TestWriteAndDeleteTuplesBatchCollisionSucceedsAsNoOp(t *testing.T) {
 	mockClient := new(MockFgaClient)
-	mockCache := NewMockKeyValue()
 
 	mockClient.On("Write", mock.Anything, mock.MatchedBy(func(req ClientWriteRequest) bool {
 		return len(req.Writes) == 1 && len(req.Deletes) == 1
 	}), mock.Anything).Return(&ClientWriteResponse{}, nil).Once()
 
-	service := FgaService{client: mockClient, cacheBucket: mockCache}
+	store := TupleStore{client: mockClient}
 	writes := []ClientTupleKey{{Object: "project:1", Relation: "viewer", User: "user:alice"}}
 	deletes := []ClientTupleKeyWithoutCondition{{Object: "project:1", Relation: "writer", User: "user:bob"}}
 
-	skipped, err := service.writeAndDeleteTuplesBatch(context.Background(), writes, deletes)
+	skipped, err := store.writeAndDeleteTuplesBatch(context.Background(), writes, deletes)
 
 	assert.NoError(t, err)
 	assert.Empty(t, skipped)
 	mockClient.AssertExpectations(t)
+}
+
+// TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext verifies that
+// FgaService.WriteAndDeleteTuples bumps the cache invalidation key even when
+// the caller's context is already cancelled at call time.
+//
+// This guards the context.WithoutCancel + WithTimeout invariant introduced to
+// prevent stale auth decisions after partial multi-batch commits: if a batch-2
+// deadline expires after batch-1 committed to OpenFGA, the parent ctx is done.
+// Without a detached context, bucket.Put returns context.Canceled immediately
+// and the inv key is never written, leaving cached positive results fresh for
+// tuples that now exist in the store.
+//
+// The test pre-cancels ctx and verifies that MockNatsKeyValue.Put is called
+// with a context whose Err() is nil — i.e. a fresh, live context.
+func TestWriteAndDeleteTuples_InvalidatesDespiteCancelledContext(t *testing.T) {
+	// Pre-cancel the caller context to simulate a deadline exceeded after
+	// an earlier batch committed to OpenFGA.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mockClient := new(MockFgaClient)
+	// MockFgaClient ignores the context, so Write succeeds even with a done ctx.
+	mockClient.On("Write", mock.Anything, mock.Anything, mock.Anything).
+		Return(&ClientWriteResponse{}, nil).Once()
+
+	mockKV := &MockNatsKeyValue{}
+	// The key assertion: Put must be called with a live (non-done) context,
+	// proving that WriteAndDeleteTuples used context.WithoutCancel to derive
+	// the invalidation context rather than forwarding the cancelled parent ctx.
+	mockKV.On("Put",
+		mock.MatchedBy(func(invCtx context.Context) bool { return invCtx.Err() == nil }),
+		"inv",
+		mock.Anything,
+	).Return(uint64(1), nil).Once()
+
+	svc := newFgaService(mockClient, mockKV, false)
+
+	writes := []ClientTupleKey{
+		{Object: "project:1", Relation: "viewer", User: "user:alice"},
+	}
+
+	skipped, err := svc.WriteAndDeleteTuples(ctx, writes, nil)
+
+	assert.NoError(t, err)
+	assert.Empty(t, skipped)
+	mockClient.AssertExpectations(t)
+	// This expectation failing means the detached-context guarantee was broken.
+	mockKV.AssertExpectations(t)
 }

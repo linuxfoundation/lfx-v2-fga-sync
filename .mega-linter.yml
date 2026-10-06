@@ -37,12 +37,7 @@ DISABLE_LINTERS:
   - YAML_PRETTIER
   # Using other secret scanners (REPOSITORY_SECRETLINT).
   - REPOSITORY_GITLEAKS
-  # golangci-lint's precompiled binary in the MegaLinter bundled container is
-  # statically compiled against an older Go version than this repo's go.mod
-  # directive requires, and refuses to analyze the module. See CLAUDE.md's
-  # "Go Toolchain Version" section for the full explanation. (This does not
-  # affect govulncheck or MegaLinter's separate osv-scanner/trivy-based
-  # REPOSITORY_OSV_SCANNER check.)
+  # Prefer Revive.
   - GO_GOLANGCI_LINT
 DISABLE_ERRORS_LINTERS:
   # There's no easy local feedback loop for spelling issues before
@@ -76,3 +71,4 @@ SPELL_CSPELL_CONFIG_FILE: .cspell.json
 # Security scanning
 REPOSITORY_CHECKOV_ARGUMENTS: --skip-check CKV_DOCKER_2,CKV_DOCKER_3
 REPOSITORY_TRIVY_ARGUMENTS: --skip-dirs bin,vendor --severity HIGH,CRITICAL
+REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN

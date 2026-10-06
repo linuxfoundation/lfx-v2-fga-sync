@@ -202,10 +202,9 @@ Key invariants enforced there:
 # Set environment variables
 export NATS_URL="nats://localhost:4222"
 export OPENFGA_API_URL="http://localhost:8080"
-# Discover the store/model IDs (or use fga-operator's openfga-store pod label
-# to have them populated automatically -- see the Kubernetes section below)
-export OPENFGA_STORE_ID=$(curl -s "$OPENFGA_API_URL/stores" | jq -r '.stores[0].id')
-export OPENFGA_AUTH_MODEL_ID=$(curl -s "$OPENFGA_API_URL/stores/$OPENFGA_STORE_ID/authorization-models?page_size=1" | jq -r '.authorization_models[0].id')
+# Set these IDs from the OpenFGA store and authorization model created during provisioning.
+export OPENFGA_STORE_ID="<store-id>"
+export OPENFGA_AUTH_MODEL_ID="<authorization-model-id>"
 
 # Run the service
 make run
@@ -223,7 +222,7 @@ helm install fga-sync ./charts/lfx-v2-fga-sync \
 ```
 
 Clusters running `fga-operator` populate `OPENFGA_STORE_ID`/`OPENFGA_AUTH_MODEL_ID`
-automatically via the `openfga-store` pod label, so the `--set fga.storeId`/
+automatically from the `openfga-store` Deployment label, so the `--set fga.storeId`/
 `--set fga.modelId` overrides above are only needed for standalone (non-operator)
 setups.
 

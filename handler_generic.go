@@ -87,7 +87,8 @@ func (h *HandlerService) genericUpdateAccessHandler(ctx context.Context, message
 }
 
 // genericDeleteAccessHandler handles universal delete_access operations.
-// This removes publisher-managed tuples while preserving externally managed team grants.
+// This removes publisher-managed tuples, including global_* team grants, while
+// preserving team grants on other relations.
 //
 // NATS Subject: lfx.fga-sync.delete_access
 //
@@ -119,7 +120,8 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 	// Build object identifier using standard helper
 	object := buildObjectID(genericMsg.ObjectType, data.UID)
 
-	// Use existing generic sync with empty tuples. SyncObjectTuples preserves team grants.
+	// Use the generic sync with empty desired state. It preserves non-global
+	// team grants while deleting publisher-managed global_* team grants.
 	tuplesWrites, tuplesDeletes, err := h.fgaService.SyncObjectTuples(ctx, object, nil)
 	if err != nil {
 		logger.With(
@@ -135,15 +137,7 @@ func (h *HandlerService) genericDeleteAccessHandler(ctx context.Context, message
 		"deletes", tuplesDeletes,
 	).InfoContext(ctx, "deleted publisher-managed access for "+genericMsg.ObjectType)
 
-	// Send reply
-	if message.Reply() != "" {
-		if err = message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-	}
-
-	return nil
+	return h.reply(ctx, message, []byte("OK"))
 }
 
 // genericMemberPutHandler handles universal member_put operations with support for multiple relations.
@@ -221,7 +215,7 @@ func (h *HandlerService) genericMemberPutHandler(ctx context.Context, message IN
 	}
 
 	// Send reply
-	return h.sendReplyIfNeeded(ctx, message)
+	return h.reply(ctx, message, []byte("OK"))
 }
 
 // parseAndValidateMemberPutMessage parses and validates the member_put message
@@ -352,13 +346,15 @@ func (h *HandlerService) applyMemberPutChanges(
 	return nil
 }
 
-// sendReplyIfNeeded sends a reply message if requested
-func (h *HandlerService) sendReplyIfNeeded(ctx context.Context, message INatsMsg) error {
-	if message.Reply() != "" {
-		if err := message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
+// reply sends payload to msg's reply inbox if one is set. It logs and returns
+// any Respond error. If no reply inbox is set, it is a no-op and returns nil.
+func (h *HandlerService) reply(ctx context.Context, msg INatsMsg, payload []byte) error {
+	if msg.Reply() == "" {
+		return nil
+	}
+	if err := msg.Respond(payload); err != nil {
+		logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
+		return err
 	}
 	return nil
 }
@@ -472,12 +468,5 @@ func (h *HandlerService) genericMemberRemoveHandler(ctx context.Context, message
 	}
 
 	// Send reply
-	if message.Reply() != "" {
-		if err := message.Respond([]byte("OK")); err != nil {
-			logger.With(errKey, err).WarnContext(ctx, "failed to send reply")
-			return err
-		}
-	}
-
-	return nil
+	return h.reply(ctx, message, []byte("OK"))
 }

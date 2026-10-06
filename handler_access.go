@@ -6,10 +6,26 @@ package main
 
 import (
 	"context"
+	"time"
 )
+
+// accessCheckHandlerTimeout bounds the total time accessCheckHandler may
+// spend, covering the full cache-lookup-then-BatchCheck flow, not just one
+// outbound call. Without it, a slow or hung OpenFGA call can hold one of
+// this service's limited concurrent-handler slots open indefinitely, long
+// after the calling service (query-service) has given up: its
+// AccessCheckTimeout defaults to 15s, so this must stay below that. See
+// fgaHTTPTimeout and batchCheckMaxParallelRequests in fga.go for the rest of
+// this timeout budget's rationale.
+const accessCheckHandlerTimeout = 10 * time.Second
 
 // accessCheckHandler handles access check requests from the NATS server.
 func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMsg) error {
+	// Bound the total time this handler may run (see accessCheckHandlerTimeout
+	// above) so a slow or hung downstream call can't hold this handler's
+	// concurrency slot open indefinitely.
+	ctx, cancel := context.WithTimeout(ctx, accessCheckHandlerTimeout)
+	defer cancel()
 
 	var response []byte
 	var err error
@@ -21,12 +37,8 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if err != nil {
 		errText := "failed to extract check requests"
 		logger.With(errKey, err).WarnContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		return err
 	}
@@ -34,12 +46,8 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if len(checkRequests) == 0 {
 		errText := "no check requests found"
 		logger.WarnContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		// The message containing no check requests is not an error.
 		return nil
@@ -50,23 +58,17 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	if err != nil {
 		errText := "failed to check relationship"
 		logger.With(errKey, err).ErrorContext(ctx, errText)
-		if message.Reply() != "" {
-			// Send a reply if an inbox was provided.
-			if errRespond := message.Respond([]byte(errText)); errRespond != nil {
-				logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-				return errRespond
-			}
+		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
+			return replyErr
 		}
 		return err
 	}
 
 	if message.Reply() != "" {
-		// Send a reply if an inbox was provided.
-		if errRespond := message.Respond(response); errRespond != nil {
-			logger.With(errKey, errRespond).WarnContext(ctx, "failed to send reply")
-			return errRespond
+		err = h.reply(ctx, message, response)
+		if err != nil {
+			return err
 		}
-
 		logger.With(
 			"message", string(message.Data()),
 			"response", string(response),

@@ -122,7 +122,7 @@ func TestReadUserTuples(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockClient := &MockFgaClient{}
 			tt.mockSetup(mockClient)
-			svc := FgaService{client: mockClient, cacheBucket: NewMockKeyValue()}
+			svc := TupleStore{client: mockClient}
 
 			tuples, err := svc.ReadUserTuples(t.Context(), tt.user, tt.objectType)
 
@@ -277,7 +277,7 @@ func TestReadTuplesHandler(t *testing.T) {
 			msg := CreateMockNatsMsg(tt.messageData)
 			msg.reply = tt.replySubject
 
-			tt.mockSetup(service.fgaService.client.(*MockFgaClient), msg)
+			tt.mockSetup(service.fgaService.store.client.(*MockFgaClient), msg)
 
 			assert.NotPanics(t, func() {
 				err := service.readTuplesHandler(context.Background(), msg)
@@ -289,7 +289,7 @@ func TestReadTuplesHandler(t *testing.T) {
 			})
 
 			msg.AssertExpectations(t)
-			service.fgaService.client.(*MockFgaClient).AssertExpectations(t)
+			service.fgaService.store.client.(*MockFgaClient).AssertExpectations(t)
 		})
 	}
 }
