@@ -102,7 +102,13 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 	if c.bucket == nil {
 		return nil
 	}
-	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
+	var putErr error
+	err := withCacheOpSlot(ctx, func() {
+		_, putErr = c.bucket.Put(ctx, "inv", []byte("1"))
+	})
+	if err == nil {
+		err = putErr
+	}
 	if err != nil {
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
@@ -114,7 +120,14 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 // zero time when no invalidation has been recorded within the TTL window.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, "inv")
+	var entry jetstream.KeyValueEntry
+	var getErr error
+	err := withCacheOpSlot(ctx, func() {
+		entry, getErr = c.bucket.Get(ctx, "inv")
+	})
+	if err == nil {
+		err = getErr
+	}
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
