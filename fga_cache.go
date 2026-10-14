@@ -50,8 +50,9 @@ var (
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
-	// concurrent KV Get/Put in this file acquires a slot before the
-	// round-trip and releases it after. Held only around the KV call itself,
+	// KV Get/Put in this file acquires a slot before the round-trip and
+	// releases it after, except the inv write in invalidate, which must never
+	// wait behind a saturated cache. Held only around the KV call itself,
 	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
 	// capacity hostage.
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
@@ -114,7 +115,11 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 // zero time when no invalidation has been recorded within the TTL window.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, "inv")
+	var entry jetstream.KeyValueEntry
+	var err error
+	if slotErr := withCacheOpSlot(ctx, func() { entry, err = c.bucket.Get(ctx, "inv") }); slotErr != nil {
+		return time.Time{}, slotErr
+	}
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
