@@ -148,6 +148,19 @@ application:
   # Only turn it off if you are developing locally and are writing to the OpenFGA store
   # outside of this service (e.g. granting certain access to a test user manually)
   useCache: true
+  # invalidationMode controls how writes invalidate cached access checks.
+  #   global      - every write bumps one marker and makes the whole cache stale
+  #                 (original behavior).
+  #   read-scoped - lookups also honor scoped (per type / per user) markers;
+  #                 writes still invalidate globally.
+  #   scoped      - writes emit scoped markers derived from the OpenFGA model;
+  #                 anything that cannot be scoped safely still invalidates
+  #                 globally.
+  # Roll out in two steps: deploy read-scoped everywhere first, then switch to
+  # scoped. Switching straight to scoped lets a pod still on an older version
+  # (or on global) ignore scoped markers and serve revoked access from cache
+  # for up to the cache TTL. See docs/fga-sync-contract.md (Cache Behavior).
+  invalidationMode: global
   # replicas is the number of pod replicas
   replicas: 1
   # terminationGracePeriodSeconds must exceed the worst-case shutdown budget:

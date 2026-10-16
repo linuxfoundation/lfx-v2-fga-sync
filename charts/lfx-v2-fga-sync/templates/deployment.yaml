@@ -58,6 +58,8 @@ spec:
               value: "{{ .Values.application.debug }}"
             - name: USE_CACHE
               value: "{{ .Values.application.useCache }}"
+            - name: INVALIDATION_MODE
+              value: "{{ .Values.application.invalidationMode }}"
             {{- with .Values.application.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

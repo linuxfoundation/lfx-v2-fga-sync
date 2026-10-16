@@ -124,9 +124,31 @@ type INatsKeyValue interface {
 //
 // Construct with newFgaService; do not use struct literals in new code.
 type FgaService struct {
-	store    TupleStore
-	cache    CacheLayer
-	useCache bool
+	store        TupleStore
+	cache        CacheLayer
+	useCache     bool
+	invalidation invalidationConfig
+}
+
+// withInvalidation returns a copy of the service that scopes cache
+// invalidation per mode. graph may be nil, in which case writes stay global
+// whatever the mode.
+func (s FgaService) withInvalidation(mode invalidationMode, graph *modelGraph) FgaService {
+	s.invalidation = invalidationConfig{mode: mode, graph: graph}
+	return s
+}
+
+// invalidationPlan decides which cache markers a write must bump. It is the
+// global plan unless scoped writes are enabled and the model graph can vouch
+// for a narrower one.
+func (s FgaService) invalidationPlan(
+	writes []ClientTupleKey,
+	deletes []ClientTupleKeyWithoutCondition,
+) invalidationPlan {
+	if !s.invalidation.writesScoped() {
+		return globalPlan()
+	}
+	return s.invalidation.graph.planInvalidation(tupleRefs(writes, deletes))
 }
 
 // newFgaService creates a FgaService with the given FGA client, JetStream KV
@@ -221,7 +243,7 @@ func (s FgaService) WriteAndDeleteTuples(
 		// (e.g. expired deadline after batch 1 committed) cannot block the Put.
 		invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer invCancel()
-		if err := s.cache.invalidate(invCtx); err != nil {
+		if err := s.cache.applyInvalidation(invCtx, s.invalidationPlan(writes, deletes)); err != nil {
 			// Log but don't fail; the write result is already determined.
 			logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
 		}
@@ -480,12 +502,16 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// are appended by buildResponseAndWriteBack in map-iteration order,
 		// so overall response order is not guaranteed and callers must not
 		// rely on it.
+		cutoffs := invalidationCutoffs{global: lastInvalidation}
+		if s.invalidation.readsScoped() {
+			cutoffs = s.cache.loadInvalidationCutoffs(ctx, lastInvalidation, tupleItems)
+		}
 		outcomes := make([]cacheLookupOutcome, len(tupleItems))
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(cacheLookupConcurrency)
 		for i, tuple := range tupleItems {
 			g.Go(func() error {
-				outcomes[i] = s.cache.lookupEntry(gctx, tuple, lastInvalidation)
+				outcomes[i] = s.cache.lookupEntry(gctx, tuple, cutoffs.forTuple(tuple))
 				return nil
 			})
 		}
