@@ -284,19 +284,67 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 | --- | --- |
 | Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
-| Invalidation | A single `inv` timestamp key, every successful OpenFGA write bumps it, making all older cached entries stale |
+| Invalidation | Writes bump `inv` (global) or, in `scoped` mode, narrower markers; see [Invalidation scoping](#invalidation-scoping). A cached entry older than any marker that applies to it is stale |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
 
+### Invalidation scoping
+
+A cached result answers "does user U have relation R on object O", which OpenFGA
+computes through the model (computed relations, inheritance such as
+`writer from committee`, team membership). One tuple write can therefore change
+many cache entries, which is why the default is a global `inv` bump. In `scoped`
+mode fga-sync reads the authorization model it is configured with
+(`OPENFGA_AUTH_MODEL_ID`) at startup, builds a dependency graph of relations, and
+uses it to bump only the markers that can matter.
+
+| Marker key | Written when | Makes stale |
+| --- | --- | --- |
+| `inv` | Any write that cannot be scoped safely | Every entry |
+| `inv.t.{type}` | The written tuple's subject is not a single concrete user (a `user:*` wildcard, a userset such as `team:t#member`, or an object such as a parent project) | Every entry on each object type the tuple can affect, for all users |
+| `inv.u.{type}.{base32(user)}` | The written tuple's subject is one concrete user | Entries for that user on each object type the tuple can affect |
+
+The object types a tuple can affect are the transitive closure over the model:
+the tuple's own `type#relation`, relations on the same type derived from it, and
+relations on other types that inherit it through `X from parent` style rewrites,
+repeated until nothing new is added. Removing a user as a `meeting#participant`
+therefore stales that user's `meeting` and `meeting_attachment` checks but not
+their `vote` or `project` checks, and other users' `meeting` checks stay cached.
+
+Writes fall back to the global `inv` when scoping cannot be proven safe: no model
+graph (model failed to load or parse), an object type or relation the model does
+not define, a tuple with a condition, a malformed object, or a scoped marker that
+fails to write. A batch touching more than 32 (type, user) pairs folds user
+markers into type markers.
+
+The cache key format and the `inv` key are unchanged. Per-object scoping is not
+done: a marker covers every object of its type.
+
+#### `INVALIDATION_MODE`
+
+| Value | Writes | Lookups |
+| --- | --- | --- |
+| `global` (default) | Bump `inv` | Honor `inv` only |
+| `read-scoped` | Bump `inv` | Honor `inv` and scoped markers |
+| `scoped` | Scoped markers where safe, else `inv` | Honor `inv` and scoped markers |
+
+Roll out in two steps: deploy `read-scoped` to every replica, then switch to
+`scoped`. A replica that does not read scoped markers will serve a revoked grant
+from cache until the entry's TTL if another replica writes only scoped markers.
+
 ### Debugging cache behavior
 
-- Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.
+- Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`,
+  `cache_invalidations_global`, `cache_invalidations_scoped`. A high global count in
+  `scoped` mode means writes are not being scoped; check the logs for
+  `could not build model graph` and for writes with conditions or unknown relations.
 - If access checks return wrong/old results, look for `"cache invalidation failed"`
   in fga-sync logs. The `inv` key may have failed to bump.
 - Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`
   bucket; this forces every cached entry to be treated as stale on next read.
-- A successful any-type OpenFGA write re-invalidates. When in doubt, trigger any
-  `update_access` on any resource and stale entries clear globally.
+- In `global` mode a successful write of any type re-invalidates everything. In
+  `scoped` mode only the entries the model says can change are invalidated; to
+  force a full flush write any value to `inv`.
 
 ## Publishing Access Messages (Go Code Example)
 
@@ -370,8 +418,9 @@ Common causes:
   written or removed. Fixing the publisher and republishing corrected data is
   the only recovery path — see LFXV2-2907 for the publisher-side root cause
   and its ownership of the fix.
-- Cache is stale. Any successful OpenFGA write re-invalidates, or manually write to
-  the `inv` KV key.
+- Cache is stale. In `global` mode any successful OpenFGA write re-invalidates; in
+  `scoped` mode only affected entries do, so manually write to the `inv` KV key to
+  flush everything.
 
 ### Auditing recent tuple changes
 
