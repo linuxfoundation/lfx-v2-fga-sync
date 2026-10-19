@@ -29,7 +29,8 @@ const (
 	cacheLookupConcurrency = 64
 
 	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
-	// process. cacheLookupConcurrency bounds one request's fan-out, but the
+	// process, except the ungated inv write in invalidate (see cacheOpSem).
+	// cacheLookupConcurrency bounds one request's fan-out, but the
 	// subscription layer admits subscriptionConcurrency (main.go; currently
 	// 16) handlers at once, so per-request limits alone permit
 	// cacheLookupConcurrency * subscriptionConcurrency (currently ~1,024)
@@ -67,7 +68,9 @@ func init() {
 // withCacheOpSlot runs fn while holding a slot in the service-wide KV budget
 // (cacheOpSem). If ctx is canceled before a slot frees, fn is not run and
 // ctx.Err() is returned; callers treat that the same as any other cache
-// failure (fall through to OpenFGA, or skip a best-effort write).
+// failure (fall through to OpenFGA, or skip a best-effort write), except
+// getLastInvalidation, which returns it so CheckRelationships fails the
+// request.
 func withCacheOpSlot(ctx context.Context, fn func()) error {
 	select {
 	case cacheOpSem <- struct{}{}:
@@ -113,6 +116,8 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 
 // getLastInvalidation reads the inv key and returns its creation time, or the
 // zero time when no invalidation has been recorded within the TTL window.
+// The read holds a cacheOpSem slot; if ctx is done before one frees, it
+// returns ctx.Err() without reaching the bucket.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
 	var entry jetstream.KeyValueEntry

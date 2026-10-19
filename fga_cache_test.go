@@ -185,3 +185,35 @@ func TestGetLastInvalidationReturnsContextErrorWhenCacheBudgetFull(t *testing.T)
 	assert.Zero(t, kv.peak, "bucket Get must not run without a cache slot")
 	assert.Equal(t, cacheOpConcurrency, len(cacheOpSem), "occupied slot count must be unchanged")
 }
+
+// TestInvalidateWritesWithoutCacheBudgetSlot proves the inv write in
+// invalidate never waits for a cacheOpSem slot: with the budget full, the
+// Put still runs and returns, and the occupied slot count is unchanged.
+func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
+	for range cacheOpConcurrency {
+		cacheOpSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cacheOpConcurrency {
+			<-cacheOpSem
+		}
+	})
+
+	kv := &concurrencyTrackingKV{}
+	cache := CacheLayer{bucket: kv}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cache.invalidate(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("invalidate blocked on a full cache budget")
+	}
+
+	assert.Equal(t, 1, kv.putPeak, "inv Put must run while the cache budget is full")
+	assert.Equal(t, cacheOpConcurrency, len(cacheOpSem), "occupied slot count must be unchanged")
+}
