@@ -29,7 +29,8 @@ const (
 	cacheLookupConcurrency = 64
 
 	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
-	// process, except the ungated inv write in invalidate (see cacheOpSem).
+	// process, except the inv write in invalidate, which skips the budget
+	// (see cacheOpSem).
 	// cacheLookupConcurrency bounds one request's fan-out, but the
 	// subscription layer admits subscriptionConcurrency (main.go; currently
 	// 16) handlers at once, so per-request limits alone permit
