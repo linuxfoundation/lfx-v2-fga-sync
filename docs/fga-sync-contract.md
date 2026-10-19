@@ -282,21 +282,162 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 
 | Aspect | Detail |
 | --- | --- |
-| Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
+| Cache key | Base32-encoded relation tuple `relinv.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
-| Invalidation | A single `inv` timestamp key, every successful OpenFGA write bumps it, making all older cached entries stale |
+| Invalidation | Per-`(object, relation)` timestamp keys (`inv.{encoded-object#relation}`); a write/delete batch bumps the marker for every unique `(object, relation)` pair it touches, making older cached entries for that object and relation stale across all users |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
+
+Invalidation is scoped to `(object, relation)`, not per-user: OpenFGA batch
+writes/deletes are reported at that granularity, and resolving to individual
+users would require reading tuples back before invalidating. Every write
+always bumps the object-scoped marker for the pair it touched — a write to
+`project:123#writer` always invalidates cached entries for `project:123`'s
+`writer` relation. Whether it *also* bumps a broader, type-wide marker
+depends on the relation, per the cascading/cross-type rules below; a write to
+an unrelated relation on an unrelated object must not force every other
+cached check for that type to miss (see issue #2358).
+
+Because OpenFGA relations compose — both within a type (`project.writer`
+building on `project.owner`, or cascading down/up a `parent`/`child`
+hierarchy) and across types (`committee.writer` reading `writer_guard from
+project`) — a write to one object can change what a relation evaluates to on
+a *different* object that never had its own tuple written. Per-`(object,
+relation)` markers alone cannot catch this, so two additional, narrowly
+scoped type-wide markers exist:
+
+- **Same-type cascade**: relations in `cascadingRelations` (`fga_cache.go`) —
+  `project.owner/writer/auditor/marketing_ops/marketing_auditor` (cascade via
+  `parent`) and `b2b_org.writer/auditor` (cascade via `parent`/`child`) — and
+  writes to the hierarchy-edge relations themselves (`parent`, `child`) bump
+  a `(type:*, relation)` marker for that specific relation (or, for an edge
+  write, for every relation the type cascades), so a write to an
+  ancestor/descendant/edge invalidates the whole cascade without needing a
+  hierarchy walk.
+- **Same-object feeder fanout**: a relation need not itself be in
+  `cascadingRelations` to need a type-wide marker — it only needs to
+  same-object-read (directly, or transitively through another feeder) a
+  relation that is. `cascadingFeeders` (`fga_cache.go`) lists these DIRECT
+  same-object edges (e.g. `project.owner` feeds `project.writer`, which feeds
+  `project.writer_guard`, which feeds `project.meetings_creator`); its
+  transitive closure, `cascadingFanout`, is what `expandTypeWidePairs`
+  consults to bump a `(type:*, relation)` marker for every relation reached.
+  For example `project.executive_director` is a plain `[user]` grant with no
+  `from parent` of its own, but it feeds `project.auditor` and `project.
+  marketing_auditor` same-object — both of which cascade (directly or
+  transitively) — so writing `project:123#executive_director` bumps
+  `project:*`'s `auditor` and `marketing_auditor` markers even though
+  `executive_director` itself never appears in `cascadingRelations`.
+  `project.campaign_manager` is also fed same-object by
+  `executive_director` (per model.fga), but is deliberately excluded from
+  this feeder edge: `campaign_manager` itself doesn't cascade, and neither
+  does `executive_director`, so a write to one project's
+  `executive_director` can only ever change that SAME project's
+  `campaign_manager` — already covered by the object-scoped marker — and
+  bumping a type-wide marker for it would invalidate every project's
+  `campaign_manager` cache for no cross-object benefit. `marketing_ops`
+  *is* listed as a `campaign_manager` feeder, though, since `marketing_ops`
+  itself cascades via `marketing_ops from parent`.
+- **Cross-type fanout**: a write to a relation that feeds some dependent
+  type's guard (per `crossTypeDependents`/`typeInvalidationFanout`) bumps a
+  `(dependentType:*, dependentRelation)` marker for every dependent relation
+  reached transitively — unless the written relation is listed in
+  `crossTypeIrrelevant` for its type (verified against `model.fga` to never
+  feed any dependent's guard), in which case this fanout is skipped.
+
+A write to a relation that participates in none of these three mechanisms
+only bumps its own object-scoped marker — it does not touch any `type:*`
+marker. `meeting_attachment`'s relations (`writer`/`auditor`/`participant`/
+`viewer`) are a clean example: `meeting_attachment` is a leaf type — it is
+never a source key in `cascadingFeeders`/`cascadingRelations`,
+`crossTypeDependents`, or `typeInvalidationFanout` — so writing
+`meeting_attachment:123#writer` only ever invalidates `meeting_attachment:
+123`'s own object-scoped marker; no `type:*` marker for any type is touched.
+Note that `project`'s own relations are not a useful example here: every
+writable `project` relation either cascades directly, feeds a relation that
+cascades, or is cross-type-relevant to some dependent, so none of them
+qualifies. Every cache lookup for a relation that participates in any of the
+three mechanisms consults both its object-scoped marker and the relevant
+`type:*` marker(s) and takes the later timestamp.
+
+### Rolling deployment: cache key prefix rename
+
+Cache entries used a `rel.` prefix before invalidation markers existed at
+all. A pod still running that older code has no notion of the `inv.` markers
+this PR introduces, so during a rolling deploy it could refresh a `rel.`
+entry's timestamp after an already-upgraded pod set an `inv.` marker for the
+same object — making a revoked entry look fresh to the new pod. To make that
+collision structurally impossible, cache entries now use a `relinv.` prefix
+(`pkg/cachekey.Entry`) instead: old pods keep writing the old `rel.` prefix,
+which new pods never read, so old writes simply age out via the bucket's TTL
+without ever being consulted. `inv.` marker keys are unaffected — they are
+new in this PR, so no old pod ever writes them, and there is no collision to
+guard against there. This is a one-time rename tied to introducing the
+invalidation-marker scheme; do not bump it again for unrelated changes.
+
+The direct (non-transitive) edges are hand-maintained in
+`crossTypeDependents` in `fga_cache.go`, mirroring both the `X from <type>`
+references AND the `[<type>#relation]` direct userset references in
+`charts/lfx-platform/files/model.fga` (e.g. `team#member` and
+`mentorship_approver_team#member`); `fga_cache.go` computes the full
+transitive closure once at init (`typeInvalidationFanout`). Keep
+`crossTypeDependents` in sync when a relation definition gains or loses
+either a `from <type>` reference or a direct `[<type>#relation]` userset
+reference — an under-inclusive edge reintroduces stale-access staleness, an
+over-inclusive one only costs extra cache misses.
+
+### Rolling deployment: legacy global `inv` marker
+
+Before the per-`(object, relation)` `inv.`-prefixed markers above existed,
+fga-sync (and out-of-process direct-OpenFGA writers, e.g.
+`scripts/bootstrap/member-tiers-callers`) invalidated the whole cache with
+one bare `inv` key, bumped on every write regardless of object or relation.
+During a rolling deploy, a pod (or bootstrap script binary) can still be
+running that older code, which only ever writes and reads the bare `inv`
+key — it has no notion of the scoped `inv.`-prefixed markers. To avoid a
+fail-open window where either side of the rollout misses an invalidation the
+other side processed, every writer (`CacheLayer.invalidate`, and the
+bootstrap script) dual-writes both the scoped marker(s) and the legacy bare
+`inv` key, and every reader (`invalidationLookup.get`/`getLegacy`)
+additionally consults the bare `inv` key and takes the latest of all
+timestamps. This accepts a temporary, coarser global cache miss on every
+pod whenever any write happens, in exchange for closing the staleness
+window. `cachekey.LegacyInvalidationKey` documents removal: delete it, its
+write call sites, and its read call sites once every fga-sync pod and every
+out-of-process writer is confirmed running post-`relinv` code.
 
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.
-- If access checks return wrong/old results, look for `"cache invalidation failed"`
-  in fga-sync logs. The `inv` key may have failed to bump.
-- Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`
-  bucket; this forces every cached entry to be treated as stale on next read.
-- A successful any-type OpenFGA write re-invalidates. When in doubt, trigger any
-  `update_access` on any resource and stale entries clear globally.
+- OTel spans for cache operations: `fga_sync.cache.lookup` (hit/stale/miss
+  counts for a `CheckRelationships` batch), `fga_sync.cache.write_back`,
+  `fga_sync.cache.invalidate`, and `fga_sync.cache.seed`, nested under the
+  `nats.process` consumer span for the message being handled.
+- If access checks return wrong/old results, look for `"failed to write cache
+  invalidation marker"` or `"cache invalidation lookup error"` in fga-sync
+  logs. The marker for that object+relation pair may have failed to bump or
+  to read.
+- Manually invalidate a specific object+relation by writing any value to
+  `inv.{base32(object#relation)}` (no padding) in the `fga-sync-cache`
+  bucket; this forces every cached entry for that pair to be treated as
+  stale on next read. Outside of the rollout window described above, there
+  is no other single key that invalidates the whole cache at once — but
+  during the rollout, every lookup still additionally consults the bare
+  legacy `inv` key (see "Rolling deployment: legacy global `inv` marker"),
+  so writing that key remains available as a manual global invalidation
+  until the legacy read path is removed.
+- A successful OpenFGA write/delete always re-invalidates the `(object,
+  relation)` pairs it touched, and *additionally* bumps a type-wide marker
+  only when the written relation is a same-type cascade/hierarchy-edge
+  relation or feeds a cross-type dependent (see above) — so a targeted write
+  to a cascading or cross-type-relevant relation can appear to invalidate
+  more than the touched pair, but a write to an unrelated relation should
+  not. If you observe widespread stale misses after a write to a relation
+  that is *not* in `cascadingRelations`/`hierarchyEdgeRelations` and is
+  listed in `crossTypeIrrelevant` (or has no cross-type dependents at all),
+  that is unexpected and worth investigating as a bug. When in doubt, trigger
+  an `update_access` for the specific object+relation in question rather than
+  any resource.
 
 ## Publishing Access Messages (Go Code Example)
 
@@ -370,8 +511,9 @@ Common causes:
   written or removed. Fixing the publisher and republishing corrected data is
   the only recovery path — see LFXV2-2907 for the publisher-side root cause
   and its ownership of the fix.
-- Cache is stale. Any successful OpenFGA write re-invalidates, or manually write to
-  the `inv` KV key.
+- Cache is stale for the object+relation in question. A successful OpenFGA
+  write/delete for that pair re-invalidates it, or manually write to its
+  `inv.{base32(object#relation)}` KV key (see "Debugging cache behavior" above).
 
 ### Auditing recent tuple changes
 

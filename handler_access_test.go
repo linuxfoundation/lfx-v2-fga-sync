@@ -106,7 +106,6 @@ func TestAccessCheckHandler(t *testing.T) {
 					Result: &resultMap,
 				}, nil)
 				// Mock cache operations
-				service.fgaService.cache.bucket.(*MockKeyValue).On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
 				service.fgaService.cache.bucket.(*MockKeyValue).On("Get", mock.Anything, mock.AnythingOfType("string")).Return(nil, jetstream.ErrKeyNotFound)
 				service.fgaService.cache.bucket.(*MockKeyValue).On("Put", mock.Anything, mock.Anything, mock.Anything).Return(uint64(0), nil)
 			},
@@ -210,7 +209,6 @@ func TestAccessCheckHandler(t *testing.T) {
 				}, nil)
 
 				// Mock cache operations
-				service.fgaService.cache.bucket.(*MockKeyValue).On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
 				service.fgaService.cache.bucket.(*MockKeyValue).On("Get", mock.Anything, mock.AnythingOfType("string")).Return(nil, jetstream.ErrKeyNotFound)
 
 				// IMPORTANT: Only the successful check (correlation_id=2) should be cached
