@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // useRecordingTracer swaps the package-level tracer for one backed by a
@@ -255,4 +256,32 @@ func TestCacheLayerSeedPositiveEntriesTracesKeys(t *testing.T) {
 
 		assert.Empty(t, spansNamed(sr, "fga_sync.cache.seed"))
 	})
+}
+
+// TestWriteBackPutsRunUnderWriteBackSpan guards trace correlation for cache
+// write-back: the context each Put receives (and so its error logs) must
+// carry the fga_sync.cache.write_back span, not just the caller's span.
+func TestWriteBackPutsRunUnderWriteBackSpan(t *testing.T) {
+	sr := useRecordingTracer(t)
+
+	var putSpanCtx trace.SpanContext
+	kv := new(MockNatsKeyValue)
+	kv.On("Put", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			putSpanCtx = trace.SpanContextFromContext(args.Get(0).(context.Context))
+		}).
+		Return(uint64(1), nil)
+
+	result := map[string]openfga.BatchCheckSingleResult{
+		"1": {Allowed: openfga.PtrBool(true)},
+	}
+	mapping := map[string]ClientBatchCheckItem{
+		"1": {User: "user:a", Relation: "viewer", Object: "obj1"},
+	}
+	CacheLayer{bucket: kv}.buildResponseAndWriteBack(context.Background(), nil, result, mapping)
+
+	spans := spansNamed(sr, "fga_sync.cache.write_back")
+	require.Len(t, spans, 1)
+	assert.Equal(t, spans[0].SpanContext().SpanID(), putSpanCtx.SpanID(),
+		"Put must run with the write_back span's context")
 }

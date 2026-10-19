@@ -265,7 +265,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
 ) []byte {
-	cachePuts := make([]func() error, 0, len(result))
+	cachePuts := make([]func(context.Context) error, 0, len(result))
 
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -301,15 +301,15 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		if shouldCache {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
-			cachePuts = append(cachePuts, func() error {
-				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			cachePuts = append(cachePuts, func(putParent context.Context) error {
+				putCtx, cancel := context.WithTimeout(putParent, 5*time.Second)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
-						logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+						logger.With(errKey, err).ErrorContext(putCtx, "failed to cache relation")
 					}
 				}); slotErr != nil {
-					logger.With(errKey, slotErr).ErrorContext(ctx, "failed to cache relation")
+					logger.With(errKey, slotErr).ErrorContext(putCtx, "failed to cache relation")
 				}
 				return nil
 			})
@@ -329,7 +329,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 				case <-gctx.Done():
 					return nil
 				default:
-					return put()
+					return put(gctx)
 				}
 			})
 		}
