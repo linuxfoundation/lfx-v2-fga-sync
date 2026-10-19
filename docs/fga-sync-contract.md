@@ -345,6 +345,11 @@ while the mode was `scoped`.
   `cache_invalidations_global`, `cache_invalidations_scoped`. A high global count in
   `scoped` mode means writes are not being scoped; check the logs for
   `could not build model graph` and for writes with conditions or unknown relations.
+- OTel spans for cache operations: `fga_sync.cache.lookup` (requested and
+  hit/stale/miss counts for a `CheckRelationships` batch),
+  `fga_sync.cache.write_back` (number of cache puts), `fga_sync.cache.invalidate`
+  (the invalidation marker writes), and `fga_sync.cache.seed` (number of seeded keys),
+  nested under the `nats.process` consumer span for the message being handled.
 - If access checks return wrong/old results, look for `"cache invalidation failed"`
   in fga-sync logs. The `inv` key may have failed to bump.
 - Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`

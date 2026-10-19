@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
@@ -302,15 +305,26 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		return c.invalidate(ctx)
 	}
 
+	keys := plan.markerKeys()
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", "scoped"),
+			attribute.Int("fga_sync.cache.invalidate.markers", len(keys)),
+		),
+	)
+	defer span.End()
+
 	var wg errgroup.Group
 	wg.SetLimit(invalidationWriteConcurrency)
-	for _, key := range plan.markerKeys() {
+	for _, key := range keys {
 		wg.Go(func() error {
 			_, err := c.bucket.Put(ctx, key, []byte("1"))
 			return err
 		})
 	}
 	if err := wg.Wait(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write scoped invalidation markers; falling back to global")
 		cacheInvalidationsGlobal.Add(1)
 		return c.invalidate(ctx)

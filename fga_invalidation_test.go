@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/codes"
 )
 
 var invalidationTestBase = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
@@ -1280,5 +1281,55 @@ func TestConfigureInvalidation(t *testing.T) {
 		mode, graph := configureInvalidation(ctx, client)
 		assert.Equal(t, invalidationScoped, mode, "lookups must still honor scoped markers")
 		assert.Nil(t, graph, "writes must stay global without a graph")
+	})
+}
+
+// TestApplyInvalidationTracesScopedWrites covers the fga_sync.cache.invalidate
+// span on the scoped path: it records the marker count, is marked errored when
+// a marker write fails, and the global fallback nests its own span under it.
+func TestApplyInvalidationTracesScopedWrites(t *testing.T) {
+	ctx := context.Background()
+	plan := invalidationPlan{
+		types: []string{"vote"},
+		users: []userMarker{{typ: "meeting", user: "user:a"}},
+	}
+
+	t.Run("successful scoped write records the marker count", func(t *testing.T) {
+		sr := useRecordingTracer(t)
+		require.NoError(t, CacheLayer{bucket: newFlakyKV()}.applyInvalidation(ctx, plan))
+
+		spans := spansNamed(sr, "fga_sync.cache.invalidate")
+		require.Len(t, spans, 1)
+		assert.Equal(t, int64(len(plan.markerKeys())), spanIntAttrs(spans[0])["fga_sync.cache.invalidate.markers"])
+		assert.NotEqual(t, codes.Error, spans[0].Status().Code)
+	})
+
+	t.Run("failed marker write marks the scoped span errored and falls back", func(t *testing.T) {
+		sr := useRecordingTracer(t)
+		kv := newFlakyKV()
+		kv.failPut = func(key string) error {
+			if key == globalInvalidationKey {
+				return nil
+			}
+			return assert.AnError
+		}
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, plan))
+		assert.True(t, kv.written(globalInvalidationKey))
+
+		spans := spansNamed(sr, "fga_sync.cache.invalidate")
+		require.Len(t, spans, 2, "scoped attempt plus the global fallback")
+		var errored int
+		for _, s := range spans {
+			if s.Status().Code == codes.Error {
+				errored++
+			}
+		}
+		assert.Equal(t, 1, errored)
+	})
+
+	t.Run("a global plan emits only the global span", func(t *testing.T) {
+		sr := useRecordingTracer(t)
+		require.NoError(t, CacheLayer{bucket: newFlakyKV()}.applyInvalidation(ctx, globalPlan()))
+		assert.Len(t, spansNamed(sr, "fga_sync.cache.invalidate"), 1)
 	})
 }
