@@ -48,6 +48,11 @@ type modelGraph struct {
 	// affected maps a relation to the sorted object types reachable from it
 	// through dependents, including its own type.
 	affected map[relNode][]string
+	// tuplesets is the set of relations that some tuple-to-userset rewrite
+	// traverses ("X from parent" makes parent a tupleset). A tuple on one of
+	// them names an object to traverse, not a principal gaining access, so
+	// its subject is not the only user whose checks can change.
+	tuplesets map[relNode]struct{}
 }
 
 // newModelGraph builds the dependency graph for an authorization model. It
@@ -68,6 +73,7 @@ func newModelGraph(model *openfga.AuthorizationModel) (*modelGraph, error) {
 		defined:    make(map[relNode]struct{}),
 		dependents: make(map[relNode][]relNode),
 		affected:   make(map[relNode][]string),
+		tuplesets:  make(map[relNode]struct{}),
 	}
 
 	direct := make(map[relNode][]openfga.RelationReference)
@@ -146,6 +152,7 @@ func (g *modelGraph) addEdges(
 		if err := g.requireDefined(tupleset); err != nil {
 			return err
 		}
+		g.tuplesets[tupleset] = struct{}{}
 		// Changing which parents exist changes the result.
 		g.addEdge(tupleset, target)
 		// Changing the computed relation on any allowed parent type changes
@@ -233,6 +240,13 @@ func (g *modelGraph) reachableTypes(start relNode) []string {
 func (g *modelGraph) affectedTypes(typ, rel string) ([]string, bool) {
 	types, ok := g.affected[relNode{typ: typ, rel: rel}]
 	return types, ok
+}
+
+// isTupleset reports whether tuples on typ#rel are traversed by a
+// tuple-to-userset rewrite.
+func (g *modelGraph) isTupleset(typ, rel string) bool {
+	_, ok := g.tuplesets[relNode{typ: typ, rel: rel}]
+	return ok
 }
 
 // loadModelGraph fetches the authorization model this service is configured

@@ -474,6 +474,9 @@ type flakyKV struct {
 	*MockKeyValue
 	failGet func(key string) error
 	failPut func(key string) error
+	// hangPut, when it returns true for a key, makes Put block until its
+	// context ends, like a NATS write that exhausts its deadline.
+	hangPut func(key string) bool
 	gets    atomic.Int64
 	getKeys sync.Map
 }
@@ -490,6 +493,14 @@ func (f *flakyKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry,
 }
 
 func (f *flakyKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if f.hangPut != nil && f.hangPut(key) {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	// A real KV write fails on a finished context.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if f.failPut != nil {
 		if err := f.failPut(key); err != nil {
 			return 0, err
@@ -1331,5 +1342,74 @@ func TestApplyInvalidationTracesScopedWrites(t *testing.T) {
 		sr := useRecordingTracer(t)
 		require.NoError(t, CacheLayer{bucket: newFlakyKV()}.applyInvalidation(ctx, globalPlan()))
 		assert.Len(t, spansNamed(sr, "fga_sync.cache.invalidate"), 1)
+	})
+}
+
+// TestApplyInvalidationFallbackSurvivesExhaustedDeadline covers the case where
+// scoped marker writes use up the whole invalidation deadline: the global
+// fallback must still get a live context, or revoked grants stay cached.
+func TestApplyInvalidationFallbackSurvivesExhaustedDeadline(t *testing.T) {
+	kv := newFlakyKV()
+	kv.hangPut = func(key string) bool { return key != globalInvalidationKey }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	plan := invalidationPlan{types: []string{"vote"}}
+	require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, plan))
+	assert.True(t, kv.written(globalInvalidationKey), "the global marker must be written after scoped writes time out")
+}
+
+// TestPlanInvalidationTuplesetSubjects covers tuples on a tupleset relation
+// (the "owner_user" in "friend from owner_user"). Their subject is the object
+// being traversed, so a concrete user there must widen to type markers, while
+// a tuple that actually grants a user access stays scoped to that user.
+func TestPlanInvalidationTuplesetSubjects(t *testing.T) {
+	g := graphFromDSL(t, `model
+  schema 1.1
+type user
+  relations
+    define friend: [user]
+type doc
+  relations
+    define owner_user: [user]
+    define direct: [user]
+    define viewer: friend from owner_user or direct
+`)
+
+	tests := []struct {
+		name  string
+		tuple tupleRef
+		want  invalidationPlan
+	}{
+		{
+			name:  "concrete user on a tupleset relation widens to the type",
+			tuple: tupleRef{user: "user:a", relation: "owner_user", object: "doc:1"},
+			want:  invalidationPlan{types: []string{"doc"}},
+		},
+		{
+			name:  "concrete user on a plain grant relation stays scoped to the user",
+			tuple: tupleRef{user: "user:a", relation: "direct", object: "doc:1"},
+			want:  invalidationPlan{users: []userMarker{{typ: "doc", user: "user:a"}}},
+		},
+		{
+			name:  "concrete user on the traversed relation stays scoped to the user",
+			tuple: tupleRef{user: "user:b", relation: "friend", object: "user:a"},
+			want: invalidationPlan{users: []userMarker{
+				{typ: "doc", user: "user:b"},
+				{typ: "user", user: "user:b"},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, g.planInvalidation([]tupleRef{tt.tuple}))
+		})
+	}
+
+	t.Run("the platform model has no tupleset that takes a concrete user", func(t *testing.T) {
+		platform := platformGraph(t)
+		assert.True(t, platform.isTupleset("meeting", "committee"))
+		assert.False(t, platform.isTupleset("meeting", "participant"))
 	})
 }

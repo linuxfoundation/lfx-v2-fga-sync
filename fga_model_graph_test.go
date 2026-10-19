@@ -906,6 +906,30 @@ type doc
     define member: [user]
     define viewer: member and active from org
 `,
+		// A tuple on a tupleset relation names the object a rewrite traverses,
+		// so a concrete-user subject there changes other users' checks. These
+		// shapes are not in the platform model today but the graph is built
+		// from whatever model is live.
+		"user as tupleset subject": `model
+  schema 1.1
+type user
+  relations
+    define friend: [user]
+type doc
+  relations
+    define owner_user: [user]
+    define viewer: friend from owner_user
+`,
+		"user as inheritance parent": `model
+  schema 1.1
+type user
+  relations
+    define viewer: [user]
+type doc
+  relations
+    define parent: [user]
+    define viewer: viewer from parent
+`,
 		"recursive parents": `model
   schema 1.1
 type user
@@ -920,7 +944,9 @@ type doc
 `,
 	}
 
-	universe := refUniverse{objectIDs: []string{"1", "2", "3"}, users: []string{"user:a", "user:b"}}
+	// Object ids overlap with user ids so that a user can also be the object
+	// a tupleset points at.
+	universe := refUniverse{objectIDs: []string{"a", "b", "c"}, users: []string{"user:a", "user:b", "user:c"}}
 
 	for name, dsl := range models {
 		t.Run(name, func(t *testing.T) {

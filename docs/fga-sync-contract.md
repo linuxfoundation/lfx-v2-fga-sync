@@ -302,7 +302,7 @@ uses it to bump only the markers that can matter.
 | --- | --- | --- |
 | `inv` | Any write that cannot be scoped safely | Every entry |
 | `inv.t.{type}` | The written tuple's subject is not a single concrete user (a `user:*` wildcard, a userset such as `team:t#member`, or an object such as a parent project) | Every entry on each object type the tuple can affect, for all users |
-| `inv.u.{type}.{base32(user)}` | The written tuple's subject is one concrete user | Entries for that user on each object type the tuple can affect |
+| `inv.u.{type}.{base32(user)}` | The written tuple's subject is one concrete user and the tuple is not on a relation that a `X from relation` rewrite traverses | Entries for that user on each object type the tuple can affect |
 
 The object types a tuple can affect are the transitive closure over the model:
 the tuple's own `type#relation`, relations on the same type derived from it, and
@@ -310,6 +310,11 @@ relations on other types that inherit it through `X from parent` style rewrites,
 repeated until nothing new is added. Removing a user as a `meeting#participant`
 therefore stales that user's `meeting` and `meeting_attachment` checks but not
 their `vote` or `project` checks, and other users' `meeting` checks stay cached.
+
+A tuple on a relation that a rewrite traverses (the `parent` in `viewer from parent`)
+is scoped by type even when its subject is a user, because that subject is the
+object being traversed, not the user gaining access. The platform model has no such
+relation that accepts a concrete user today, so this only matters if the model changes.
 
 Writes fall back to the global `inv` when scoping cannot be proven safe: no model
 graph (model failed to load or parse), an object type or relation the model does
@@ -332,12 +337,30 @@ Roll out in two steps: deploy `read-scoped` to every replica, then switch to
 `scoped`. A replica that does not read scoped markers will serve a revoked grant
 from cache until the entry's TTL if another replica writes only scoped markers.
 
-Rolling back is safe in the other direction. Every mode still honors `inv`, so
-switching `scoped` back to `global` (or `read-scoped`) needs no cleanup. Scoped
-markers written earlier are ignored once no replica reads them, and `inv` writes
-resume immediately. Entries cached before a rollback are covered by the next `inv`
-bump, so a rollback is the one time to write `inv` by hand if a revocation landed
-while the mode was `scoped`.
+Roll back in the reverse order, one step at a time. Do not go straight from
+`scoped` to `global`: a replica still on `scoped` keeps writing scoped markers
+that a replica already on `global` ignores, so a revocation (or a grant that
+should replace a cached denial) can be missed.
+
+1. Move every replica to `read-scoped`. Wait until no replica is still running
+   `scoped`, including in-flight writes. From here every write bumps `inv`.
+2. Write any value to the `inv` key. This covers every access-changing write
+   (grants as well as revocations) that was handled with scoped markers.
+3. Move every replica to `global`.
+
+#### Changing the authorization model
+
+Replicas that share the cache bucket must compute the same invalidation scopes.
+During an `OPENFGA_AUTH_MODEL_ID` change, an old-model replica may write markers
+that miss a dependency only the new model has (for example a new
+`viewer from committee` rewrite), and the relation exists in both models so the
+global fallback does not trigger. To change the model safely:
+
+1. Move every replica to `read-scoped` before changing any model ID, and keep it
+   there for the whole transition.
+2. Change the model ID on every replica and wait for old-model replicas and their
+   in-flight work to drain.
+3. Write any value to the `inv` key, then return to `scoped`.
 
 ### Debugging cache behavior
 

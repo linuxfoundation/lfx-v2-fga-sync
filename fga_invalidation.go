@@ -46,6 +46,9 @@ const (
 
 	// invalidationWriteConcurrency bounds parallel marker Puts for one write.
 	invalidationWriteConcurrency = 8
+	// invalidationFallbackTimeout bounds the global write that runs after
+	// scoped marker writes fail.
+	invalidationFallbackTimeout = 5 * time.Second
 
 	// invalidationModeEnv selects how cache invalidation is scoped.
 	invalidationModeEnv = "INVALIDATION_MODE"
@@ -211,7 +214,10 @@ func isConcreteUser(subject string) bool {
 // checks can change, so the plan is a (type, user) marker per affected type.
 // Any other subject (a wildcard, a userset such as team#member, or an object
 // such as a parent project) can change results for an unknown set of users,
-// so the plan is a type marker per affected type.
+// so the plan is a type marker per affected type. A tuple on a tupleset
+// relation (the "parent" in "viewer from parent") is treated the same way
+// even when its subject is a user, because that user is the object being
+// traversed rather than the one gaining access.
 //
 // Anything the graph cannot vouch for yields the global plan: no graph, a
 // malformed object, a relation the model does not define, or a conditioned
@@ -236,8 +242,12 @@ func (g *modelGraph) planInvalidation(tuples []tupleRef) invalidationPlan {
 		if !ok {
 			return globalPlan()
 		}
+		// A concrete user is only scoped when the tuple grants that user
+		// access. On a tupleset relation the subject is the object being
+		// traversed, so other users' checks through it change too.
+		perUser := isConcreteUser(tuple.user) && !g.isTupleset(typ, tuple.relation)
 		for _, affectedType := range affected {
-			if isConcreteUser(tuple.user) {
+			if perUser {
 				users[userMarker{typ: affectedType, user: tuple.user}] = struct{}{}
 			} else {
 				types[affectedType] = struct{}{}
@@ -327,7 +337,12 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		span.SetStatus(codes.Error, err.Error())
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write scoped invalidation markers; falling back to global")
 		cacheInvalidationsGlobal.Add(1)
-		return c.invalidate(ctx)
+		// The scoped writes may have used up the caller's deadline, so the
+		// fallback gets its own, or it could not write the marker even if
+		// the bucket has recovered.
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidationFallbackTimeout)
+		defer cancel()
+		return c.invalidate(fallbackCtx)
 	}
 
 	cacheInvalidationsScoped.Add(1)
