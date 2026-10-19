@@ -291,6 +291,11 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.
+- OTel spans for cache operations: `fga_sync.cache.lookup` (requested and
+  hit/stale/miss counts for a `CheckRelationships` batch),
+  `fga_sync.cache.write_back` (number of cache puts), `fga_sync.cache.invalidate`
+  (the `inv` key bump), and `fga_sync.cache.seed` (number of seeded keys),
+  nested under the `nats.process` consumer span for the message being handled.
 - If access checks return wrong/old results, look for `"cache invalidation failed"`
   in fga-sync logs. The `inv` key may have failed to bump.
 - Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`
