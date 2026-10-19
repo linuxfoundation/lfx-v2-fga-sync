@@ -332,6 +332,13 @@ Roll out in two steps: deploy `read-scoped` to every replica, then switch to
 `scoped`. A replica that does not read scoped markers will serve a revoked grant
 from cache until the entry's TTL if another replica writes only scoped markers.
 
+Rolling back is safe in the other direction. Every mode still honors `inv`, so
+switching `scoped` back to `global` (or `read-scoped`) needs no cleanup. Scoped
+markers written earlier are ignored once no replica reads them, and `inv` writes
+resume immediately. Entries cached before a rollback are covered by the next `inv`
+bump, so a rollback is the one time to write `inv` by hand if a revocation landed
+while the mode was `scoped`.
+
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`,
