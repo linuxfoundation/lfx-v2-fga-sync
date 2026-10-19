@@ -15,6 +15,9 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
@@ -83,10 +86,22 @@ func withCacheOpSlot(ctx context.Context, fn func()) error {
 	}
 }
 
+// cacheOutcomeKind classifies how a cacheLookupOutcome was resolved, so
+// callers can tally hits/stale-hits/misses for tracing without re-deriving
+// the classification from needsCheck and hitLine.
+type cacheOutcomeKind int
+
+const (
+	cacheOutcomeMiss cacheOutcomeKind = iota
+	cacheOutcomeHit
+	cacheOutcomeStaleHit
+)
+
 // cacheLookupOutcome is the result of resolving a single tuple against the
 // cache: either a ready-to-append response line, or a signal that the tuple
 // still needs to be resolved via OpenFGA.
 type cacheLookupOutcome struct {
+	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
 }
@@ -107,8 +122,14 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 	if c.bucket == nil {
 		return nil
 	}
+
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	defer span.End()
+
 	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
 	}
@@ -159,19 +180,19 @@ func (c CacheLayer) lookupEntry(
 		// treat this the same as any other cache miss so the tuple falls
 		// through to OpenFGA.
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 	switch {
 	case errCache == jetstream.ErrKeyNotFound:
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	case errCache != nil:
 		// This is not expected (we would have exited early already on cache
 		// errors when grabbing the invalidation timestamp), but log and treat
 		// this single tuple as a miss rather than failing the whole request.
 		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; treating as miss")
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 
 	// Cache entry was found. If the cache entry is older than the invalidation
@@ -184,7 +205,7 @@ func (c CacheLayer) lookupEntry(
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
 	}
 
 	logger.With(
@@ -195,6 +216,7 @@ func (c CacheLayer) lookupEntry(
 	).DebugContext(ctx, "cache hit")
 	cacheHits.Add(1)
 	return cacheLookupOutcome{
+		kind:    cacheOutcomeHit,
 		hitLine: []byte(fmt.Sprintf("%s\t%s\n", relationKey, string(entry.Value()))),
 	}
 }
@@ -214,6 +236,14 @@ func (c CacheLayer) lookupEntry(
 // above, since every goroutine below is still awaited regardless of whether
 // it ran immediately or queued for a slot.
 func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string) {
+	if len(cacheKeys) == 0 {
+		return
+	}
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
+		trace.WithAttributes(attribute.Int("fga_sync.cache.seed.keys", len(cacheKeys))),
+	)
+	defer span.End()
+
 	var wg sync.WaitGroup
 	for _, cacheKey := range cacheKeys {
 		wg.Add(1)
@@ -298,7 +328,11 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	}
 
 	if len(cachePuts) > 0 {
-		g, gctx := errgroup.WithContext(ctx)
+		putCtx, putSpan := tracer.Start(ctx, "fga_sync.cache.write_back",
+			trace.WithAttributes(attribute.Int("fga_sync.cache.write_back.puts", len(cachePuts))),
+		)
+
+		g, gctx := errgroup.WithContext(putCtx)
 		g.SetLimit(cacheLookupConcurrency)
 		for _, put := range cachePuts {
 			g.Go(func() error {
@@ -316,6 +350,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		// writes finish.
 		//nolint:errcheck // g.Wait() can only return nil; see comment above.
 		_ = g.Wait()
+		putSpan.End()
 	}
 
 	return message
