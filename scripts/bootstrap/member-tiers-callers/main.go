@@ -23,7 +23,7 @@
 //	OPENFGA_STORE_ID       OpenFGA store ID
 //	OPENFGA_AUTH_MODEL_ID  OpenFGA authorization model ID
 //	NATS_URL               NATS server URL (e.g. nats://lfx-platform-nats.lfx.svc.cluster.local:4222)
-//	                       Used to bump the fga-sync cache invalidation key after writing tuples.
+//	                       Used to bump the fga-sync cache invalidation markers after writing tuples.
 package main
 
 import (
@@ -33,6 +33,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -43,6 +44,11 @@ import (
 )
 
 const teamMemberTiersCaller = constants.ObjectTypeTeam + "member_tiers_caller"
+
+// validBucketName matches the character set JetStream permits for KV bucket
+// names (alphanumeric, '-', '_'). Used to sanitize the CACHE_BUCKET env var
+// before it flows into log messages or JetStream calls.
+var validBucketName = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 // duplicateWriteIgnore instructs OpenFGA to treat writes of already-existing
 // tuples as no-ops instead of errors, making reruns safe.
@@ -143,32 +149,53 @@ func main() {
 	// rather than to one global key (see docs/fga-sync-contract.md), so the
 	// marker must be derived for the specific pair these tuples touch. Also
 	// bumps the legacy global "inv" key for rollout compatibility with
-	// fga-sync pods still running pre-relinv code — see the comment above
-	// the cachekey.LegacyInvalidationKey Put below.
+	// fga-sync pods still running pre-relinv code — see invalidateCache.
+	cacheBucket := os.Getenv("CACHE_BUCKET")
+	if cacheBucket == "" {
+		cacheBucket = constants.KVBucketNameSyncCache
+	}
+	if !validBucketName.MatchString(cacheBucket) {
+		log.Fatalf("invalid CACHE_BUCKET: must match %s", validBucketName.String())
+	}
+
+	if err := invalidateCache(natsURL, cacheBucket); err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	fmt.Println("Cache invalidation markers bumped — fga-sync will revalidate cached denials.")
+
+	if writeErr != nil {
+		log.Fatalf("write error (cache was invalidated; rerun to confirm tuples exist): %v", writeErr)
+	}
+}
+
+// invalidateCache connects to NATS, binds to the given KV bucket, and bumps the
+// scoped (team:member_tiers_caller, member) invalidation marker plus the legacy
+// global "inv" key so fga-sync treats cached access-check denials as stale. Returns
+// an error on any step; callers log and exit on failure. The function owns the
+// NATS connection lifecycle via defer so it always closes cleanly, avoiding
+// the exitAfterDefer anti-pattern (gocritic) that occurs when log.Fatalf is
+// invoked after `defer nc.Close()` in main.
+func invalidateCache(natsURL, cacheBucket string) error {
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
-		log.Fatalf("failed to connect to NATS for cache invalidation: %v", err)
+		return fmt.Errorf("failed to connect to NATS for cache invalidation: %w", err)
 	}
 	defer nc.Close()
 
 	js, err := nc.JetStream()
 	if err != nil {
-		log.Fatalf("failed to get JetStream context: %v", err)
-	}
-
-	cacheBucket := os.Getenv("CACHE_BUCKET")
-	if cacheBucket == "" {
-		cacheBucket = constants.KVBucketNameSyncCache
+		return fmt.Errorf("failed to get JetStream context: %w", err)
 	}
 
 	kv, err := js.KeyValue(cacheBucket)
 	if err != nil {
-		log.Fatalf("failed to bind to cache bucket %q: %v", cacheBucket, err)
+		return fmt.Errorf("failed to bind to cache bucket %q: %w", cacheBucket, err)
 	}
 
 	invalidationKey := cachekey.Invalidation(teamMemberTiersCaller, constants.RelationMember)
-	if _, err = kv.Put(invalidationKey, []byte("1")); err != nil {
-		log.Fatalf("failed to bump cache invalidation marker: %v", err)
+	if _, err := kv.Put(invalidationKey, []byte("1")); err != nil {
+		return fmt.Errorf("failed to bump cache invalidation marker: %w", err)
 	}
 
 	// ROLLOUT COMPATIBILITY, REMOVE AFTER FULL ROLLOUT (see
@@ -178,13 +205,8 @@ func main() {
 	// marker above, so it would keep serving a cached denial for these
 	// memberships until its cache entries age out. Dual-write both until
 	// every fga-sync pod is confirmed running post-relinv code.
-	if _, err = kv.Put(cachekey.LegacyInvalidationKey, []byte("1")); err != nil {
-		log.Fatalf("failed to bump legacy cache invalidation marker: %v", err)
+	if _, err := kv.Put(cachekey.LegacyInvalidationKey, []byte("1")); err != nil {
+		return fmt.Errorf("failed to bump legacy cache invalidation marker: %w", err)
 	}
-
-	fmt.Println("Cache invalidation markers bumped — fga-sync will revalidate cached denials.")
-
-	if writeErr != nil {
-		log.Fatalf("write error (cache was invalidated; rerun to confirm tuples exist): %v", writeErr)
-	}
+	return nil
 }
