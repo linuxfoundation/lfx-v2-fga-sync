@@ -44,6 +44,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
           REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
+          # go.mod can require a newer patch than the Go bundled in the
+          # MegaLinter image. osv-scanner's govulncheck call analysis fails
+          # under the image's GOTOOLCHAIN=local, which makes the check exit
+          # non-zero even with no findings.
+          GOTOOLCHAIN: auto
           # zizmor's "artipacked" audit needs the GitHub API (to verify
           # SHA-pinned action tags), which requires GITHUB_TOKEN.
           ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
