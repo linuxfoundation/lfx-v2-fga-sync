@@ -452,12 +452,6 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	// bytes each.
 	message := make([]byte, 0, 80*len(tuples))
 
-	// Get the most recent cache invalidation.
-	lastInvalidation, err := s.cache.getLastInvalidation(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	tuplesToCheck := make([]ClientBatchCheckItem, 0) // list of tuples to check in OpenFGA if not in cache
 	tupleItems := make([]ClientBatchCheckItem, 0, len(tuples))
 	for _, tuple := range tuples {
@@ -472,6 +466,14 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
 	} else {
+		// Get the most recent cache invalidation. Only read when the cache is
+		// enabled: the read holds a cacheOpSem slot, and its result is unused
+		// otherwise.
+		lastInvalidation, err := s.cache.getLastInvalidation(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		// Resolve every tuple against the cache concurrently rather than one
 		// sequential NATS KV round-trip at a time — a batch of several hundred
 		// tuples serially was the dominant cost in slow access checks. Each
