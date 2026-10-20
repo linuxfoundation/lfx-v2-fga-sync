@@ -2,7 +2,7 @@
 
 ![Build Status](https://github.com/linuxfoundation/lfx-v2-fga-sync/workflows/FGA%20Sync%20Build/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)
+![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)
 
 A high-performance microservice that synchronizes authorization data between NATS messaging and OpenFGA
 (Fine-Grained Authorization), providing cached relationship checks and real-time access control updates for the
@@ -54,7 +54,7 @@ graph TB
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26+
 - Kubernetes 1.19+
 - Helm 3.2.0+
 - Docker (optional)

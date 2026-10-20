@@ -228,7 +228,7 @@ setups.
 
 ## Troubleshooting
 
-- **Build failures**: ensure Go matches `go.mod` (currently 1.25+) and run `go mod tidy`.
+- **Build failures**: ensure Go matches `go.mod` (currently 1.26+) and run `go mod tidy`.
 - **NATS / OpenFGA connection**: verify `NATS_URL` and `OPENFGA_API_URL`.
 - **Cache or stale access checks**: see the cache behavior and "Debugging Access Issues"
   sections in `docs/fga-sync-contract.md` (covers `/debug/vars` counters, the
