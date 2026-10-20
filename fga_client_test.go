@@ -125,7 +125,7 @@ func TestConnectFgaWiresConfiguredTimeout(t *testing.T) {
 
 	t.Setenv("OPENFGA_API_URL", server.URL)
 	t.Setenv("OPENFGA_STORE_ID", "01GXSB9YR785C4FYS3C0RTG7B2")
-	t.Setenv("OPENFGA_AUTH_MODEL_ID", "01GXSA8YR785C4FYS3C0RTG7B1")
+	t.Setenv("OPENFGA_AUTH_MODEL_ID", "00000000000000000000000000")
 
 	fgaClient, err := connectFga()
 	require.NoError(t, err)
