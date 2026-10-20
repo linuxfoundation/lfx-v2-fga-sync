@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
@@ -451,12 +452,6 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	// bytes each.
 	message := make([]byte, 0, 80*len(tuples))
 
-	// Get the most recent cache invalidation.
-	lastInvalidation, err := s.cache.getLastInvalidation(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	tuplesToCheck := make([]ClientBatchCheckItem, 0) // list of tuples to check in OpenFGA if not in cache
 	tupleItems := make([]ClientBatchCheckItem, 0, len(tuples))
 	for _, tuple := range tuples {
@@ -471,6 +466,14 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
 	} else {
+		// Get the most recent cache invalidation. Only read when the cache is
+		// enabled: the read holds a cacheOpSem slot, and its result is unused
+		// otherwise.
+		lastInvalidation, err := s.cache.getLastInvalidation(ctx)
+		if err != nil {
+			return nil, err
+		}
+
 		// Resolve every tuple against the cache concurrently rather than one
 		// sequential NATS KV round-trip at a time — a batch of several hundred
 		// tuples serially was the dominant cost in slow access checks. Each
@@ -480,8 +483,12 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// are appended by buildResponseAndWriteBack in map-iteration order,
 		// so overall response order is not guaranteed and callers must not
 		// rely on it.
+		lookupCtx, lookupSpan := tracer.Start(ctx, "fga_sync.cache.lookup",
+			trace.WithAttributes(attribute.Int("fga_sync.cache.lookup.requested", len(tupleItems))),
+		)
+
 		outcomes := make([]cacheLookupOutcome, len(tupleItems))
-		g, gctx := errgroup.WithContext(ctx)
+		g, gctx := errgroup.WithContext(lookupCtx)
 		g.SetLimit(cacheLookupConcurrency)
 		for i, tuple := range tupleItems {
 			g.Go(func() error {
@@ -495,13 +502,28 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 			logger.With(errKey, waitErr).ErrorContext(ctx, "cache lookup fan-out returned an error")
 		}
 
+		var hits, staleHits, misses int
 		for i, outcome := range outcomes {
+			switch outcome.kind {
+			case cacheOutcomeHit:
+				hits++
+			case cacheOutcomeStaleHit:
+				staleHits++
+			default:
+				misses++
+			}
 			if outcome.needsCheck {
 				tuplesToCheck = append(tuplesToCheck, tupleItems[i])
 				continue
 			}
 			message = append(message, outcome.hitLine...)
 		}
+		lookupSpan.SetAttributes(
+			attribute.Int("fga_sync.cache.lookup.hits", hits),
+			attribute.Int("fga_sync.cache.lookup.stale_hits", staleHits),
+			attribute.Int("fga_sync.cache.lookup.misses", misses),
+		)
+		lookupSpan.End()
 	}
 
 	// If we have no tuples to check, return the cached message.

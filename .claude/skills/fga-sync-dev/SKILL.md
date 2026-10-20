@@ -90,6 +90,7 @@ There is no `cmd/`, `internal/`, `api/`, or `gen/` tree. Do not introduce a Goa 
 - Cache keys are `rel.{base32-encoded-relation}`. Values are raw text booleans (`true` or `false`); freshness comes from the NATS KV entry timestamp. Do not change either shape without coordinating with consumers and updating `docs/fga-sync-contract.md`.
 - Invalidation is a single `inv` timestamp key. Every successful OpenFGA write must bump it (`invalidateCache`); any cached entry older than `inv` is treated as stale.
 - Stale hits are counted separately at `/debug/vars` (`cache_stale_hits`); do not collapse them into `cache_hits`.
+- Cache operations are traced with `fga_sync.cache.{lookup,write_back,invalidate,seed}` spans started from the package-level `tracer`; keep hit/stale/miss counts as span attributes on `fga_sync.cache.lookup` when changing the lookup path.
 - Local development against an externally written OpenFGA store should run with `USE_CACHE=false` to avoid serving stale results.
 
 ### Tests
