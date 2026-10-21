@@ -1,0 +1,8 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+
+# osv-scanner configuration — https://google.github.io/osv-scanner/configuration/
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "golang.org/x/crypto/openpgp is deprecated/unmaintained; the service does not use the openpgp package (govulncheck reports no call path), and no fixed version is available"
