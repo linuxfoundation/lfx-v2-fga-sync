@@ -15,6 +15,9 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
 	. "github.com/openfga/go-sdk/client"
@@ -29,7 +32,9 @@ const (
 	cacheLookupConcurrency = 64
 
 	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
-	// process. cacheLookupConcurrency bounds one request's fan-out, but the
+	// process, except the inv write in invalidate, which skips the budget
+	// (see cacheOpSem).
+	// cacheLookupConcurrency bounds one request's fan-out, but the
 	// subscription layer admits subscriptionConcurrency (main.go; currently
 	// 16) handlers at once, so per-request limits alone permit
 	// cacheLookupConcurrency * subscriptionConcurrency (currently ~1,024)
@@ -50,8 +55,9 @@ var (
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
-	// concurrent KV Get/Put in this file acquires a slot before the
-	// round-trip and releases it after. Held only around the KV call itself,
+	// KV Get/Put in this file acquires a slot before the round-trip and
+	// releases it after, except the inv write in invalidate, which must never
+	// wait behind a saturated cache. Held only around the KV call itself,
 	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
 	// capacity hostage.
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
@@ -66,7 +72,9 @@ func init() {
 // withCacheOpSlot runs fn while holding a slot in the service-wide KV budget
 // (cacheOpSem). If ctx is canceled before a slot frees, fn is not run and
 // ctx.Err() is returned; callers treat that the same as any other cache
-// failure (fall through to OpenFGA, or skip a best-effort write).
+// failure (fall through to OpenFGA, or skip a best-effort write), except
+// getLastInvalidation, which returns it so CheckRelationships fails the
+// request.
 func withCacheOpSlot(ctx context.Context, fn func()) error {
 	select {
 	case cacheOpSem <- struct{}{}:
@@ -78,10 +86,22 @@ func withCacheOpSlot(ctx context.Context, fn func()) error {
 	}
 }
 
+// cacheOutcomeKind classifies how a cacheLookupOutcome was resolved, so
+// callers can tally hits/stale-hits/misses for tracing without re-deriving
+// the classification from needsCheck and hitLine.
+type cacheOutcomeKind int
+
+const (
+	cacheOutcomeMiss cacheOutcomeKind = iota
+	cacheOutcomeHit
+	cacheOutcomeStaleHit
+)
+
 // cacheLookupOutcome is the result of resolving a single tuple against the
 // cache: either a ready-to-append response line, or a signal that the tuple
 // still needs to be resolved via OpenFGA.
 type cacheLookupOutcome struct {
+	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
 }
@@ -102,8 +122,14 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 	if c.bucket == nil {
 		return nil
 	}
+
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	defer span.End()
+
 	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
 	}
@@ -112,9 +138,15 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 
 // getLastInvalidation reads the inv key and returns its creation time, or the
 // zero time when no invalidation has been recorded within the TTL window.
+// The read holds a cacheOpSem slot; if ctx is done before one frees, it
+// returns ctx.Err() without reaching the bucket.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, "inv")
+	var entry jetstream.KeyValueEntry
+	var err error
+	if slotErr := withCacheOpSlot(ctx, func() { entry, err = c.bucket.Get(ctx, "inv") }); slotErr != nil {
+		return time.Time{}, slotErr
+	}
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
@@ -148,19 +180,19 @@ func (c CacheLayer) lookupEntry(
 		// treat this the same as any other cache miss so the tuple falls
 		// through to OpenFGA.
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 	switch {
 	case errCache == jetstream.ErrKeyNotFound:
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	case errCache != nil:
 		// This is not expected (we would have exited early already on cache
 		// errors when grabbing the invalidation timestamp), but log and treat
 		// this single tuple as a miss rather than failing the whole request.
 		logger.With(errKey, errCache).ErrorContext(ctx, "cache error; treating as miss")
 		cacheMisses.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
 	}
 
 	// Cache entry was found. If the cache entry is older than the invalidation
@@ -173,7 +205,7 @@ func (c CacheLayer) lookupEntry(
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
 	}
 
 	logger.With(
@@ -184,6 +216,7 @@ func (c CacheLayer) lookupEntry(
 	).DebugContext(ctx, "cache hit")
 	cacheHits.Add(1)
 	return cacheLookupOutcome{
+		kind:    cacheOutcomeHit,
 		hitLine: []byte(fmt.Sprintf("%s\t%s\n", relationKey, string(entry.Value()))),
 	}
 }
@@ -203,6 +236,14 @@ func (c CacheLayer) lookupEntry(
 // above, since every goroutine below is still awaited regardless of whether
 // it ran immediately or queued for a slot.
 func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string) {
+	if len(cacheKeys) == 0 {
+		return
+	}
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
+		trace.WithAttributes(attribute.Int("fga_sync.cache.seed.keys", len(cacheKeys))),
+	)
+	defer span.End()
+
 	var wg sync.WaitGroup
 	for _, cacheKey := range cacheKeys {
 		wg.Add(1)
@@ -287,7 +328,11 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	}
 
 	if len(cachePuts) > 0 {
-		g, gctx := errgroup.WithContext(ctx)
+		putCtx, putSpan := tracer.Start(ctx, "fga_sync.cache.write_back",
+			trace.WithAttributes(attribute.Int("fga_sync.cache.write_back.puts", len(cachePuts))),
+		)
+
+		g, gctx := errgroup.WithContext(putCtx)
 		g.SetLimit(cacheLookupConcurrency)
 		for _, put := range cachePuts {
 			g.Go(func() error {
@@ -305,6 +350,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		// writes finish.
 		//nolint:errcheck // g.Wait() can only return nil; see comment above.
 		_ = g.Wait()
+		putSpan.End()
 	}
 
 	return message
