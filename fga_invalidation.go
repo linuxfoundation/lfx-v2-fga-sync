@@ -59,6 +59,54 @@ const (
 	modeNameScoped     = "scoped"
 )
 
+// Values of the fga_sync.cache.invalidate.scope span attribute.
+const (
+	invalidateScopeGlobal = "global"
+	invalidateScopeScoped = "scoped"
+)
+
+// Reasons a write used the global marker instead of scoped ones, recorded on
+// the fga_sync.cache.invalidate span as fga_sync.cache.invalidate.reason.
+const (
+	// globalReasonModeGlobal is the default: scoped writes are not enabled.
+	globalReasonModeGlobal = "mode_global"
+	// globalReasonNoGraph means scoped mode is on but there is no model graph.
+	globalReasonNoGraph = "no_graph"
+	// globalReasonNoTuples means the plan had no tuples to scope.
+	globalReasonNoTuples = "no_tuples"
+	// globalReasonConditionedTuple means a tuple carried a condition.
+	globalReasonConditionedTuple = "conditioned_tuple"
+	// globalReasonMalformedObject means an object could not be parsed.
+	globalReasonMalformedObject = "malformed_object"
+	// globalReasonUnknownRelation means the model does not define the relation.
+	globalReasonUnknownRelation = "unknown_relation"
+	// globalReasonScopedWriteFailed means a scoped marker write failed and the
+	// write fell back to the global key.
+	globalReasonScopedWriteFailed = "scoped_write_failed"
+)
+
+// markerKind names which marker decided the invalidation cutoff for one
+// cached entry. It shows up on stale-hit logs and lookup spans so a stale hit
+// can be traced to the kind of write that caused it.
+type markerKind string
+
+const (
+	// markerKindGlobal is the global inv key.
+	markerKindGlobal markerKind = "global"
+	// markerKindType is the per-object-type marker.
+	markerKindType markerKind = "type"
+	// markerKindUser is the per-(object type, user) marker.
+	markerKindUser markerKind = "user"
+	// markerKindUnreadable means a marker could not be read, so the entry is
+	// treated as stale.
+	markerKindUnreadable markerKind = "unreadable"
+)
+
+// staleMarkerKinds lists every kind in a stable order for span attributes.
+var staleMarkerKinds = []markerKind{
+	markerKindGlobal, markerKindType, markerKindUser, markerKindUnreadable,
+}
+
 var (
 	cacheInvalidationsGlobal *expvar.Int
 	cacheInvalidationsScoped *expvar.Int
@@ -152,12 +200,20 @@ type userMarker struct {
 // list the scoped markers.
 type invalidationPlan struct {
 	global bool
+	// reason says why the plan is global (a globalReason constant); empty for
+	// scoped plans.
+	reason string
 	types  []string
 	users  []userMarker
 }
 
 // globalPlan is the plan used whenever scoping cannot be proven safe.
 func globalPlan() invalidationPlan { return invalidationPlan{global: true} }
+
+// globalPlanFor is globalPlan with the reason scoping was not possible.
+func globalPlanFor(reason string) invalidationPlan {
+	return invalidationPlan{global: true, reason: reason}
+}
 
 // markerKeys returns every KV key the plan writes, in a stable order.
 func (p invalidationPlan) markerKeys() []string {
@@ -223,8 +279,11 @@ func isConcreteUser(subject string) bool {
 // malformed object, a relation the model does not define, or a conditioned
 // tuple whose effect depends on request context the cache key does not carry.
 func (g *modelGraph) planInvalidation(tuples []tupleRef) invalidationPlan {
-	if g == nil || len(tuples) == 0 {
-		return globalPlan()
+	if g == nil {
+		return globalPlanFor(globalReasonNoGraph)
+	}
+	if len(tuples) == 0 {
+		return globalPlanFor(globalReasonNoTuples)
 	}
 
 	types := make(map[string]struct{})
@@ -232,15 +291,15 @@ func (g *modelGraph) planInvalidation(tuples []tupleRef) invalidationPlan {
 
 	for _, tuple := range tuples {
 		if tuple.conditioned {
-			return globalPlan()
+			return globalPlanFor(globalReasonConditionedTuple)
 		}
 		typ, ok := objectType(tuple.object)
 		if !ok {
-			return globalPlan()
+			return globalPlanFor(globalReasonMalformedObject)
 		}
 		affected, ok := g.affectedTypes(typ, tuple.relation)
 		if !ok {
-			return globalPlan()
+			return globalPlanFor(globalReasonUnknownRelation)
 		}
 		// A concrete user is only scoped when the tuple grants that user
 		// access. On a tupleset relation the subject is the object being
@@ -311,14 +370,18 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		return nil
 	}
 	if plan.global || (len(plan.types) == 0 && len(plan.users) == 0) {
+		reason := plan.reason
+		if reason == "" {
+			reason = globalReasonNoTuples
+		}
 		cacheInvalidationsGlobal.Add(1)
-		return c.invalidate(ctx)
+		return c.invalidate(ctx, reason)
 	}
 
 	keys := plan.markerKeys()
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
 		trace.WithAttributes(
-			attribute.String("fga_sync.cache.invalidate.scope", "scoped"),
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeScoped),
 			attribute.Int("fga_sync.cache.invalidate.markers", len(keys)),
 		),
 	)
@@ -342,14 +405,16 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		// the bucket has recovered.
 		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidationFallbackTimeout)
 		defer cancel()
-		return c.invalidate(fallbackCtx)
+		return c.invalidate(fallbackCtx, globalReasonScopedWriteFailed)
 	}
 
 	cacheInvalidationsScoped.Add(1)
+	// Info rather than debug: one line per write batch, and the only place a
+	// scoped write is visible without trace sampling.
 	logger.With(
 		"types", plan.types,
 		"user_markers", len(plan.users),
-	).DebugContext(ctx, "wrote scoped cache invalidation markers")
+	).InfoContext(ctx, "wrote scoped cache invalidation markers")
 	return nil
 }
 
@@ -370,29 +435,43 @@ type invalidationCutoffs struct {
 	users  map[userMarker]markerRead
 }
 
-// forTuple returns the latest invalidation that applies to one check: the
-// global marker, the marker for the checked object's type, and the marker for
-// that type and the checked user.
+// invalidationCutoff is the invalidation time that applies to one check and
+// the kind of marker it came from. An entry created before at is stale.
+type invalidationCutoff struct {
+	at   time.Time
+	kind markerKind
+}
+
+// forTuple returns the latest invalidation time that applies to one check.
 func (c invalidationCutoffs) forTuple(item ClientBatchCheckItem) time.Time {
-	cutoff := c.global
+	return c.cutoffFor(item).at
+}
+
+// cutoffFor returns the latest invalidation that applies to one check, and
+// which marker it came from: the global marker, the marker for the checked
+// object's type, or the marker for that type and the checked user. The first
+// marker to reach the latest time wins a tie, in that order.
+func (c invalidationCutoffs) cutoffFor(item ClientBatchCheckItem) invalidationCutoff {
+	cutoff := invalidationCutoff{at: c.global, kind: markerKindGlobal}
 	typ, ok := objectType(item.Object)
 	if !ok {
 		return cutoff
 	}
+	unreadable := invalidationCutoff{at: staleEverythingCutoff(), kind: markerKindUnreadable}
 	if read, found := c.types[typ]; found {
 		if read.failed {
-			return staleEverythingCutoff()
+			return unreadable
 		}
-		if read.at.After(cutoff) {
-			cutoff = read.at
+		if read.at.After(cutoff.at) {
+			cutoff = invalidationCutoff{at: read.at, kind: markerKindType}
 		}
 	}
 	if read, found := c.users[userMarker{typ: typ, user: item.User}]; found {
 		if read.failed {
-			return staleEverythingCutoff()
+			return unreadable
 		}
-		if read.at.After(cutoff) {
-			cutoff = read.at
+		if read.at.After(cutoff.at) {
+			cutoff = invalidationCutoff{at: read.at, kind: markerKindUser}
 		}
 	}
 	return cutoff

@@ -104,6 +104,8 @@ type cacheLookupOutcome struct {
 	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
+	// staleBy names the marker that made a stale hit stale; empty otherwise.
+	staleBy markerKind
 }
 
 // CacheLayer wraps the JetStream KV bucket and owns all cache operations:
@@ -118,20 +120,34 @@ type CacheLayer struct {
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
 // no-op when the bucket is nil (e.g., cache disabled or not yet connected).
-func (c CacheLayer) invalidate(ctx context.Context) error {
+// reason says why the write is global rather than scoped (one of the
+// globalReason constants); it is recorded on the span, and logged unless the
+// service is simply running in global mode.
+func (c CacheLayer) invalidate(ctx context.Context, reason string) error {
 	if c.bucket == nil {
 		return nil
 	}
 
-	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeGlobal),
+			attribute.Int("fga_sync.cache.invalidate.markers", 1),
+			attribute.String("fga_sync.cache.invalidate.reason", reason),
+		),
+	)
 	defer span.End()
 
 	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+		logger.With(errKey, err, "reason", reason).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
+	}
+	if reason != globalReasonModeGlobal {
+		// Scoping was expected but a write fell back to the global marker:
+		// worth an info line, since it widens what gets invalidated.
+		logger.With("reason", reason).InfoContext(ctx, "wrote global cache invalidation marker")
 	}
 	return nil
 }
@@ -165,7 +181,7 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	cutoff invalidationCutoff,
 ) cacheLookupOutcome {
 	relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
 	// Encode relation using base32 without padding to conform to the allowed
@@ -197,20 +213,21 @@ func (c CacheLayer) lookupEntry(
 
 	// Cache entry was found. If the cache entry is older than the invalidation
 	// timestamp, skip it.
-	if lastInvalidation.After(entry.Created()) {
+	if cutoff.at.After(entry.Created()) {
 		logger.With(
 			"relation_key", relationKey,
-			"last_invalidation", lastInvalidation,
+			"last_invalidation", cutoff.at,
+			"marker_kind", string(cutoff.kind),
 			"entry_created", entry.Created(),
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true, staleBy: cutoff.kind}
 	}
 
 	logger.With(
 		"relation_key", relationKey,
-		"last_invalidation", lastInvalidation,
+		"last_invalidation", cutoff.at,
 		"entry_created", entry.Created(),
 		"entry_value", string(entry.Value()),
 	).DebugContext(ctx, "cache hit")

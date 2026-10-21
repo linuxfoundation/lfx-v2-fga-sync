@@ -625,7 +625,8 @@ func configureInvalidation(ctx context.Context, fgaClient IFgaClient) (invalidat
 	if !ok {
 		logger.With("value", raw).Warn("unrecognized " + invalidationModeEnv + "; using global")
 	}
-	logger.With("mode", mode.String()).Info("cache invalidation mode configured")
+	modelID := os.Getenv("OPENFGA_AUTH_MODEL_ID")
+	logger.With("mode", mode.String(), "model_id", modelID).Info("cache invalidation mode configured")
 	if mode != invalidationScoped {
 		return mode, nil
 	}
@@ -637,5 +638,6 @@ func configureInvalidation(ctx context.Context, fgaClient IFgaClient) (invalidat
 		logger.With(errKey, err).Error("could not build model graph; scoped writes disabled, invalidating globally")
 		return mode, nil
 	}
+	logger.With("mode", mode.String(), "model_id", modelID).Info("model graph loaded; scoped cache invalidation enabled")
 	return mode, graph
 }

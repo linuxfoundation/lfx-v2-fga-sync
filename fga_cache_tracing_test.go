@@ -109,11 +109,13 @@ func TestCheckRelationshipsTracesCacheLookupAndWriteBack(t *testing.T) {
 	lookups := spansNamed(sr, "fga_sync.cache.lookup")
 	require.Len(t, lookups, 1)
 	assert.Equal(t, map[string]int64{
-		"fga_sync.cache.lookup.requested":  4,
-		"fga_sync.cache.lookup.hits":       1,
-		"fga_sync.cache.lookup.stale_hits": 1,
-		"fga_sync.cache.lookup.misses":     2,
+		"fga_sync.cache.lookup.requested":         4,
+		"fga_sync.cache.lookup.hits":              1,
+		"fga_sync.cache.lookup.stale_hits":        1,
+		"fga_sync.cache.lookup.stale_hits.global": 1,
+		"fga_sync.cache.lookup.misses":            2,
 	}, spanIntAttrs(lookups[0]))
+	assert.Equal(t, "global", spanStringAttrs(lookups[0])["fga_sync.cache.invalidation_mode"])
 	assert.Equal(t, parent.SpanContext().SpanID(), lookups[0].Parent().SpanID())
 
 	writeBacks := spansNamed(sr, "fga_sync.cache.write_back")
@@ -187,7 +189,7 @@ func TestCacheLayerInvalidateTracesPut(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sr := useRecordingTracer(t)
 
-			err := CacheLayer{bucket: tt.bucket()}.invalidate(context.Background())
+			err := CacheLayer{bucket: tt.bucket()}.invalidate(context.Background(), globalReasonModeGlobal)
 			assert.Equal(t, tt.wantErrSet, err != nil)
 
 			spans := spansNamed(sr, "fga_sync.cache.invalidate")

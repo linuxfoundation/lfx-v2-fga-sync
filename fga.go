@@ -147,9 +147,29 @@ func (s FgaService) invalidationPlan(
 	deletes []ClientTupleKeyWithoutCondition,
 ) invalidationPlan {
 	if !s.invalidation.writesScoped() {
-		return globalPlan()
+		if s.invalidation.mode == invalidationScoped {
+			return globalPlanFor(globalReasonNoGraph)
+		}
+		return globalPlanFor(globalReasonModeGlobal)
 	}
 	return s.invalidation.graph.planInvalidation(tupleRefs(writes, deletes))
+}
+
+// recordLookupOutcomes sets the hit, stale-hit and miss counts on a
+// fga_sync.cache.lookup span. Stale hits are also broken down by the marker
+// that caused them, so a burst can be told apart as a scoped write (type or
+// user marker) or a global one.
+func recordLookupOutcomes(span trace.Span, hits, staleHits, misses int, staleByKind map[markerKind]int) {
+	span.SetAttributes(
+		attribute.Int("fga_sync.cache.lookup.hits", hits),
+		attribute.Int("fga_sync.cache.lookup.stale_hits", staleHits),
+		attribute.Int("fga_sync.cache.lookup.misses", misses),
+	)
+	for _, kind := range staleMarkerKinds {
+		if n := staleByKind[kind]; n > 0 {
+			span.SetAttributes(attribute.Int("fga_sync.cache.lookup.stale_hits."+string(kind), n))
+		}
+	}
 }
 
 // newFgaService creates a FgaService with the given FGA client, JetStream KV
@@ -506,7 +526,10 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// so overall response order is not guaranteed and callers must not
 		// rely on it.
 		lookupCtx, lookupSpan := tracer.Start(ctx, "fga_sync.cache.lookup",
-			trace.WithAttributes(attribute.Int("fga_sync.cache.lookup.requested", len(tupleItems))),
+			trace.WithAttributes(
+				attribute.Int("fga_sync.cache.lookup.requested", len(tupleItems)),
+				attribute.String("fga_sync.cache.invalidation_mode", s.invalidation.mode.String()),
+			),
 		)
 
 		cutoffs := invalidationCutoffs{global: lastInvalidation}
@@ -518,7 +541,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		g.SetLimit(cacheLookupConcurrency)
 		for i, tuple := range tupleItems {
 			g.Go(func() error {
-				outcomes[i] = s.cache.lookupEntry(gctx, tuple, cutoffs.forTuple(tuple))
+				outcomes[i] = s.cache.lookupEntry(gctx, tuple, cutoffs.cutoffFor(tuple))
 				return nil
 			})
 		}
@@ -529,12 +552,14 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		}
 
 		var hits, staleHits, misses int
+		staleByKind := make(map[markerKind]int)
 		for i, outcome := range outcomes {
 			switch outcome.kind {
 			case cacheOutcomeHit:
 				hits++
 			case cacheOutcomeStaleHit:
 				staleHits++
+				staleByKind[outcome.staleBy]++
 			default:
 				misses++
 			}
@@ -544,11 +569,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 			}
 			message = append(message, outcome.hitLine...)
 		}
-		lookupSpan.SetAttributes(
-			attribute.Int("fga_sync.cache.lookup.hits", hits),
-			attribute.Int("fga_sync.cache.lookup.stale_hits", staleHits),
-			attribute.Int("fga_sync.cache.lookup.misses", misses),
-		)
+		recordLookupOutcomes(lookupSpan, hits, staleHits, misses, staleByKind)
 		lookupSpan.End()
 	}
 

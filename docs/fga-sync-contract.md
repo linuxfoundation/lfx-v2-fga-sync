@@ -373,6 +373,29 @@ global fallback does not trigger. To change the model safely:
   `fga_sync.cache.write_back` (number of cache puts), `fga_sync.cache.invalidate`
   (the invalidation marker writes), and `fga_sync.cache.seed` (number of seeded keys),
   nested under the `nats.process` consumer span for the message being handled.
+  Traces are sampled (`OTEL_TRACES_SAMPLER_ARG`), so use ratios, not absolute counts.
+- Span attributes that say what the cache is doing:
+  - `fga_sync.cache.lookup` carries `fga_sync.cache.invalidation_mode` (the mode
+    this replica runs) and, when a batch has stale hits,
+    `fga_sync.cache.lookup.stale_hits.<kind>` where kind is the marker that made
+    entries stale: `global` (the `inv` key), `type` (`inv.t.<type>`), `user`
+    (`inv.u.<type>.<user>`) or `unreadable` (a marker read failed). A burst of
+    `user` or `type` stale hits after a write is scoped invalidation working; a
+    burst of `global` after a single write means that write was not scoped.
+  - `fga_sync.cache.invalidate` carries `fga_sync.cache.invalidate.scope`
+    (`scoped` or `global`) and `fga_sync.cache.invalidate.markers` (keys written).
+    A global span also carries `fga_sync.cache.invalidate.reason`: `mode_global`
+    (scoped writes are off), `no_graph`, `conditioned_tuple`, `malformed_object`,
+    `unknown_relation`, `no_tuples`, or `scoped_write_failed` (a scoped marker
+    write failed and the write fell back to `inv`).
+- Log lines (info level, so they appear with `DEBUG=false`): at startup
+  `cache invalidation mode configured` (with `mode` and `model_id`) and, in
+  `scoped` mode, `model graph loaded; scoped cache invalidation enabled`; per
+  write, `wrote scoped cache invalidation markers` (types and user-marker count) or
+  `wrote global cache invalidation marker` with a `reason` when a write that should
+  have been scoped was not. In `global` mode the per-write line is not logged.
+  With `DEBUG=true`, each `cache stale hit` line also carries `marker_kind` and the
+  `last_invalidation` time of that marker.
 - If access checks return wrong/old results, look for `"cache invalidation failed"`
   in fga-sync logs. The `inv` key may have failed to bump.
 - Manually invalidate by writing any value to the `inv` key in the `fga-sync-cache`
