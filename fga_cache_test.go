@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/openfga/go-sdk/client"
@@ -136,4 +137,83 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 	default:
 		// No further writes: the skipped tuple's cache key was correctly excluded.
 	}
+}
+
+// TestGetLastInvalidationReturnsContextErrorWhenCacheBudgetFull proves a read
+// of the inv key waiting on a saturated cacheOpSem gives up when its context
+// is canceled: it returns the context error, never reaches the bucket, and
+// leaves the occupied slot count untouched.
+func TestGetLastInvalidationReturnsContextErrorWhenCacheBudgetFull(t *testing.T) {
+	for range cacheOpConcurrency {
+		cacheOpSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cacheOpConcurrency {
+			<-cacheOpSem
+		}
+	})
+
+	kv := &concurrencyTrackingKV{}
+	cache := CacheLayer{bucket: kv}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	type result struct {
+		lastInvalidation time.Time
+		err              error
+	}
+	done := make(chan result, 1)
+	go func() {
+		lastInvalidation, err := cache.getLastInvalidation(ctx)
+		done <- result{lastInvalidation, err}
+	}()
+
+	select {
+	case res := <-done:
+		t.Fatalf("getLastInvalidation returned before cancellation: %v", res.err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+
+	select {
+	case res := <-done:
+		require.ErrorIs(t, res.err, context.Canceled)
+		assert.True(t, res.lastInvalidation.IsZero())
+	case <-time.After(time.Second):
+		t.Fatal("getLastInvalidation did not return after its context was canceled")
+	}
+
+	assert.Zero(t, kv.peak, "bucket Get must not run without a cache slot")
+	assert.Equal(t, cacheOpConcurrency, len(cacheOpSem), "occupied slot count must be unchanged")
+}
+
+// TestInvalidateWritesWithoutCacheBudgetSlot proves the inv write in
+// invalidate never waits for a cacheOpSem slot: with the budget full, the
+// Put still runs and returns, and the occupied slot count is unchanged.
+func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
+	for range cacheOpConcurrency {
+		cacheOpSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cacheOpConcurrency {
+			<-cacheOpSem
+		}
+	})
+
+	kv := &concurrencyTrackingKV{}
+	cache := CacheLayer{bucket: kv}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cache.invalidate(context.Background())
+	}()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("invalidate blocked on a full cache budget")
+	}
+
+	assert.Equal(t, 1, kv.putPeak, "inv Put must run while the cache budget is full")
+	assert.Equal(t, cacheOpConcurrency, len(cacheOpSem), "occupied slot count must be unchanged")
 }

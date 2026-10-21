@@ -32,7 +32,9 @@ const (
 	cacheLookupConcurrency = 64
 
 	// cacheOpConcurrency caps total in-flight JetStream KV operations for this
-	// process. cacheLookupConcurrency bounds one request's fan-out, but the
+	// process, except the inv write in invalidate, which skips the budget
+	// (see cacheOpSem).
+	// cacheLookupConcurrency bounds one request's fan-out, but the
 	// subscription layer admits subscriptionConcurrency (main.go; currently
 	// 16) handlers at once, so per-request limits alone permit
 	// cacheLookupConcurrency * subscriptionConcurrency (currently ~1,024)
@@ -53,8 +55,9 @@ var (
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
-	// concurrent KV Get/Put in this file acquires a slot before the
-	// round-trip and releases it after. Held only around the KV call itself,
+	// KV Get/Put in this file acquires a slot before the round-trip and
+	// releases it after, except the inv write in invalidate, which must never
+	// wait behind a saturated cache. Held only around the KV call itself,
 	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
 	// capacity hostage.
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
@@ -69,7 +72,9 @@ func init() {
 // withCacheOpSlot runs fn while holding a slot in the service-wide KV budget
 // (cacheOpSem). If ctx is canceled before a slot frees, fn is not run and
 // ctx.Err() is returned; callers treat that the same as any other cache
-// failure (fall through to OpenFGA, or skip a best-effort write).
+// failure (fall through to OpenFGA, or skip a best-effort write), except
+// getLastInvalidation, which returns it so CheckRelationships fails the
+// request.
 func withCacheOpSlot(ctx context.Context, fn func()) error {
 	select {
 	case cacheOpSem <- struct{}{}:
@@ -133,9 +138,15 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 
 // getLastInvalidation reads the inv key and returns its creation time, or the
 // zero time when no invalidation has been recorded within the TTL window.
+// The read holds a cacheOpSem slot; if ctx is done before one frees, it
+// returns ctx.Err() without reaching the bucket.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
-	entry, err := c.bucket.Get(ctx, "inv")
+	var entry jetstream.KeyValueEntry
+	var err error
+	if slotErr := withCacheOpSlot(ctx, func() { entry, err = c.bucket.Get(ctx, "inv") }); slotErr != nil {
+		return time.Time{}, slotErr
+	}
 	switch {
 	case err == jetstream.ErrKeyNotFound:
 		// No invalidation in the TTL of the cache; all found cache entries are
