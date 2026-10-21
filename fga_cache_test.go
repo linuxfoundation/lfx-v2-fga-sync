@@ -204,7 +204,7 @@ func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- cache.invalidate(context.Background())
+		done <- cache.invalidate(context.Background(), globalReasonModeGlobal)
 	}()
 
 	select {

@@ -94,7 +94,13 @@
     "cloudops",
     "triggerer",
     "zizmor",
-    "authorizationmodel"
+    "authorizationmodel",
+    "userset",
+    "usersets",
+    "tupleset",
+    "tuplesets",
+    "fixpoint",
+    "nocolon"
   ],
   "overrides": [
     {

@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // useRecordingTracer swaps the package-level tracer for one backed by a
@@ -108,11 +109,13 @@ func TestCheckRelationshipsTracesCacheLookupAndWriteBack(t *testing.T) {
 	lookups := spansNamed(sr, "fga_sync.cache.lookup")
 	require.Len(t, lookups, 1)
 	assert.Equal(t, map[string]int64{
-		"fga_sync.cache.lookup.requested":  4,
-		"fga_sync.cache.lookup.hits":       1,
-		"fga_sync.cache.lookup.stale_hits": 1,
-		"fga_sync.cache.lookup.misses":     2,
+		"fga_sync.cache.lookup.requested":         4,
+		"fga_sync.cache.lookup.hits":              1,
+		"fga_sync.cache.lookup.stale_hits":        1,
+		"fga_sync.cache.lookup.stale_hits.global": 1,
+		"fga_sync.cache.lookup.misses":            2,
 	}, spanIntAttrs(lookups[0]))
+	assert.Equal(t, "global", spanStringAttrs(lookups[0])["fga_sync.cache.invalidation_mode"])
 	assert.Equal(t, parent.SpanContext().SpanID(), lookups[0].Parent().SpanID())
 
 	writeBacks := spansNamed(sr, "fga_sync.cache.write_back")
@@ -186,7 +189,7 @@ func TestCacheLayerInvalidateTracesPut(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sr := useRecordingTracer(t)
 
-			err := CacheLayer{bucket: tt.bucket()}.invalidate(context.Background())
+			err := CacheLayer{bucket: tt.bucket()}.invalidate(context.Background(), globalReasonModeGlobal)
 			assert.Equal(t, tt.wantErrSet, err != nil)
 
 			spans := spansNamed(sr, "fga_sync.cache.invalidate")
@@ -255,4 +258,32 @@ func TestCacheLayerSeedPositiveEntriesTracesKeys(t *testing.T) {
 
 		assert.Empty(t, spansNamed(sr, "fga_sync.cache.seed"))
 	})
+}
+
+// TestWriteBackPutsRunUnderWriteBackSpan guards trace correlation for cache
+// write-back: the context each Put receives (and so its error logs) must
+// carry the fga_sync.cache.write_back span, not just the caller's span.
+func TestWriteBackPutsRunUnderWriteBackSpan(t *testing.T) {
+	sr := useRecordingTracer(t)
+
+	var putSpanCtx trace.SpanContext
+	kv := new(MockNatsKeyValue)
+	kv.On("Put", mock.Anything, mock.Anything, mock.Anything).
+		Run(func(args mock.Arguments) {
+			putSpanCtx = trace.SpanContextFromContext(args.Get(0).(context.Context))
+		}).
+		Return(uint64(1), nil)
+
+	result := map[string]openfga.BatchCheckSingleResult{
+		"1": {Allowed: openfga.PtrBool(true)},
+	}
+	mapping := map[string]ClientBatchCheckItem{
+		"1": {User: "user:a", Relation: "viewer", Object: "obj1"},
+	}
+	CacheLayer{bucket: kv}.buildResponseAndWriteBack(context.Background(), nil, result, mapping)
+
+	spans := spansNamed(sr, "fga_sync.cache.write_back")
+	require.Len(t, spans, 1)
+	assert.Equal(t, spans[0].SpanContext().SpanID(), putSpanCtx.SpanID(),
+		"Put must run with the write_back span's context")
 }
