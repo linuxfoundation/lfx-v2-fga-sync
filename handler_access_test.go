@@ -382,6 +382,90 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 			expectedCalled: true,
 		},
 
+		{
+			name: "public groupsio_mailing_list also gets a public relation tuple",
+			obj: &standardAccessStub{
+				UID:        "mlist-123",
+				ObjectType: "groupsio_mailing_list",
+				Public:     true,
+				Relations:  map[string][]string{"writer": {"user1"}},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: public viewer + public "public" relation + 1 writer = 3 tuples
+					if len(req.Writes) != 3 || len(req.Deletes) != 0 {
+						return false
+					}
+					sawPublicViewer, sawPublicRelation := false, false
+					for _, tuple := range req.Writes {
+						if tuple.User == "user:*" && tuple.Relation == "viewer" {
+							sawPublicViewer = true
+						}
+						if tuple.User == "user:*" && tuple.Relation == "public" {
+							sawPublicRelation = true
+						}
+					}
+					return sawPublicViewer && sawPublicRelation
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "non-public groupsio_mailing_list does not get a public relation tuple",
+			obj: &standardAccessStub{
+				UID:        "mlist-456",
+				ObjectType: "groupsio_mailing_list",
+				Public:     false,
+				Relations:  map[string][]string{"writer": {"user1"}},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have only the 1 writer tuple; no viewer or public wildcard tuples
+					if len(req.Writes) != 1 || len(req.Deletes) != 0 {
+						return false
+					}
+					for _, tuple := range req.Writes {
+						if tuple.User == "user:*" {
+							return false
+						}
+					}
+					return true
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "public committee does not get a public relation tuple (groupsio_mailing_list-only behavior)",
+			obj: &standardAccessStub{
+				UID:        "committee-789",
+				ObjectType: "committee",
+				Public:     true,
+				Relations:  map[string][]string{},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have only the public viewer tuple; no "public" relation tuple
+					return len(req.Writes) == 1 && req.Writes[0].User == "user:*" && req.Writes[0].Relation == "viewer"
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+
 		// Hard Tests - Error scenarios and edge cases
 		{
 			name: "missing UID should fail",

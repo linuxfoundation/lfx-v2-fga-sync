@@ -157,6 +157,10 @@ type GenericFGAMessage struct {
   enabling permission inheritance from the parent project.
 - `exclude_relations` lets a publisher manage some relations separately (e.g. members
   managed by a different subject). Those relations are left untouched.
+- `"public": true` writes a `user:*` tuple on `viewer`. For `object_type: "groupsio_mailing_list"`
+  specifically, it also writes a `user:*` tuple on `public` — a relation kept separate from
+  `viewer` in the model so a caller can check "is this list public" without also matching
+  existing writers/auditors/members of non-public lists.
 - Team-subject tuples are preserved when their relation name does not begin
   with `global_`. A `global_*` team relation is part of the publisher-managed
   full sync and is removed when omitted unless it appears in `exclude_relations`.
