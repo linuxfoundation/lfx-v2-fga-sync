@@ -385,7 +385,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 		{
 			name: "public groupsio_mailing_list also gets a public relation tuple",
 			obj: &standardAccessStub{
-				UID:        "mlist-123",
+				UID:        "mailing-list-123",
 				ObjectType: "groupsio_mailing_list",
 				Public:     true,
 				Relations:  map[string][]string{"writer": {"user1"}},
@@ -418,7 +418,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 		{
 			name: "non-public groupsio_mailing_list does not get a public relation tuple",
 			obj: &standardAccessStub{
-				UID:        "mlist-456",
+				UID:        "mailing-list-456",
 				ObjectType: "groupsio_mailing_list",
 				Public:     false,
 				Relations:  map[string][]string{"writer": {"user1"}},
