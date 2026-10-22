@@ -63,15 +63,6 @@ func (h *HandlerService) processStandardAccessUpdate(
 		tuples = append(tuples, client.ClientTupleKey{
 			User: constants.UserWildcard, Relation: constants.RelationViewer, Object: object,
 		})
-		// groupsio_mailing_list also has a "public" relation, separate from
-		// "viewer", that callers can check in isolation from a user's other
-		// relations to the list (e.g. to gate self-subscription on public
-		// lists without granting it to writers/auditors of private lists).
-		if obj.ObjectType == strings.TrimSuffix(constants.ObjectTypeGroupsIOMailingList, ":") {
-			tuples = append(tuples, client.ClientTupleKey{
-				User: constants.UserWildcard, Relation: constants.RelationPublic, Object: object,
-			})
-		}
 	}
 
 	// for parent relation, project relation, etc

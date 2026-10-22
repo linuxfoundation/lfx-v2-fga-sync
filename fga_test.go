@@ -1251,6 +1251,22 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			expectedDeletes:  1, // old-organizer should be deleted, participant/host excluded
 			description:      "should handle mixed writes, deletes, and exclusions correctly",
 		},
+		{
+			name:   "groupsio_mailing_list transitioning from public to private",
+			object: "groupsio_mailing_list:list-123",
+			desiredRelations: []ClientTupleKey{
+				{User: "user:writer1", Relation: "writer", Object: "groupsio_mailing_list:list-123"},
+			},
+			existingTuples: []openfga.Tuple{
+				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "groupsio_mailing_list:list-123"}},
+				{Key: openfga.TupleKey{User: "user:*", Relation: "public", Object: "groupsio_mailing_list:list-123"}},
+				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "groupsio_mailing_list:list-123"}},
+			},
+			excludeRelations: []string{},
+			expectedWrites:   0, // writer already exists, no new tuples to write
+			expectedDeletes:  2, // the viewer and public wildcard tuples from the prior public state are stale
+			description:      "should delete the viewer and public wildcard tuples while retaining the writer tuple when a public list becomes private",
+		},
 	}
 
 	for _, tt := range tests {

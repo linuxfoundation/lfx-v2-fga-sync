@@ -157,10 +157,19 @@ type GenericFGAMessage struct {
   enabling permission inheritance from the parent project.
 - `exclude_relations` lets a publisher manage some relations separately (e.g. members
   managed by a different subject). Those relations are left untouched.
-- `"public": true` writes a `user:*` tuple on `viewer`. For `object_type: "groupsio_mailing_list"`
-  specifically, it also writes a `user:*` tuple on `public` — a relation kept separate from
-  `viewer` in the model so a caller can check "is this list public" without also matching
-  existing writers/auditors/members of non-public lists.
+- `"public": true` writes a `user:*` tuple on `viewer`. Object types that also define a
+  `public` relation separate from `viewer` (e.g. `groupsio_mailing_list`, so a caller can
+  check "is this list public" without matching existing writers/auditors/members of
+  non-public lists) get that tuple the same way any other relation is written: the
+  publisher includes `"public": ["*"]` in `relations` for public objects and omits it for
+  private ones. There is no object-type-specific handling in this service — if the
+  OpenFGA model for an object type doesn't define a `public` relation, including it in
+  `relations` is a no-op write that OpenFGA itself will reject or ignore depending on
+  model validation.
+  **Rollout note:** a publisher must not include `"public"` in `relations` for an object
+  type until the OpenFGA model that type uses has had the `public` relation added and
+  deployed (see `linuxfoundation/lfx-v2-helm#189` for the `groupsio_mailing_list` case) —
+  deploy the model change first, then the publisher change.
 - Team-subject tuples are preserved when their relation name does not begin
   with `global_`. A `global_*` team relation is part of the publisher-managed
   full sync and is removed when omitted unless it appears in `exclude_relations`.
