@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	. "github.com/openfga/go-sdk/client"
@@ -1259,7 +1260,7 @@ func TestSyncObjectTuples_ExcludeRelations(t *testing.T) {
 			},
 			existingTuples: []openfga.Tuple{
 				{Key: openfga.TupleKey{User: "user:*", Relation: "viewer", Object: "groupsio_mailing_list:list-123"}},
-				{Key: openfga.TupleKey{User: "user:*", Relation: "public", Object: "groupsio_mailing_list:list-123"}},
+				{Key: openfga.TupleKey{User: "user:*", Relation: constants.RelationPublic, Object: "groupsio_mailing_list:list-123"}},
 				{Key: openfga.TupleKey{User: "user:writer1", Relation: "writer", Object: "groupsio_mailing_list:list-123"}},
 			},
 			excludeRelations: []string{},

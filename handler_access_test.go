@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
@@ -388,7 +389,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				UID:        "mailing-list-123",
 				ObjectType: "groupsio_mailing_list",
 				Public:     true,
-				Relations:  map[string][]string{"writer": {"user1"}, "public": {"*"}},
+				Relations:  map[string][]string{"writer": {"user1"}, constants.RelationPublic: {"*"}},
 				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
@@ -405,7 +406,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						if tuple.User == "user:*" && tuple.Relation == "viewer" {
 							sawPublicViewer = true
 						}
-						if tuple.User == "user:*" && tuple.Relation == "public" {
+						if tuple.User == "user:*" && tuple.Relation == constants.RelationPublic {
 							sawPublicRelation = true
 						}
 					}
@@ -451,7 +452,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 				UID:        "committee-789",
 				ObjectType: "committee",
 				Public:     true,
-				Relations:  map[string][]string{"public": {"*"}},
+				Relations:  map[string][]string{constants.RelationPublic: {"*"}},
 				References: map[string][]string{},
 			},
 			replySubject: "reply.subject",
@@ -469,7 +470,7 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						if tuple.User == "user:*" && tuple.Relation == "viewer" {
 							sawPublicViewer = true
 						}
-						if tuple.User == "user:*" && tuple.Relation == "public" {
+						if tuple.User == "user:*" && tuple.Relation == constants.RelationPublic {
 							sawPublicRelation = true
 						}
 					}
