@@ -131,7 +131,7 @@ Dependencies you need but should get from [lfx-v2-helm](https://github.com/linux
 
 ```bash
 # Build the image (replace the version as needed)
-docker build -t linuxfoundation/lfx-v2-fga-sync:0.1.0 .
+docker build --pull -t linuxfoundation/lfx-v2-fga-sync:0.1.0 .
 
 # Or use Make
 make docker-build

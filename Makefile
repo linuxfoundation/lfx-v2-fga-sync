@@ -111,7 +111,7 @@ run: build
 .PHONY: docker-build
 docker-build:
 	@echo "Building Docker image..."
-	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+	docker build --pull -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 
 # Push Docker image
 .PHONY: docker-push
