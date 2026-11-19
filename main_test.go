@@ -4,12 +4,14 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -146,4 +148,55 @@ func TestWaitForSubscriptionWorkersTimesOutOnStuckWorker(t *testing.T) {
 
 	assert.GreaterOrEqual(t, elapsed, 50*time.Millisecond, "should wait out the full timeout before giving up")
 	assert.Less(t, elapsed, 500*time.Millisecond, "should give up promptly once the timeout elapses")
+}
+
+// stubKeyValue satisfies jetstream.KeyValue for bindCacheBucket tests; it is
+// never called.
+type stubKeyValue struct {
+	jetstream.KeyValue
+}
+
+func TestBindCacheBucket(t *testing.T) {
+	bound := &stubKeyValue{}
+	tests := []struct {
+		name         string
+		bindErr      error
+		useCache     bool
+		wantBucket   INatsKeyValue
+		wantUseCache bool
+		wantErr      bool
+	}{
+		{name: "bound, cache on", useCache: true, wantBucket: bound, wantUseCache: true},
+		{name: "bound, cache off", useCache: false, wantBucket: bound, wantUseCache: false},
+		{name: "missing bucket forces cache off", bindErr: jetstream.ErrBucketNotFound, useCache: true},
+		{name: "other bind error is returned", bindErr: context.DeadlineExceeded, useCache: true, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotName string
+			bind := func(_ context.Context, name string) (jetstream.KeyValue, error) {
+				gotName = name
+				if tt.bindErr != nil {
+					return nil, tt.bindErr
+				}
+				return bound, nil
+			}
+
+			bucket, useCache, err := bindCacheBucket(context.Background(), bind, "example-bucket", tt.useCache)
+
+			assert.Equal(t, "example-bucket", gotName)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, tt.bindErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantUseCache, useCache)
+			if tt.wantBucket == nil {
+				assert.True(t, bucket == nil, "bucket must be a nil interface so CacheLayer nil checks hold")
+			} else {
+				assert.Same(t, tt.wantBucket, bucket)
+			}
+		})
+	}
 }

@@ -111,6 +111,11 @@ Dependencies you need but should get from [lfx-v2-helm](https://github.com/linux
 
 5. **Create the NATS KeyValue cache bucket and access-mutation stream**:
 
+   If the cache bucket is missing, the service logs a warning and runs with
+   the cache disabled, sending every access check to OpenFGA. Once the bucket
+   is created, tuple writes invalidate it again; restart the service to turn
+   cache reads back on.
+
    ```bash
    # Using NATS CLI (if available)
    nats kv add fga-sync-cache --history=20 --storage=file --max-value-size=10485760 --max-bucket-size=1073741824
