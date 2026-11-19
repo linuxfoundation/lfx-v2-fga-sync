@@ -18,6 +18,8 @@
     "OPENSEARCH",
     "jetstream",
     "nats",
+    "natskv",
+    "fgacache",
     "unittests",
     "gosec",
     "sarif",

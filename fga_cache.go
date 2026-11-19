@@ -49,9 +49,13 @@ const (
 )
 
 var (
-	cacheHits       *expvar.Int
-	cacheStaleHits  *expvar.Int
-	cacheMisses     *expvar.Int
+	cacheHits      *expvar.Int
+	cacheStaleHits *expvar.Int
+	cacheMisses    *expvar.Int
+	// The key format and the last-invalidation marker semantics in this file are
+	// duplicated in lfx-v2-indexer-service/internal/infrastructure/fgacache/keys.go
+	// and natskv.go. While both services read or write the same cache they must
+	// stay identical. Change them in both repos and upgrade both services together.
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
@@ -115,6 +119,11 @@ type CacheLayer struct {
 	bucket INatsKeyValue
 }
 
+// The key format and the last-invalidation marker semantics in this file are
+// duplicated in lfx-v2-indexer-service/internal/infrastructure/fgacache/keys.go
+// and natskv.go. While both services read or write the same cache they must
+// stay identical. Change them in both repos and upgrade both services together.
+//
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
 // no-op when the bucket is nil (e.g., cache disabled or not yet connected).
@@ -139,9 +148,13 @@ func (c CacheLayer) invalidate(ctx context.Context) error {
 // getLastInvalidation reads the inv key and returns its creation time, or the
 // zero time when no invalidation has been recorded within the TTL window.
 // The read holds a cacheOpSem slot; if ctx is done before one frees, it
-// returns ctx.Err() without reaching the bucket.
+// returns ctx.Err() without reaching the bucket. A nil bucket returns the zero
+// time.
 func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) {
 	var lastInvalidation time.Time
+	if c.bucket == nil {
+		return lastInvalidation, nil
+	}
 	var entry jetstream.KeyValueEntry
 	var err error
 	if slotErr := withCacheOpSlot(ctx, func() { entry, err = c.bucket.Get(ctx, "inv") }); slotErr != nil {
@@ -162,11 +175,16 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 // lookupEntry checks the KV cache for a single tuple check item. It never
 // returns a Go error: a miss, a stale hit, or an unexpected KV error all
 // set needsCheck so the tuple is forwarded to OpenFGA instead of dropped.
+// A nil bucket is treated as a miss.
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
 	lastInvalidation time.Time,
 ) cacheLookupOutcome {
+	if c.bucket == nil {
+		cacheMisses.Add(1)
+		return cacheLookupOutcome{kind: cacheOutcomeMiss, needsCheck: true}
+	}
 	relationKey := tuple.Object + "#" + tuple.Relation + "@" + tuple.User
 	// Encode relation using base32 without padding to conform to the allowed
 	// characters for NATS subjects.
@@ -235,8 +253,10 @@ func (c CacheLayer) lookupEntry(
 // writes run at once; it does not affect the wg.Wait() ordering guarantee
 // above, since every goroutine below is still awaited regardless of whether
 // it ran immediately or queued for a slot.
+//
+// It is a no-op when the bucket is nil, matching invalidate.
 func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string) {
-	if len(cacheKeys) == 0 {
+	if c.bucket == nil || len(cacheKeys) == 0 {
 		return
 	}
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
@@ -269,7 +289,8 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 // Cache write-backs are fanned out with bounded concurrency once the message
 // is assembled. g.Wait() blocks before this function returns, so they
 // complete within the request's lifetime; the fan-out only bounds how many
-// run at once, not whether the reply waits for them.
+// run at once, not whether the reply waits for them. With a nil bucket the
+// result lines are still assembled and no write-backs are queued.
 func (c CacheLayer) buildResponseAndWriteBack(
 	ctx context.Context,
 	message []byte,
@@ -309,7 +330,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
 		// Queue the cache write.
-		if shouldCache {
+		if shouldCache && c.bucket != nil {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
 			cachePuts = append(cachePuts, func() error {

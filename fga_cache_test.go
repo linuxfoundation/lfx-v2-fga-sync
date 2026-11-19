@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
+	openfga "github.com/openfga/go-sdk"
 	"github.com/openfga/go-sdk/client"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -216,4 +217,33 @@ func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
 
 	assert.Equal(t, 1, kv.putPeak, "inv Put must run while the cache budget is full")
 	assert.Equal(t, cacheOpConcurrency, len(cacheOpSem), "occupied slot count must be unchanged")
+}
+
+// TestCacheLayerNilBucket proves every CacheLayer method is safe when the
+// cache bucket could not be bound at startup.
+func TestCacheLayerNilBucket(t *testing.T) {
+	cache := CacheLayer{}
+	ctx := context.Background()
+	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
+
+	assert.NotPanics(t, func() {
+		cache.seedPositiveEntries(ctx, []string{"rel.KEY1", "rel.KEY2"})
+	})
+	require.NoError(t, cache.invalidate(ctx))
+
+	lastInvalidation, err := cache.getLastInvalidation(ctx)
+	require.NoError(t, err)
+	assert.True(t, lastInvalidation.IsZero())
+
+	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	assert.True(t, outcome.needsCheck)
+	assert.Equal(t, cacheOutcomeMiss, outcome.kind)
+
+	var message []byte
+	assert.NotPanics(t, func() {
+		message = cache.buildResponseAndWriteBack(ctx, nil,
+			map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}},
+			map[string]client.ClientBatchCheckItem{"1": tuple})
+	})
+	assert.Equal(t, "project:example#viewer@user:example-user\ttrue\n", string(message))
 }

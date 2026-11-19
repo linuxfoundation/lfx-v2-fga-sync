@@ -105,7 +105,9 @@ trivy) don't run here.
 
 ### Optional Environment Variables
 
-- `CACHE_BUCKET`: JetStream KeyValue bucket name (default: `fga-sync-cache`)
+- `CACHE_BUCKET`: JetStream KeyValue bucket name (default: `fga-sync-cache`).
+  If the bucket does not exist at startup, the service logs a warning and
+  runs with the cache disabled; any other bind error stops startup.
 - `USE_CACHE`: Enable JetStream KV reads for access checks when set to `true`
   (chart default is true; binary default is false)
 - `PORT`: HTTP server port (default: `8080`)
