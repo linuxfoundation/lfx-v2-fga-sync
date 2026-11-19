@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -246,4 +247,64 @@ func TestCacheLayerNilBucket(t *testing.T) {
 			map[string]client.ClientBatchCheckItem{"1": tuple})
 	})
 	assert.Equal(t, "project:example#viewer@user:example-user\ttrue\n", string(message))
+}
+
+func TestCacheLayerRecoversBucketForInvalidation(t *testing.T) {
+	ctx := context.Background()
+	kv := &keyRecordingKV{}
+	binds := 0
+	var bound INatsKeyValue
+	cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
+		binds++
+		if bound == nil {
+			return nil, jetstream.ErrBucketNotFound
+		}
+		return bound, nil
+	}}}
+
+	require.NoError(t, cache.invalidate(ctx), "a still-missing bucket is not an error")
+	assert.Empty(t, kv.puts)
+
+	bound = kv
+	require.NoError(t, cache.invalidate(ctx))
+	require.NoError(t, cache.invalidate(ctx))
+	assert.Equal(t, []string{"inv", "inv"}, kv.puts)
+	assert.Equal(t, 2, binds, "the bucket is bound once and then reused")
+
+	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
+	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	assert.Equal(t, cacheOutcomeMiss, outcome.kind, "reads stay disabled after recovery")
+	cache.seedPositiveEntries(ctx, []string{"rel.KEY1"})
+	assert.Equal(t, []string{"inv", "inv"}, kv.puts, "seeding stays disabled after recovery")
+	assert.Empty(t, kv.gets)
+}
+
+func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
+	kv := &keyRecordingKV{}
+	shared := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
+		return kv, nil
+	}}}
+
+	const writers = 20
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func(cache CacheLayer) {
+			defer wg.Done()
+			assert.NoError(t, cache.invalidate(context.Background()))
+		}(shared)
+	}
+	wg.Wait()
+
+	assert.Len(t, kv.puts, writers, "every write invalidates")
+	assert.NotNil(t, shared.recovery.bucket)
+}
+
+func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {
+	cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
+		return nil, context.DeadlineExceeded
+	}}}
+
+	err := cache.invalidate(context.Background())
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

@@ -107,7 +107,9 @@ trivy) don't run here.
 
 - `CACHE_BUCKET`: JetStream KeyValue bucket name (default: `fga-sync-cache`).
   If the bucket does not exist at startup, the service logs a warning and
-  runs with the cache disabled; any other bind error stops startup.
+  runs with the cache disabled, retrying the bind on each tuple write so
+  invalidations resume once the bucket exists; any other bind error stops
+  startup.
 - `USE_CACHE`: Enable JetStream KV reads for access checks when set to `true`
   (chart default is true; binary default is false)
 - `PORT`: HTTP server port (default: `8080`)

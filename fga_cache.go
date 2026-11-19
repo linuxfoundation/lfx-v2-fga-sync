@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/base32"
+	"errors"
 	"expvar"
 	"fmt"
 	"strconv"
@@ -117,6 +118,58 @@ type cacheLookupOutcome struct {
 // relation-key strings and BatchCheck results.
 type CacheLayer struct {
 	bucket INatsKeyValue
+	// recovery is set when the bucket was missing at startup. Only invalidate
+	// uses it: once the bucket exists, other replicas may cache results in it,
+	// so this replica's writes must invalidate them. Reads stay disabled until
+	// restart.
+	recovery *bucketRecovery
+}
+
+// bucketRecovery binds the cache bucket on demand after it was missing at
+// startup. It is shared by every copy of the CacheLayer that holds it.
+type bucketRecovery struct {
+	bind   func(context.Context) (INatsKeyValue, error)
+	mu     sync.Mutex
+	bucket INatsKeyValue
+}
+
+// get returns the bucket, binding it if needed. It returns a nil bucket and no
+// error while the bucket does not exist. The bind runs outside the lock so a
+// slow JetStream call does not queue concurrent writers; a duplicate bind is
+// harmless. A "not found" result is never remembered, because the bucket can
+// be created at any time.
+func (r *bucketRecovery) get(ctx context.Context) (INatsKeyValue, error) {
+	r.mu.Lock()
+	bucket := r.bucket
+	r.mu.Unlock()
+	if bucket != nil {
+		return bucket, nil
+	}
+
+	bucket, err := r.bind(ctx)
+	switch {
+	case errors.Is(err, jetstream.ErrBucketNotFound), err == nil && bucket == nil:
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("error binding to cache bucket: %w", err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bucket == nil {
+		r.bucket = bucket
+		logger.InfoContext(ctx, "cache bucket found; writes now invalidate the cache, reads stay disabled until restart")
+	}
+	return r.bucket, nil
+}
+
+// invalidationBucket returns the bucket invalidate writes to, or nil when no
+// bucket exists.
+func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, error) {
+	if c.bucket != nil || c.recovery == nil {
+		return c.bucket, nil
+	}
+	return c.recovery.get(ctx)
 }
 
 // The key format and the last-invalidation marker semantics in this file are
@@ -126,16 +179,17 @@ type CacheLayer struct {
 //
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
-// no-op when the bucket is nil (e.g., cache disabled or not yet connected).
+// no-op while no bucket exists.
 func (c CacheLayer) invalidate(ctx context.Context) error {
-	if c.bucket == nil {
-		return nil
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return err
 	}
 
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
 	defer span.End()
 
-	_, err := c.bucket.Put(ctx, "inv", []byte("1"))
+	_, err = bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -254,7 +308,8 @@ func (c CacheLayer) lookupEntry(
 // above, since every goroutine below is still awaited regardless of whether
 // it ran immediately or queued for a slot.
 //
-// It is a no-op when the bucket is nil, matching invalidate.
+// It is a no-op when the bucket is nil; unlike invalidate, it never uses the
+// recovered bucket.
 func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string) {
 	if c.bucket == nil || len(cacheKeys) == 0 {
 		return

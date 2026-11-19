@@ -312,9 +312,15 @@ func run(bind, port string) error {
 		return err
 	}
 
-	handlerService := HandlerService{
-		fgaService: newFgaService(fgaClient, cacheBucket, useCache),
+	fgaService := newFgaService(fgaClient, cacheBucket, useCache)
+	if cacheBucket == nil {
+		fgaService.cache.recovery = &bucketRecovery{
+			bind: func(ctx context.Context) (INatsKeyValue, error) {
+				return srv.jsConn.KeyValue(ctx, cacheBucketName)
+			},
+		}
 	}
+	handlerService := HandlerService{fgaService: fgaService}
 
 	if err = srv.createQueueSubscriptions(handlerService); err != nil {
 		return fmt.Errorf("error creating queue subscriptions: %w", err)
