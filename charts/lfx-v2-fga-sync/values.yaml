@@ -216,9 +216,9 @@ application:
 networkPolicy:
   # enabled renders templates/networkpolicy.yaml
   enabled: true
-  # natsPort is the NATS client port
+  # natsPort is the port of nats.url; change both together
   natsPort: 4222
-  # openfgaPort is the port of fga.apiUrl
+  # openfgaPort is the port of fga.apiUrl; change both together
   openfgaPort: 8080
   # otelGRPCPort and otelHTTPPort are the OpenTelemetry collector ports
   otelGRPCPort: 4317
