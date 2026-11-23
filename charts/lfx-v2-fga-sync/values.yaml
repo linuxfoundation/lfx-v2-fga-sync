@@ -211,3 +211,17 @@ application:
     # Comma-separated list of: "tracecontext", "baggage", "jaeger"
     # (default: "tracecontext,baggage")
     propagators: "tracecontext,baggage,jaeger"
+
+# networkPolicy restricts the fga-sync pods' egress to the ports below (and DNS)
+networkPolicy:
+  # enabled renders templates/networkpolicy.yaml
+  enabled: true
+  # natsPort is the port of nats.url; change both together
+  natsPort: 4222
+  # openfgaPort is the port of fga.apiUrl; change both together
+  openfgaPort: 8080
+  # otelGRPCPort and otelHTTPPort are the OpenTelemetry collector ports
+  otelGRPCPort: 4317
+  otelHTTPPort: 4318
+  # valkeyPort is the Valkey index cache port
+  valkeyPort: 6379

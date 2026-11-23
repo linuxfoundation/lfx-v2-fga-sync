@@ -96,7 +96,8 @@
     "cloudops",
     "triggerer",
     "zizmor",
-    "authorizationmodel"
+    "authorizationmodel",
+    "valkey"
   ],
   "overrides": [
     {
