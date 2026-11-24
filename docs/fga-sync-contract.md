@@ -229,6 +229,18 @@ Reply is plain text, one line per check, tab-delimited `{request}\t{true|false}`
 **Order is not guaranteed** (cached results may be returned first); callers must
 match on the request token, not by index.
 
+Each line must meet OpenFGA's check-request limits, counted in characters:
+`object` 2-256 with no whitespace, `relation` 1-50 with no `:`, `#`, `@` or
+whitespace, and `user` 2-512 with no whitespace, where whitespace is space, tab,
+newline, form feed or carriage return. A whole line may be at most 1,024 bytes,
+which keeps the cache key inside the NATS subject length limit. A request with
+any line that breaks these rules, or that has no `@` or `#`, gets the reply
+`failed to extract check requests`. The reply does not repeat the line. OpenFGA
+already rejects lines that break the field limits, and it fails the whole batch
+when one item is invalid. The only lines newly rejected are those within the
+field limits but over 1,024 bytes, which needs multi-byte characters: the
+longest line of ASCII characters is 820 bytes.
+
 ### `lfx.access_check.read_tuples`
 
 Returns all direct OpenFGA tuples for a given user and object type. Paginates internally.

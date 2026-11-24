@@ -181,6 +181,86 @@ func TestExtractCheckRequests(t *testing.T) {
 	}
 }
 
+// TestParseCheckRequestLimits tests that parseCheckRequest applies OpenFGA's
+// CheckRequestTupleKey limits, counted in characters, and the line byte limit.
+func TestParseCheckRequestLimits(t *testing.T) {
+	line := func(object, relation, user string) string {
+		return object + "#" + relation + "@" + user
+	}
+	pad := func(prefix string, r rune, chars int) string {
+		return prefix + strings.Repeat(string(r), chars-len([]rune(prefix)))
+	}
+
+	tests := []struct {
+		name    string
+		line    string
+		wantErr bool
+	}{
+		{name: "object at 256 characters", line: line(pad("project:", 'a', 256), "viewer", "user:u1")},
+		{name: "object at 257 characters", line: line(pad("project:", 'a', 257), "viewer", "user:u1"), wantErr: true},
+		{name: "object of multi-byte characters at 256", line: line(pad("project:", 'é', 256), "viewer", "user:u1")},
+		{name: "object of multi-byte characters at 257", line: line(pad("project:", 'é', 257), "viewer", "user:u1"), wantErr: true},
+		{name: "object at 2 characters", line: line("pj", "viewer", "user:u1")},
+		{name: "object of 1 character", line: line("p", "viewer", "user:u1"), wantErr: true},
+		{name: "relation at 50 characters", line: line("project:p1", strings.Repeat("r", 50), "user:u1")},
+		{name: "relation at 51 characters", line: line("project:p1", strings.Repeat("r", 51), "user:u1"), wantErr: true},
+		{name: "relation of multi-byte characters at 50", line: line("project:p1", strings.Repeat("é", 50), "user:u1")},
+		{name: "relation of multi-byte characters at 51", line: line("project:p1", strings.Repeat("é", 51), "user:u1"), wantErr: true},
+		{name: "empty relation", line: line("project:p1", "", "user:u1"), wantErr: true},
+		{name: "relation containing a colon", line: line("project:p1", "view:er", "user:u1"), wantErr: true},
+		{name: "relation containing a hash", line: line("project:p1", "view#er", "user:u1"), wantErr: true},
+		{name: "user at 512 characters", line: line("project:p1", "viewer", pad("user:", 'u', 512))},
+		{name: "user at 513 characters", line: line("project:p1", "viewer", pad("user:", 'u', 513)), wantErr: true},
+		{name: "user of 512 multi-byte characters is over the line byte limit", line: line("project:p1", "viewer", pad("user:", 'é', 512)), wantErr: true},
+		{name: "user of multi-byte characters within the line byte limit", line: line("project:p1", "viewer", pad("user:", 'é', 400))},
+		{name: "user of 1 character", line: line("project:p1", "viewer", "u"), wantErr: true},
+		{name: "user containing @ is kept whole", line: line("project:p1", "viewer", "user:a@b")},
+		// 256 + 1 + 7 + 1 + 5 + 377*2 = 1024 bytes; every field is within its character limit.
+		{name: "line of exactly 1024 bytes", line: line(pad("project:", 'a', 256), "viewers", "user:"+strings.Repeat("é", 377))},
+		// 256 + 1 + 6 + 1 + 5 + 378*2 = 1025 bytes.
+		{name: "line of 1025 bytes", line: line(pad("project:", 'a', 256), "viewer", "user:"+strings.Repeat("é", 378)), wantErr: true},
+		{
+			name:    "4-byte characters within every field limit but over 1024 bytes",
+			line:    line(pad("project:", '😀', 256), strings.Repeat("😀", 50), pad("user:", '😀', 512)),
+			wantErr: true,
+		},
+		{name: "space in object", line: line("project:p 1", "viewer", "user:u1"), wantErr: true},
+		{name: "tab in relation", line: line("project:p1", "viewer\tx", "user:u1"), wantErr: true},
+		{name: "form feed in user", line: line("project:p1", "viewer", "user:u\f1"), wantErr: true},
+		{name: "carriage return in user", line: line("project:p1", "viewer", "user:u1\r"), wantErr: true},
+		{name: "vertical tab in object is accepted, as OpenFGA does", line: line("project:p\v1", "viewer", "user:u1")},
+		{name: "no-break space in user is accepted, as OpenFGA does", line: line("project:p1", "viewer", "user:u\u00a01")},
+	}
+
+	fgaService := newFgaService(&MockFgaClient{}, nil, false)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := fgaService.parseCheckRequest([]byte(tt.line))
+			if tt.wantErr {
+				assert.Error(t, err)
+				if err != nil {
+					assert.NotContains(t, err.Error(), tt.line, "error must not echo the line")
+				}
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestParseCheckRequestErrorsDoNotEchoLine tests that format errors do not
+// include the rejected line.
+func TestParseCheckRequestErrorsDoNotEchoLine(t *testing.T) {
+	fgaService := newFgaService(&MockFgaClient{}, nil, false)
+	for _, l := range []string{"project:p1-viewer-user:u1", "project:p1viewer@user:u1"} {
+		_, err := fgaService.parseCheckRequest([]byte(l))
+		if assert.Error(t, err) {
+			assert.NotContains(t, err.Error(), l)
+		}
+	}
+}
+
 // TestReadObjectTuples tests the ReadObjectTuples function
 func TestReadObjectTuples(t *testing.T) {
 	tests := []struct {

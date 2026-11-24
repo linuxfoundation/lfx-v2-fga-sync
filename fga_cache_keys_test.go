@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
 	"github.com/openfga/go-sdk/client"
@@ -85,6 +87,43 @@ func TestCacheKeyMatchesGolden(t *testing.T) {
 			cache.buildResponseAndWriteBack(context.Background(), nil, result,
 				map[string]client.ClientBatchCheckItem{"1": tuple})
 			assert.Equal(t, []string{tc.Want}, kv.puts, "buildResponseAndWriteBack write key")
+		})
+	}
+}
+
+// TestCacheKeyBoundForLongestAcceptedLine tests that every key read or written
+// for an accepted check line stays under half of the NATS server's default
+// 4096-byte control-line limit, even for a direct get, whose subject carries
+// the key.
+func TestCacheKeyBoundForLongestAcceptedLine(t *testing.T) {
+	const maxKeyBytes = 1643 // "rel." + base32 (no padding) of maxRelationKeyBytes
+	directGetPrefix := "$JS.API.DIRECT.GET.KV_" + constants.KVBucketNameSyncCache + "."
+
+	lines := map[string]string{
+		"longest ASCII line": "project:" + strings.Repeat("a", 248) + "#" + strings.Repeat("r", 50) +
+			"@user:" + strings.Repeat("u", 507),
+		"1024-byte line of multi-byte characters": "project:" + strings.Repeat("a", 248) + "#viewers@user:" +
+			strings.Repeat("é", 377),
+	}
+
+	fgaService := newFgaService(&MockFgaClient{}, nil, false)
+	for name, l := range lines {
+		t.Run(name, func(t *testing.T) {
+			req, err := fgaService.parseCheckRequest([]byte(l))
+			require.NoError(t, err, "line must be accepted")
+
+			kv := &keyRecordingKV{}
+			cache := CacheLayer{bucket: kv}
+			tuple := client.ClientBatchCheckItem{Object: req.Object, Relation: req.Relation, User: req.User}
+			cache.lookupEntry(context.Background(), tuple, time.Time{})
+			result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
+			cache.buildResponseAndWriteBack(context.Background(), nil, result,
+				map[string]client.ClientBatchCheckItem{"1": tuple})
+
+			for _, key := range append(kv.gets, kv.puts...) {
+				assert.LessOrEqual(t, len(key), maxKeyBytes)
+				assert.Less(t, len(directGetPrefix+key), 4096/2)
+			}
 		})
 	}
 }

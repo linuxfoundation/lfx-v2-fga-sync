@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -253,6 +254,34 @@ func TestAccessCheckHandler(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAccessCheckHandlerRejectsOversizedLine verifies that a line over the
+// limits gets the existing error reply without touching the cache or OpenFGA,
+// and that the line is not written to the log.
+func TestAccessCheckHandlerRejectsOversizedLine(t *testing.T) {
+	var logs bytes.Buffer
+	previous := logger
+	logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { logger = previous })
+
+	oversized := "project:" + strings.Repeat("x", 3000) + "#viewer@user:456"
+	msg := CreateMockNatsMsg([]byte("project:123#writer@user:456\n" + oversized))
+	msg.reply = "reply.subject"
+	msg.On("Respond", []byte("failed to extract check requests")).Return(nil).Once()
+
+	kv := &keyRecordingKV{}
+	fgaClient := &MockFgaClient{}
+	service := &HandlerService{fgaService: newFgaService(fgaClient, kv, true)}
+
+	err := service.accessCheckHandler(context.Background(), msg)
+
+	require.Error(t, err)
+	msg.AssertExpectations(t)
+	fgaClient.AssertNotCalled(t, "BatchCheck", mock.Anything, mock.Anything)
+	assert.Empty(t, kv.gets, "no cache lookup for a rejected request")
+	assert.Empty(t, kv.puts, "no cache write for a rejected request")
+	assert.NotContains(t, logs.String(), strings.Repeat("x", 100), "log must not contain the rejected line")
 }
 
 // TestAccessCheckHandlerBoundsContextDeadline verifies accessCheckHandler
