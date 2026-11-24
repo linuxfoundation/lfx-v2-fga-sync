@@ -14,6 +14,8 @@ These subjects use NATS request/reply for synchronous queries.
 **Subject:** `lfx.access_check.request`
 
 Checks one or more authorization relationships. Each line is a tuple-string in `object#relation@user` format.
+Lines must stay within OpenFGA's field limits and 1,024 bytes; one invalid line fails the whole request with
+`failed to extract check requests` (see the limits in [`docs/fga-sync-contract.md`](fga-sync-contract.md)).
 
 **Request** (plain text, one check per line):
 

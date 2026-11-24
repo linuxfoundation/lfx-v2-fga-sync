@@ -47,6 +47,14 @@ const (
 	// cacheLookupConcurrency so a couple of large batches still overlap fully
 	// while that product stays reasonable for a single-node bucket.
 	cacheOpConcurrency = 2 * cacheLookupConcurrency
+
+	// maxRelationKeyBytes caps an `object#relation@user` relation key. The cache
+	// key is "rel." plus its base32 encoding (at most 1,643 bytes), and a KV
+	// direct get or put carries the key in the NATS subject, which the server
+	// limits to its max_control_line (4,096 bytes by default); exceeding it
+	// closes the connection. OpenFGA's per-field limits count characters, so
+	// they alone do not bound the key's byte length.
+	maxRelationKeyBytes = 1024
 )
 
 var (

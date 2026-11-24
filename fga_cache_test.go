@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -138,6 +139,48 @@ func TestSyncObjectTuplesDoesNotSeedCacheForTupleSkippedDuringInvalidTupleRetry(
 		t.Fatalf("unexpected second cache write for %q; the skipped invalid tuple must not be seeded", key)
 	default:
 		// No further writes: the skipped tuple's cache key was correctly excluded.
+	}
+}
+
+// TestSyncObjectTuplesDoesNotSeedOverlongRelationKey covers a tuple OpenFGA
+// accepts (its fields are within the character limits) whose relation key is
+// longer than maxRelationKeyBytes. The tuple is still written, but its cache
+// key is not seeded, so no KV key exceeds the bound.
+func TestSyncObjectTuplesDoesNotSeedOverlongRelationKey(t *testing.T) {
+	longUser := "user:" + strings.Repeat("é", 507) // 512 characters, 1,019 bytes
+	fgaClient := new(MockFgaClient)
+	fgaClient.
+		On("Read", mock.Anything, mock.Anything, client.ClientReadOptions{}).
+		Return(&client.ClientReadResponse{}, nil)
+	fgaClient.
+		On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+			return len(req.Writes) == 2
+		}), mock.Anything).
+		Return(&client.ClientWriteResponse{}, nil).
+		Once()
+
+	cache := &cacheWriteRecorder{writes: make(chan string, 2)}
+	service := newFgaService(fgaClient, cache, false)
+
+	writes := []client.ClientTupleKey{
+		{User: longUser, Relation: "viewer", Object: "project:resource-1"},
+		{User: "user:bob", Relation: "viewer", Object: "project:resource-1"},
+	}
+
+	_, _, err := service.SyncObjectTuples(context.Background(), "project:resource-1", writes)
+	require.NoError(t, err)
+	fgaClient.AssertExpectations(t)
+
+	select {
+	case key := <-cache.writes:
+		assert.Equal(t, "rel."+cacheKeyEncoder.EncodeToString([]byte("project:resource-1#viewer@user:bob")), key)
+	default:
+		t.Fatal("expected the normal tuple's cache entry to be seeded")
+	}
+	select {
+	case key := <-cache.writes:
+		t.Fatalf("unexpected cache write of %d bytes; the over-long relation key must not be seeded", len(key))
+	default:
 	}
 }
 
