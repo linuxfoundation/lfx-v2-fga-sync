@@ -437,17 +437,29 @@ A model bump costs one global cache flush, which is deliberate: the cache key
 does not include the model ID, so entries computed under the old model may be
 wrong under the new one.
 
-**One manual step remains.** While old-model replicas still serve access checks,
-they write answers computed under the old model into the shared cache, under
-keys the new replicas also read. The flushes above run at startup, so they cannot
-cover entries written after them. Once the rollout has finished and no old-model
-replica is left, write any value to the `inv` key. Until then a grant the new
-model denies can be served from cache, for at most the cache TTL.
+**Replicas on a different model stop writing to the cache.** The flushes above
+run at startup, so on their own they cannot clear what an old-model replica
+writes back afterwards: the cache key does not carry the model, and a replica
+that is still answering checks during the rollout would write answers computed
+under the old model where new-model replicas read them as fresh. Each replica in
+`scoped` mode therefore re-reads `inv.model` every 2 seconds. While the marker
+holds a different model ID, or cannot be read, it skips cache write-backs and
+seeding (counted in `cache_write_backs_fenced`). It keeps serving access checks,
+from the cache where an entry is fresh and from OpenFGA otherwise. Whatever it
+wrote before it noticed is cleared by the follow-up flush, which runs 10 seconds
+after the announcement. The fence lifts when the marker matches again or
+expires.
+
+No manual `inv` write is needed after a model change once every replica runs
+this version. A replica running an older version does not fence, so the first
+rollout that introduces this version still needs one `inv` write after it has
+drained.
 
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`,
-  `cache_invalidations_global`, `cache_invalidations_scoped`. A high global count in
+  `cache_invalidations_global`, `cache_invalidations_scoped`,
+  `cache_write_backs_fenced`. A high global count in
   `scoped` mode means writes are not being scoped; check the logs for
   `could not build model graph` and for writes with conditions or unknown relations.
 - OTel spans for cache operations: `fga_sync.cache.lookup` (requested and

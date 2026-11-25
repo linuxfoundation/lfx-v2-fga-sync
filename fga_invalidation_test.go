@@ -1972,3 +1972,136 @@ func TestModelRolloutDoesNotLeaveStaleGrants(t *testing.T) {
 	assert.Equal(t, sortedStrings(seededUniverse), staleAfterRevoke(oldSvc),
 		"an old replica restarting mid-rollout still writes globally")
 }
+
+func TestModelFenceRefresh(t *testing.T) {
+	ctx := context.Background()
+	put := func(t *testing.T, kv *flakyKV, id string) {
+		t.Helper()
+		_, err := kv.MockKeyValue.Put(ctx, modelMarkerKey, []byte(id))
+		require.NoError(t, err)
+	}
+
+	t.Run("a nil fence is not blocked", func(t *testing.T) {
+		var f *modelFence
+		assert.False(t, f.isBlocked())
+	})
+
+	t.Run("follows the announced model", func(t *testing.T) {
+		kv := newFlakyKV()
+		f := &modelFence{}
+
+		f.refresh(ctx, kv, "m-1")
+		assert.False(t, f.isBlocked(), "no marker: nobody has announced")
+
+		put(t, kv, "m-1")
+		f.refresh(ctx, kv, "m-1")
+		assert.False(t, f.isBlocked(), "the announced model is this replica's")
+
+		put(t, kv, "m-2")
+		f.refresh(ctx, kv, "m-1")
+		assert.True(t, f.isBlocked(), "a newer model was announced")
+
+		put(t, kv, "m-1")
+		f.refresh(ctx, kv, "m-1")
+		assert.False(t, f.isBlocked(), "the fence lifts when the announced model matches again")
+	})
+
+	t.Run("an unreadable marker blocks until it can be read", func(t *testing.T) {
+		kv := newFlakyKV()
+		put(t, kv, "m-1")
+		kv.failGet = func(string) error { return errors.New("kv down") }
+		f := &modelFence{}
+		f.refresh(ctx, kv, "m-1")
+		assert.True(t, f.isBlocked())
+
+		kv.failGet = nil
+		f.refresh(ctx, kv, "m-1")
+		assert.False(t, f.isBlocked())
+	})
+
+	t.Run("watch picks up a later announcement and stops with its context", func(t *testing.T) {
+		kv := newFlakyKV()
+		put(t, kv, "m-1")
+		f := &modelFence{}
+		watchCtx, cancel := context.WithCancel(ctx)
+		go f.watch(watchCtx, kv, "m-1", time.Millisecond)
+
+		put(t, kv, "m-2")
+		assert.Eventually(t, f.isBlocked, time.Second, time.Millisecond)
+
+		cancel()
+		time.Sleep(20 * time.Millisecond) // let an in-flight tick finish
+		put(t, kv, "m-1")
+		time.Sleep(20 * time.Millisecond)
+		assert.True(t, f.isBlocked(), "a stopped watcher no longer updates the fence")
+	})
+}
+
+// TestModelFenceKeepsOutdatedReplicaFromRepopulatingCache plays the rollout gap
+// the flushes cannot cover: an old-model replica that keeps answering checks
+// after a new model is announced. It must keep serving, from the cache and from
+// OpenFGA, without writing anything back for new-model replicas to read.
+func TestModelFenceKeepsOutdatedReplicaFromRepopulatingCache(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the watchers and follow-up flushes
+	prevFence, prevRetry := modelFenceInterval, modelAnnounceRetryDelay
+	modelFenceInterval, modelAnnounceRetryDelay = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { modelFenceInterval, modelAnnounceRetryDelay = prevFence, prevRetry })
+	graph := platformGraph(t)
+
+	cached := "meeting:m1#viewer@user:a"
+	uncached := "meeting:m2#viewer@user:a"
+	rel := func(key string) string { return "rel." + b32(key) }
+
+	e := newE2E(t, invalidationScoped, graph)
+	oldSvc := newFgaService(e.fga, e.kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-1")
+	oldSvc = oldSvc.announceModelOrDegrade(ctx)
+	require.False(t, oldSvc.cache.fence.isBlocked(), "the announcing replica may write")
+
+	e.svc = oldSvc
+	e.seed(cached)
+	assert.Equal(t, []string{uncached}, e.check(cached, uncached), "before the new model, a miss is written back")
+	assert.True(t, e.kv.written(rel(uncached)))
+
+	// A new model is announced; the old replica notices within a poll.
+	newSvc := newFgaService(e.fga, e.kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+	newSvc = newSvc.announceModelOrDegrade(ctx)
+	require.False(t, newSvc.cache.fence.isBlocked())
+	require.Eventually(t, oldSvc.cache.fence.isBlocked, time.Second, time.Millisecond)
+
+	// The new model's flush made every older entry stale. Leave the old replica
+	// one fresh entry to hit, and drop the stale write-back so a new one would
+	// be visible.
+	e.kv.MockKeyValue.PutAt(rel(cached), []byte("true"), invalidationTestBase.Add(time.Hour))
+	e.kv.MockKeyValue.mu.Lock() // the fence watcher is reading the same store
+	delete(e.kv.MockKeyValue.data, rel(uncached))
+	e.kv.MockKeyValue.mu.Unlock()
+
+	e.svc = oldSvc
+	got := e.check(cached, uncached)
+	assert.Equal(t, []string{uncached}, got, "the outdated replica still answers misses from OpenFGA, and hits from the cache")
+	assert.False(t, e.kv.written(rel(uncached)), "but writes nothing back")
+
+	// The new-model replica is unaffected.
+	e.svc = newSvc
+	e.check(uncached)
+	assert.True(t, e.kv.written(rel(uncached)))
+}
+
+// TestAnnounceModelOrDegradeFencesOutdatedReplica covers a replica that starts
+// after a newer model was announced: it is fenced from the start.
+func TestAnnounceModelOrDegradeFencesOutdatedReplica(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	kv := newFlakyKV()
+	_, err := kv.Put(ctx, modelMarkerKey, []byte("m-9"))
+	require.NoError(t, err)
+	svc := newFgaService(&recordingFga{}, kv, true).
+		withInvalidation(invalidationScoped, platformGraph(t)).withModelGuard("m-2")
+
+	got := svc.announceModelOrDegrade(ctx)
+
+	assert.True(t, got.cache.fence.isBlocked())
+	assert.True(t, got.useCache, "it still reads from the cache")
+	assert.NotNil(t, got.cache.bucket)
+}

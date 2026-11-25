@@ -217,21 +217,37 @@ func (s FgaService) announceModel(ctx context.Context) error {
 	return err
 }
 
+// withModelFence returns a copy of the service that stops writing to the shared
+// cache while the announced authorization model differs from its own, and keeps
+// checking. It does nothing unless the service runs in scoped mode with a model
+// ID and a cache bucket.
+func (s FgaService) withModelFence(ctx context.Context) FgaService {
+	if s.invalidation.mode != invalidationScoped || s.invalidation.modelID == "" || s.cache.bucket == nil {
+		return s
+	}
+	fence := &modelFence{}
+	fence.refresh(ctx, s.cache.bucket, s.invalidation.modelID)
+	go fence.watch(ctx, s.cache.bucket, s.invalidation.modelID, modelFenceInterval)
+	s.cache.fence = fence
+	return s
+}
+
 // announceModelOrDegrade announces the model and returns the service to use
 // from then on. If a newer model is already announced, this replica is the
-// outdated one: it writes globally and keeps using the cache. If the
-// announcement could not be recorded after retries, older replicas may keep
-// scoping with an outdated graph, so this replica stops reading from and
-// writing to the shared cache entirely and writes globally. Access checks keep
-// working in both cases, answered by OpenFGA directly when not by the cache.
+// outdated one: it writes globally, keeps reading from the cache, and stops
+// writing to it (see modelFence). If the announcement could not be recorded
+// after retries, older replicas may keep scoping with an outdated graph, so this
+// replica stops reading from and writing to the shared cache entirely and
+// writes globally. Access checks keep working in both cases, answered by
+// OpenFGA directly when not by the cache.
 func (s FgaService) announceModelOrDegrade(ctx context.Context) FgaService {
 	err := s.announceModel(ctx)
 	switch {
 	case err == nil:
-		return s
+		return s.withModelFence(ctx)
 	case errors.Is(err, errOutdatedModel):
 		logger.WarnContext(ctx, "a newer authorization model has been announced; invalidating globally")
-		return s.withInvalidation(s.invalidation.mode, nil)
+		return s.withModelFence(ctx).withInvalidation(s.invalidation.mode, nil)
 	default:
 		logger.With(errKey, err).Error(
 			"could not announce authorization model; shared cache disabled for this replica, invalidating globally")

@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -141,6 +142,12 @@ var staleMarkerKinds = []markerKind{
 	markerKindGlobal, markerKindType, markerKindUser, markerKindUnreadable,
 }
 
+// modelFenceInterval is how often a replica re-reads modelMarkerKey to see
+// whether a different model has been announced. It must stay well below
+// modelFollowUpDelay: whatever an outdated replica writes back before it notices
+// is cleared by the follow-up flush. It is a variable so tests do not wait.
+var modelFenceInterval = 2 * time.Second
+
 // modelAnnounceRetryDelay separates announcement attempts. It is a variable so
 // tests do not wait on it.
 var modelAnnounceRetryDelay = time.Second
@@ -148,11 +155,13 @@ var modelAnnounceRetryDelay = time.Second
 var (
 	cacheInvalidationsGlobal *expvar.Int
 	cacheInvalidationsScoped *expvar.Int
+	cacheWriteBacksFenced    *expvar.Int
 )
 
 func init() {
 	cacheInvalidationsGlobal = expvar.NewInt("cache_invalidations_global")
 	cacheInvalidationsScoped = expvar.NewInt("cache_invalidations_scoped")
+	cacheWriteBacksFenced = expvar.NewInt("cache_write_backs_fenced")
 }
 
 // invalidationMode selects how writes invalidate the cache and how lookups
@@ -588,6 +597,70 @@ func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed 
 		return true, nil
 	}
 	return false, errors.New("model marker kept changing while announcing the model")
+}
+
+// modelFence stops a replica from writing to the shared cache while the
+// announced authorization model is not its own. Cache keys do not carry the
+// model, so an outdated replica that kept answering checks during a rollout
+// would write answers computed under the old model where replicas on the new
+// model read them as fresh, and the startup flushes cannot clear what is
+// written after them. Reads are unaffected: the replica keeps serving, from the
+// cache and from OpenFGA.
+//
+// The zero value is not fenced, and so is a nil *modelFence.
+type modelFence struct {
+	blocked atomic.Bool
+}
+
+// isBlocked reports whether write-backs and seeding must be skipped.
+func (f *modelFence) isBlocked() bool {
+	return f != nil && f.blocked.Load()
+}
+
+// refresh re-reads modelMarkerKey and updates the fence. A missing marker
+// (nobody has announced, or it expired long after a rollout) does not fence. A
+// marker for a different model does, and so does a failed read: not being able
+// to tell is treated as not safe to write, at the cost of cache misses served
+// by OpenFGA.
+func (f *modelFence) refresh(ctx context.Context, bucket INatsKeyValue, modelID string) {
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	var block bool
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+	case err != nil:
+		block = true
+	default:
+		block = string(entry.Value()) != modelID
+	}
+	if f.blocked.Swap(block) == block {
+		return
+	}
+	switch {
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; not writing to the shared cache")
+	case block:
+		logger.With("model_id", modelID).WarnContext(ctx,
+			"a different authorization model has been announced; not writing to the shared cache")
+	default:
+		logger.With("model_id", modelID).InfoContext(ctx,
+			"announced authorization model matches; writing to the shared cache")
+	}
+}
+
+// watch refreshes the fence every interval until ctx ends.
+func (f *modelFence) watch(ctx context.Context, bucket INatsKeyValue, modelID string, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.refresh(ctx, bucket, modelID)
+		}
+	}
 }
 
 // followUpFlush bumps the global key once more after delay, so a write that

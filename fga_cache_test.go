@@ -359,3 +359,40 @@ func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {
 	err := cache.invalidate(context.Background(), globalReasonModeGlobal)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// TestCacheLayerFenceStopsWriteBacksAndSeeding covers a replica whose model is
+// not the announced one: it still builds replies but writes nothing to the
+// shared cache, and writes again once the fence lifts.
+func TestCacheLayerFenceStopsWriteBacksAndSeeding(t *testing.T) {
+	ctx := context.Background()
+	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
+	result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
+	byID := map[string]client.ClientBatchCheckItem{"1": tuple}
+	wantKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("project:example#viewer@user:example-user"))
+
+	t.Run("a blocked fence skips both and still replies", func(t *testing.T) {
+		kv := &keyRecordingKV{}
+		fence := &modelFence{}
+		fence.blocked.Store(true)
+		cache := CacheLayer{bucket: kv, fence: fence}
+		before := cacheWriteBacksFenced.Value()
+
+		out := cache.buildResponseAndWriteBack(ctx, nil, result, byID)
+		cache.seedPositiveEntries(ctx, []string{"rel.KEY1", "rel.KEY2"})
+
+		assert.Contains(t, string(out), "project:example#viewer@user:example-user\ttrue")
+		assert.Empty(t, kv.puts)
+		assert.Equal(t, int64(3), cacheWriteBacksFenced.Value()-before)
+	})
+
+	t.Run("an unblocked or missing fence writes", func(t *testing.T) {
+		for name, fence := range map[string]*modelFence{"unblocked": {}, "none": nil} {
+			t.Run(name, func(t *testing.T) {
+				kv := &keyRecordingKV{}
+				cache := CacheLayer{bucket: kv, fence: fence}
+				cache.buildResponseAndWriteBack(ctx, nil, result, byID)
+				assert.Equal(t, []string{wantKey}, kv.puts)
+			})
+		}
+	})
+}
