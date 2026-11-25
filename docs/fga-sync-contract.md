@@ -313,7 +313,7 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 | --- | --- |
 | Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
-| Invalidation | A single `inv` timestamp key, every successful OpenFGA write bumps it, making all older cached entries stale |
+| Invalidation | A single `inv` timestamp key, every successful OpenFGA write bumps it, making all older cached entries stale. A check's answers are not cached if `inv` moves while the check runs; if they were already written and cannot all be deleted, `inv` is bumped instead |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
 
@@ -322,7 +322,9 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`.
 - OTel spans for cache operations: `fga_sync.cache.lookup` (requested and
   hit/stale/miss counts for a `CheckRelationships` batch),
-  `fga_sync.cache.write_back` (number of cache puts), `fga_sync.cache.invalidate`
+  `fga_sync.cache.write_back` (number of cache puts, and
+  `fga_sync.cache.write_back.discarded` when an invalidation during the check
+  dropped its answers), `fga_sync.cache.invalidate`
   (the `inv` key bump), and `fga_sync.cache.seed` (number of seeded keys),
   nested under the `nats.process` consumer span for the message being handled.
 - If access checks return wrong/old results, look for `"cache invalidation failed"`
