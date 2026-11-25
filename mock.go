@@ -120,6 +120,8 @@ type MockKeyValue struct {
 	mu           sync.Mutex
 	data         map[string][]byte
 	createdTimes map[string]time.Time
+	revisions    map[string]uint64
+	lastRevision uint64
 	returnError  error
 	notFoundKeys map[string]bool
 	// clock supplies creation times for Put. It defaults to time.Now; tests
@@ -133,6 +135,7 @@ func NewMockKeyValue() *MockKeyValue {
 	return &MockKeyValue{
 		data:         make(map[string][]byte),
 		createdTimes: make(map[string]time.Time),
+		revisions:    make(map[string]uint64),
 		notFoundKeys: make(map[string]bool),
 		clock:        time.Now,
 	}
@@ -149,8 +152,16 @@ func (m *MockKeyValue) SetClock(clock func() time.Time) {
 func (m *MockKeyValue) PutAt(key string, value []byte, created time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.store(key, value, created)
+}
+
+// store writes a value, stamping it with the next revision. The caller holds mu.
+func (m *MockKeyValue) store(key string, value []byte, created time.Time) uint64 {
+	m.lastRevision++
 	m.data[key] = value
 	m.createdTimes[key] = created
+	m.revisions[key] = m.lastRevision
+	return m.lastRevision
 }
 
 // Get implements the jetstream.KeyValue interface
@@ -166,9 +177,10 @@ func (m *MockKeyValue) Get(_ context.Context, key string) (jetstream.KeyValueEnt
 	}
 	if data, exists := m.data[key]; exists {
 		return &MockKeyValueEntry{
-			key:     key,
-			value:   data,
-			created: m.createdTimes[key],
+			key:      key,
+			value:    data,
+			created:  m.createdTimes[key],
+			revision: m.revisions[key],
 		}, nil
 	}
 	return nil, jetstream.ErrKeyNotFound
@@ -182,9 +194,37 @@ func (m *MockKeyValue) Put(_ context.Context, key string, value []byte) (uint64,
 	if m.returnError != nil {
 		return 0, m.returnError
 	}
-	m.data[key] = value
-	m.createdTimes[key] = m.clock()
-	return 1, nil
+	return m.store(key, value, m.clock()), nil
+}
+
+// Create implements the jetstream.KeyValue interface: it writes only if the key
+// does not exist.
+func (m *MockKeyValue) Create(_ context.Context, key string, value []byte, _ ...jetstream.KVCreateOpt) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.returnError != nil {
+		return 0, m.returnError
+	}
+	if _, exists := m.data[key]; exists {
+		return 0, jetstream.ErrKeyExists
+	}
+	return m.store(key, value, m.clock()), nil
+}
+
+// Update implements the jetstream.KeyValue interface: it writes only if the
+// key is still at revision.
+func (m *MockKeyValue) Update(_ context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.returnError != nil {
+		return 0, m.returnError
+	}
+	if m.revisions[key] != revision {
+		return 0, jetstream.ErrKeyExists
+	}
+	return m.store(key, value, m.clock()), nil
 }
 
 // PutString implements the jetstream.KeyValue interface

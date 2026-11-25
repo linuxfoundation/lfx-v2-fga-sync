@@ -53,6 +53,16 @@ func (k *keyRecordingKV) Put(_ context.Context, key string, _ []byte) (uint64, e
 	return 1, nil
 }
 
+func (k *keyRecordingKV) Create(
+	_ context.Context, key string, _ []byte, _ ...jetstream.KVCreateOpt,
+) (uint64, error) {
+	return k.Put(context.Background(), key, nil)
+}
+
+func (k *keyRecordingKV) Update(_ context.Context, key string, _ []byte, _ uint64) (uint64, error) {
+	return k.Put(context.Background(), key, nil)
+}
+
 func (k *keyRecordingKV) PutString(_ context.Context, key, _ string) (uint64, error) {
 	return k.Put(context.Background(), key, nil)
 }

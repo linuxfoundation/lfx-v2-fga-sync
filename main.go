@@ -321,7 +321,8 @@ func run(bind, port string) error {
 		}
 	}
 	invMode, invGraph := configureInvalidation(context.Background(), fgaClient)
-	fgaService = fgaService.withInvalidation(invMode, invGraph)
+	fgaService = fgaService.withInvalidation(invMode, invGraph).withModelGuard(os.Getenv("OPENFGA_AUTH_MODEL_ID"))
+	fgaService = fgaService.announceModelOrDegrade(ctx)
 
 	handlerService := HandlerService{fgaService: fgaService}
 

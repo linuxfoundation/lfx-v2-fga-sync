@@ -72,6 +72,10 @@ var (
 	// invalidation lands during its write, as lfx-v2-indexer-service does.
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+	// cacheWriteTimeout bounds one write-back or seed write to the shared cache.
+	// modelFollowUpDelay is derived from it.
+	cacheWriteTimeout = 5 * time.Second
+
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
 	// KV Get/Put in this file acquires a slot before the round-trip and
 	// releases it after, except the inv write in invalidate, which must never
@@ -144,6 +148,10 @@ type CacheLayer struct {
 	// so this replica's writes must invalidate them. Reads stay disabled until
 	// restart.
 	recovery *bucketRecovery
+	// fence stops write-backs and seeding while another authorization model is
+	// announced. It is shared by every copy of the CacheLayer; nil means no
+	// fencing.
+	fence *modelFence
 }
 
 // bucketRecovery binds the cache bucket on demand after it was missing at
@@ -182,6 +190,17 @@ func (r *bucketRecovery) get(ctx context.Context) (INatsKeyValue, error) {
 		logger.InfoContext(ctx, "cache bucket found; writes now invalidate the cache, reads stay disabled until restart")
 	}
 	return r.bucket, nil
+}
+
+// withoutCacheUse returns a copy that no longer reads from, writes back to or
+// seeds the cache, but still writes invalidation markers to the same bucket. It
+// reuses the missing-bucket mode: no bucket for lookups, a recovery handle that
+// is already bound for invalidation.
+func (c CacheLayer) withoutCacheUse() CacheLayer {
+	if c.bucket == nil {
+		return c
+	}
+	return CacheLayer{recovery: &bucketRecovery{bucket: c.bucket}}
 }
 
 // invalidationBucket returns the bucket invalidate writes to, or nil when no
@@ -352,6 +371,10 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 	if c.bucket == nil || len(cacheKeys) == 0 {
 		return
 	}
+	if c.fence.isBlocked() {
+		cacheWriteBacksFenced.Add(int64(len(cacheKeys)))
+		return
+	}
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
 		trace.WithAttributes(attribute.Int("fga_sync.cache.seed.keys", len(cacheKeys))),
 	)
@@ -362,11 +385,17 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			timeoutCtx, cancel := context.WithTimeout(ctx, cacheWriteTimeout)
 			defer cancel()
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
 			_ = withCacheOpSlot(timeoutCtx, func() {
+				// Re-check: this write may have waited for a slot past a model
+				// announcement and the follow-up flush.
+				if c.fence.isBlocked() {
+					cacheWriteBacksFenced.Add(1)
+					return
+				}
 				_, _ = c.bucket.PutString(timeoutCtx, key, trueString)
 			})
 		}(cacheKey)
@@ -430,14 +459,21 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		// Append the result to our response message.
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
-		// Queue the cache write.
-		if shouldCache && c.bucket != nil {
+		// Queue the cache write, unless this replica's authorization model is
+		// not the announced one: see modelFence.
+		if shouldCache && c.bucket != nil && c.fence.isBlocked() {
+			cacheWriteBacksFenced.Add(1)
+		} else if shouldCache && c.bucket != nil {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
 			cacheKeys = append(cacheKeys, cacheKey)
 			cachedItems = append(cachedItems, req)
 			cachePuts = append(cachePuts, func(putParent context.Context) {
-				putCtx, cancel := context.WithTimeout(putParent, 5*time.Second)
+				if c.fence.isBlocked() {
+					cacheWriteBacksFenced.Add(1)
+					return
+				}
+				putCtx, cancel := context.WithTimeout(putParent, cacheWriteTimeout)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {

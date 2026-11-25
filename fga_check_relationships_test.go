@@ -43,6 +43,14 @@ func (k *perKeyErrorKV) Put(context.Context, string, []byte) (uint64, error) {
 	return 1, nil
 }
 
+func (k *perKeyErrorKV) Create(context.Context, string, []byte, ...jetstream.KVCreateOpt) (uint64, error) {
+	return 1, nil
+}
+
+func (k *perKeyErrorKV) Update(context.Context, string, []byte, uint64) (uint64, error) {
+	return 1, nil
+}
+
 func (k *perKeyErrorKV) PutString(context.Context, string, string) (uint64, error) {
 	return 1, nil
 }
@@ -289,6 +297,14 @@ func (k *concurrencyTrackingKV) Put(ctx context.Context, _ string, _ []byte) (ui
 	k.putCurrent--
 	k.mu.Unlock()
 
+	return 1, nil
+}
+
+func (k *concurrencyTrackingKV) Create(context.Context, string, []byte, ...jetstream.KVCreateOpt) (uint64, error) {
+	return 1, nil
+}
+
+func (k *concurrencyTrackingKV) Update(context.Context, string, []byte, uint64) (uint64, error) {
 	return 1, nil
 }
 
