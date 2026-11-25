@@ -116,6 +116,10 @@ type INatsKeyValue interface {
 	Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error)
 	Put(context.Context, string, []byte) (uint64, error)
 	PutString(context.Context, string, string) (uint64, error)
+	// Create and Update are the revision-checked writes. They return
+	// jetstream.ErrKeyExists when the key exists or has moved on from revision.
+	Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error)
+	Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error)
 }
 
 // FgaService coordinates FGA authorization checks and tuple synchronization.
@@ -177,7 +181,13 @@ func (s FgaService) announceModel(ctx context.Context) error {
 	if s.invalidation.mode != invalidationScoped || s.invalidation.modelID == "" {
 		return nil
 	}
-	var err error
+	var (
+		err        error
+		flushOnly  bool // the marker is written; only the flush is left
+		flushed    bool
+		modelID    = s.invalidation.modelID
+		attemptLog = logger.With("model_id", modelID)
+	)
 	for attempt := 0; attempt < modelAnnounceAttempts; attempt++ {
 		if attempt > 0 {
 			select {
@@ -186,8 +196,12 @@ func (s FgaService) announceModel(ctx context.Context) error {
 			case <-time.After(modelAnnounceRetryDelay):
 			}
 		}
-		var flushed bool
-		flushed, err = s.cache.announceModel(ctx, s.invalidation.modelID)
+		if flushOnly {
+			err = s.cache.invalidate(ctx, globalReasonModelAnnounce)
+			flushed = err == nil
+		} else {
+			flushed, err = s.cache.announceModel(ctx, modelID)
+		}
 		if err == nil {
 			if flushed {
 				s.cache.followUpFlush(ctx, modelFollowUpDelay)
@@ -197,7 +211,8 @@ func (s FgaService) announceModel(ctx context.Context) error {
 		if errors.Is(err, errOutdatedModel) {
 			return err
 		}
-		logger.With(errKey, err, "attempt", attempt+1).WarnContext(ctx, "could not announce authorization model")
+		flushOnly = flushOnly || errors.Is(err, errAnnounceFlushFailed)
+		attemptLog.With(errKey, err, "attempt", attempt+1).WarnContext(ctx, "could not announce authorization model")
 	}
 	return err
 }

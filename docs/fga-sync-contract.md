@@ -417,6 +417,11 @@ this itself, and access checks keep being answered throughout:
    `model_check_failed`). The fallback write has its own deadline. An old-model
    replica therefore writes globally as soon as the first new-model replica
    starts, and keeps doing so until it is replaced.
+   Every marker write is conditional on the revision just read, so a newer
+   announcement that lands in between is never overwritten: the write conflicts
+   and the marker is read again. If the marker is written but the flush fails,
+   the retry repeats only the flush, so the announcement is not reported complete
+   until the flush has succeeded.
 3. If a replica cannot record its announcement after 3 attempts, it logs an error
    and stops reading from and writing to the shared cache, because older
    replicas may keep scoping with an outdated graph. It still starts, answers

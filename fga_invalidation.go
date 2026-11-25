@@ -68,6 +68,9 @@ const (
 	// finished writing its scoped markers first.
 	modelFollowUpDelay = 10 * time.Second
 
+	// modelMarkerWriteAttempts bounds how often one announcement re-reads the
+	// marker after losing a race to another replica's write.
+	modelMarkerWriteAttempts = 5
 	// modelAnnounceAttempts is how many times startup tries to record the
 	// model announcement before degrading.
 	modelAnnounceAttempts = 3
@@ -518,6 +521,12 @@ func checkModelMarker(ctx context.Context, bucket INatsKeyValue, modelID string)
 // globally.
 var errOutdatedModel = errors.New("a newer authorization model has been announced")
 
+// errAnnounceFlushFailed means the model marker was written but the flush that
+// must follow it was not, so the announcement is not complete. Retrying the
+// whole announcement would see its own marker and skip the flush, so callers
+// retry only the flush.
+var errAnnounceFlushFailed = errors.New("announced the model but could not flush the cache")
+
 // announceModel records modelID as the authorization model in use. It reports
 // whether it flushed the cache.
 //
@@ -530,33 +539,55 @@ var errOutdatedModel = errors.New("a newer authorization model has been announce
 //     replica of an older model that restarts mid-rollout cannot take the marker
 //     back and re-enable scoped writes from its outdated graph.
 //
+// Every marker write is conditional on the revision just read (Create when
+// there was none), so a newer announcement that lands between the read and the
+// write is never overwritten: the write conflicts, the marker is read again and
+// the same rules apply.
+//
 // It is a no-op while no bucket exists. If the marker cannot be written the
 // flush still runs, but the error is returned so the caller can stop trusting
-// the shared cache.
+// the shared cache. If the flush after a written marker fails, the error wraps
+// errAnnounceFlushFailed.
 func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed bool, err error) {
 	bucket, err := c.invalidationBucket(ctx)
 	if err != nil || bucket == nil {
 		return false, err
 	}
-	entry, err := bucket.Get(ctx, modelMarkerKey)
-	switch {
-	case errors.Is(err, jetstream.ErrKeyNotFound):
-	case err != nil:
-		return false, fmt.Errorf("error reading model marker: %w", err)
-	case string(entry.Value()) > modelID:
-		return false, errOutdatedModel
-	case string(entry.Value()) == modelID:
-		if _, putErr := bucket.Put(ctx, modelMarkerKey, []byte(modelID)); putErr != nil {
-			logger.With(errKey, putErr).WarnContext(ctx, "could not refresh model marker")
+	for attempt := 0; attempt < modelMarkerWriteAttempts; attempt++ {
+		entry, getErr := bucket.Get(ctx, modelMarkerKey)
+		var putErr error
+		switch {
+		case errors.Is(getErr, jetstream.ErrKeyNotFound):
+			_, putErr = bucket.Create(ctx, modelMarkerKey, []byte(modelID))
+		case getErr != nil:
+			return false, fmt.Errorf("error reading model marker: %w", getErr)
+		case string(entry.Value()) > modelID:
+			return false, errOutdatedModel
+		case string(entry.Value()) == modelID:
+			_, putErr = bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+			if errors.Is(putErr, jetstream.ErrKeyExists) {
+				continue
+			}
+			if putErr != nil {
+				logger.With(errKey, putErr).WarnContext(ctx, "could not refresh model marker")
+			}
+			return false, nil
+		default:
+			_, putErr = bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
 		}
-		return false, nil
+		if errors.Is(putErr, jetstream.ErrKeyExists) {
+			continue // another replica announced first; read it again
+		}
+		flushErr := c.invalidate(ctx, globalReasonModelAnnounce)
+		if putErr != nil {
+			return true, fmt.Errorf("error writing model marker: %w", putErr)
+		}
+		if flushErr != nil {
+			return false, fmt.Errorf("%w: %w", errAnnounceFlushFailed, flushErr)
+		}
+		return true, nil
 	}
-	_, putErr := bucket.Put(ctx, modelMarkerKey, []byte(modelID))
-	flushErr := c.invalidate(ctx, globalReasonModelAnnounce)
-	if putErr != nil {
-		return true, fmt.Errorf("error writing model marker: %w", putErr)
-	}
-	return true, flushErr
+	return false, errors.New("model marker kept changing while announcing the model")
 }
 
 // followUpFlush bumps the global key once more after delay, so a write that

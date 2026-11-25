@@ -30,6 +30,14 @@ func (r *cacheWriteRecorder) Put(context.Context, string, []byte) (uint64, error
 	return 1, nil
 }
 
+func (r *cacheWriteRecorder) Create(context.Context, string, []byte, ...jetstream.KVCreateOpt) (uint64, error) {
+	return 1, nil
+}
+
+func (r *cacheWriteRecorder) Update(context.Context, string, []byte, uint64) (uint64, error) {
+	return 1, nil
+}
+
 func (r *cacheWriteRecorder) PutString(_ context.Context, key, _ string) (uint64, error) {
 	r.writes <- key
 	return 1, nil

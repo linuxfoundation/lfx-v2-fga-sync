@@ -481,8 +481,12 @@ type flakyKV struct {
 	// hangGet, when it returns true for a key, makes Get block until its
 	// context ends.
 	hangGet func(key string) bool
-	gets    atomic.Int64
-	getKeys sync.Map
+	// afterGet, when set, runs after every Get has read its entry and before
+	// the caller sees it, so a test can land another replica's write in the
+	// window between a read and the conditional write that follows it.
+	afterGet func(key string)
+	gets     atomic.Int64
+	getKeys  sync.Map
 }
 
 func (f *flakyKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
@@ -497,24 +501,49 @@ func (f *flakyKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry,
 			return nil, err
 		}
 	}
-	return f.MockKeyValue.Get(ctx, key)
+	entry, err := f.MockKeyValue.Get(ctx, key)
+	if f.afterGet != nil {
+		f.afterGet(key)
+	}
+	return entry, err
 }
 
-func (f *flakyKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+// beforeWrite applies the injected write failures shared by Put, Create and
+// Update.
+func (f *flakyKV) beforeWrite(ctx context.Context, key string) error {
 	if f.hangPut != nil && f.hangPut(key) {
 		<-ctx.Done()
-		return 0, ctx.Err()
+		return ctx.Err()
 	}
 	// A real KV write fails on a finished context.
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return err
 	}
 	if f.failPut != nil {
-		if err := f.failPut(key); err != nil {
-			return 0, err
-		}
+		return f.failPut(key)
+	}
+	return nil
+}
+
+func (f *flakyKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if err := f.beforeWrite(ctx, key); err != nil {
+		return 0, err
 	}
 	return f.MockKeyValue.Put(ctx, key, value)
+}
+
+func (f *flakyKV) Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error) {
+	if err := f.beforeWrite(ctx, key); err != nil {
+		return 0, err
+	}
+	return f.MockKeyValue.Create(ctx, key, value, opts...)
+}
+
+func (f *flakyKV) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	if err := f.beforeWrite(ctx, key); err != nil {
+		return 0, err
+	}
+	return f.MockKeyValue.Update(ctx, key, value, revision)
 }
 
 func (f *flakyKV) PutString(ctx context.Context, key, value string) (uint64, error) {
@@ -1621,6 +1650,87 @@ func TestAnnounceModel(t *testing.T) {
 		assert.True(t, kv.written(globalInvalidationKey), "the flush still runs")
 	})
 
+	// racing lands another replica's marker write between the announcement's
+	// read and its conditional write, by running after the nth Get of the marker.
+	racing := func(kv *flakyKV, writes ...string) {
+		var gets atomic.Int64
+		kv.afterGet = func(key string) {
+			if key != modelMarkerKey {
+				return
+			}
+			if n := int(gets.Add(1)); n <= len(writes) {
+				_, err := kv.MockKeyValue.Put(ctx, modelMarkerKey, []byte(writes[n-1]))
+				require.NoError(t, err)
+			}
+		}
+	}
+
+	t.Run("a newer announcement landing after a missing-marker read is not overwritten", func(t *testing.T) {
+		kv := newFlakyKV()
+		racing(kv, "m-3")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorIs(t, err, errOutdatedModel)
+		assert.False(t, flushed)
+		assert.Equal(t, "m-3", markerValue(t, kv))
+		assert.False(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("a newer announcement landing after an older-marker read is not overwritten", func(t *testing.T) {
+		kv := newFlakyKV()
+		marker(t, kv, "m-1")
+		racing(kv, "m-3")
+		_, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorIs(t, err, errOutdatedModel)
+		assert.Equal(t, "m-3", markerValue(t, kv))
+		assert.False(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("a newer announcement landing after a same-model read is not overwritten by the refresh", func(t *testing.T) {
+		kv := newFlakyKV()
+		marker(t, kv, "m-2")
+		racing(kv, "m-3")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorIs(t, err, errOutdatedModel)
+		assert.False(t, flushed)
+		assert.Equal(t, "m-3", markerValue(t, kv))
+	})
+
+	t.Run("an older announcement landing first is replaced after re-reading", func(t *testing.T) {
+		kv := newFlakyKV()
+		racing(kv, "m-1")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.NoError(t, err)
+		assert.True(t, flushed)
+		assert.Equal(t, "m-2", markerValue(t, kv))
+		assert.True(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("gives up when the marker keeps changing", func(t *testing.T) {
+		kv := newFlakyKV()
+		writes := make([]string, modelMarkerWriteAttempts)
+		for i := range writes {
+			writes[i] = "m-1"
+		}
+		racing(kv, writes...)
+		_, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorContains(t, err, "kept changing")
+		assert.False(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("a failed flush after the marker is written is reported as incomplete", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.failPut = func(key string) error {
+			if key == globalInvalidationKey {
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorIs(t, err, errAnnounceFlushFailed)
+		assert.False(t, flushed)
+		assert.Equal(t, "m-2", markerValue(t, kv))
+	})
+
 	t.Run("is a no-op while no bucket exists", func(t *testing.T) {
 		cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
 			return nil, jetstream.ErrBucketNotFound
@@ -1715,6 +1825,27 @@ func TestAnnounceModelRetries(t *testing.T) {
 		require.NoError(t, svc.announceModel(ctx))
 		assert.Equal(t, int64(3), failures.Load())
 		assert.True(t, kv.written(modelMarkerKey))
+	})
+
+	t.Run("retries only the flush when the marker was written but the flush failed", func(t *testing.T) {
+		kv := newFlakyKV()
+		var markerWrites, flushAttempts atomic.Int64
+		kv.failPut = func(key string) error {
+			switch key {
+			case modelMarkerKey:
+				markerWrites.Add(1)
+			case globalInvalidationKey:
+				if flushAttempts.Add(1) == 1 {
+					return errors.New("kv down")
+				}
+			}
+			return nil
+		}
+		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		require.NoError(t, svc.announceModel(ctx))
+		assert.True(t, kv.written(globalInvalidationKey), "the flush that failed is retried, not skipped")
+		assert.Equal(t, int64(1), markerWrites.Load(), "the marker is not written again")
+		assert.Equal(t, int64(2), flushAttempts.Load())
 	})
 
 	t.Run("gives up after the configured attempts", func(t *testing.T) {
