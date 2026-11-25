@@ -457,6 +457,14 @@ from OpenFGA otherwise.
 - **What clears the gap.** Whatever an outdated replica wrote before its next
   poll is cleared by the follow-up flush, 10 seconds after the announcement. It
   is retried up to 3 times and logs an error if it gives up.
+- **The residual window.** For up to about 10 seconds after an announcement, a
+  new-model replica can serve an answer that an old-model replica cached just
+  before it noticed (its poll can lag by up to 2 seconds, and the follow-up flush
+  runs after that). The announcement flushes before it writes the marker so that
+  the marker only ever means the flush completed. That leaves the old replicas
+  unfenced for the gap between those two back-to-back writes, which is far
+  shorter than the poll lag, so ordering them the other way would not shrink the
+  window.
 
 No manual `inv` write is needed after a model change once every replica runs this
 version, with two exceptions. A replica running an older version does not fence,
