@@ -253,7 +253,7 @@ func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- cache.invalidate(context.Background())
+		done <- cache.invalidate(context.Background(), globalReasonModeGlobal)
 	}()
 
 	select {
@@ -277,13 +277,13 @@ func TestCacheLayerNilBucket(t *testing.T) {
 	assert.NotPanics(t, func() {
 		cache.seedPositiveEntries(ctx, []string{"rel.KEY1", "rel.KEY2"})
 	})
-	require.NoError(t, cache.invalidate(ctx))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
 
 	lastInvalidation, err := cache.getLastInvalidation(ctx)
 	require.NoError(t, err)
 	assert.True(t, lastInvalidation.IsZero())
 
-	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	outcome := cache.lookupEntry(ctx, tuple, invalidationCutoff{})
 	assert.True(t, outcome.needsCheck)
 	assert.Equal(t, cacheOutcomeMiss, outcome.kind)
 
@@ -291,7 +291,7 @@ func TestCacheLayerNilBucket(t *testing.T) {
 	assert.NotPanics(t, func() {
 		message = cache.buildResponseAndWriteBack(ctx, nil,
 			map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}},
-			map[string]client.ClientBatchCheckItem{"1": tuple}, time.Time{})
+			map[string]client.ClientBatchCheckItem{"1": tuple}, invalidationCutoffs{}, false)
 	})
 	assert.Equal(t, "project:example#viewer@user:example-user\ttrue\n", string(message))
 }
@@ -309,17 +309,17 @@ func TestCacheLayerRecoversBucketForInvalidation(t *testing.T) {
 		return bound, nil
 	}}}
 
-	require.NoError(t, cache.invalidate(ctx), "a still-missing bucket is not an error")
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal), "a still-missing bucket is not an error")
 	assert.Empty(t, kv.puts)
 
 	bound = kv
-	require.NoError(t, cache.invalidate(ctx))
-	require.NoError(t, cache.invalidate(ctx))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
 	assert.Equal(t, []string{"inv", "inv"}, kv.puts)
 	assert.Equal(t, 2, binds, "the bucket is bound once and then reused")
 
 	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
-	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	outcome := cache.lookupEntry(ctx, tuple, invalidationCutoff{})
 	assert.Equal(t, cacheOutcomeMiss, outcome.kind, "reads stay disabled after recovery")
 	cache.seedPositiveEntries(ctx, []string{"rel.KEY1"})
 	assert.Equal(t, []string{"inv", "inv"}, kv.puts, "seeding stays disabled after recovery")
@@ -338,7 +338,7 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 		wg.Add(1)
 		go func(cache CacheLayer) {
 			defer wg.Done()
-			assert.NoError(t, cache.invalidate(context.Background()))
+			assert.NoError(t, cache.invalidate(context.Background(), globalReasonModeGlobal))
 		}(shared)
 	}
 	wg.Wait()
@@ -350,7 +350,8 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 // clockKV is an in-memory bucket whose creation times come from a counter, so
 // the order of writes is exact. onRelPut, when set, runs before each write of a
 // relation key. Reads of inv fail once more than invGetsOK have succeeded.
-// With deleteBlocks, Delete waits until its context is done.
+// With deleteBlocks, Delete waits until its context is done. The first read
+// of failOnce fails.
 type clockKV struct {
 	mu           sync.Mutex
 	tick         int
@@ -360,6 +361,7 @@ type clockKV struct {
 	deleteBlocks bool
 	invGets      int
 	invGetsOK    int
+	failOnce     string
 }
 
 func newClockKV() *clockKV { return &clockKV{entries: map[string]fixedEntry{}} }
@@ -372,6 +374,10 @@ func (k *clockKV) Get(_ context.Context, key string) (jetstream.KeyValueEntry, e
 		if k.invGetsOK > 0 && k.invGets > k.invGetsOK {
 			return nil, assert.AnError
 		}
+	}
+	if key == k.failOnce {
+		k.failOnce = ""
+		return nil, assert.AnError
 	}
 	entry, ok := k.entries[key]
 	if !ok {
@@ -432,21 +438,27 @@ func (k *clockKV) relEntries() int {
 // answer back. The next check must not be answered "allowed" from the cache.
 func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 	tuple := client.ClientCheckRequest{User: "user:example-user", Relation: "viewer", Object: "project:example"}
-	revoke := func(kv *clockKV) func() {
+	revoke := func(kv *clockKV, marker string) func() {
+		if marker == "" {
+			marker = "inv"
+		}
 		var once sync.Once
 		return func() {
-			once.Do(func() { _, _ = kv.Put(context.Background(), "inv", []byte("1")) })
+			once.Do(func() { _, _ = kv.Put(context.Background(), marker, []byte("1")) })
 		}
 	}
 
 	tests := []struct {
 		name            string
+		mode            invalidationMode
+		marker          string
 		existingMarker  bool
 		revokeInCheck   bool
 		revokeInWrite   bool
 		deleteErr       error
 		deleteBlocks    bool
 		invGetsOK       int
+		failOnce        string
 		wantCached      bool
 		wantNoRelWrites bool
 	}{
@@ -459,6 +471,26 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 		{name: "invalidation during the write-back, delete times out", revokeInWrite: true, deleteBlocks: true},
 		{name: "marker re-read fails before the write-back", invGetsOK: 1, wantNoRelWrites: true},
 		{name: "marker re-read fails after the write-back", invGetsOK: 2, wantNoRelWrites: true},
+		{
+			name: "scoped mode, type marker moves while OpenFGA answers", mode: invalidationScoped,
+			marker: typeMarkerKey("project"), revokeInCheck: true,
+		},
+		{
+			name: "scoped mode, user marker moves while OpenFGA answers", mode: invalidationScoped,
+			marker: userMarkerKey("project", tuple.User), revokeInCheck: true,
+		},
+		{
+			name: "scoped mode, user marker moves during the write-back", mode: invalidationScoped,
+			marker: userMarkerKey("project", tuple.User), revokeInWrite: true,
+		},
+		{
+			name: "scoped mode, another user's marker moves", mode: invalidationScoped,
+			marker: userMarkerKey("project", "user:other-user"), revokeInCheck: true, wantCached: true,
+		},
+		{
+			name: "scoped mode, type marker unreadable at lookup", mode: invalidationScoped,
+			failOnce: typeMarkerKey("project"), wantNoRelWrites: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -468,6 +500,7 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 			kv.deleteErr = tt.deleteErr
 			kv.deleteBlocks = tt.deleteBlocks
 			kv.invGetsOK = tt.invGetsOK
+			kv.failOnce = tt.failOnce
 			if tt.deleteBlocks {
 				timeout := writeBackCleanupTimeout
 				writeBackCleanupTimeout = 50 * time.Millisecond
@@ -477,7 +510,7 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 				_, _ = kv.Put(ctx, "inv", []byte("1"))
 			}
 			if tt.revokeInWrite {
-				kv.onRelPut = revoke(kv)
+				kv.onRelPut = revoke(kv, tt.marker)
 			}
 
 			fgaClient := new(MockFgaClient)
@@ -486,9 +519,9 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 					"1": {Allowed: openfga.PtrBool(true)},
 				}}, nil)
 			if tt.revokeInCheck {
-				call.Run(func(mock.Arguments) { revoke(kv)() })
+				call.Run(func(mock.Arguments) { revoke(kv, tt.marker)() })
 			}
-			service := newFgaService(fgaClient, kv, true)
+			service := newFgaService(fgaClient, kv, true).withInvalidation(tt.mode, nil)
 
 			result, err := service.CheckRelationships(ctx, []client.ClientCheckRequest{tuple})
 			require.NoError(t, err, "the guard must never fail the check")
@@ -500,9 +533,9 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 			}
 			lastInvalidation, err := service.cache.getLastInvalidation(ctx)
 			require.NoError(t, err)
-			outcome := service.cache.lookupEntry(ctx,
-				client.ClientBatchCheckItem{User: tuple.User, Relation: tuple.Relation, Object: tuple.Object},
-				lastInvalidation)
+			item := client.ClientBatchCheckItem{User: tuple.User, Relation: tuple.Relation, Object: tuple.Object}
+			cutoffs := service.cache.loadInvalidationCutoffs(ctx, lastInvalidation, []client.ClientBatchCheckItem{item})
+			outcome := service.cache.lookupEntry(ctx, item, cutoffs.cutoffFor(item))
 			cachedAllowed := outcome.kind == cacheOutcomeHit && strings.HasSuffix(string(outcome.hitLine), "\ttrue\n")
 			assert.Equal(t, tt.wantCached, cachedAllowed, "cached allowed")
 		})
@@ -514,6 +547,6 @@ func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	}}}
 
-	err := cache.invalidate(context.Background())
+	err := cache.invalidate(context.Background(), globalReasonModeGlobal)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }

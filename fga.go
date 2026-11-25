@@ -127,9 +127,51 @@ type INatsKeyValue interface {
 //
 // Construct with newFgaService; do not use struct literals in new code.
 type FgaService struct {
-	store    TupleStore
-	cache    CacheLayer
-	useCache bool
+	store        TupleStore
+	cache        CacheLayer
+	useCache     bool
+	invalidation invalidationConfig
+}
+
+// withInvalidation returns a copy of the service that scopes cache
+// invalidation per mode. graph may be nil, in which case writes stay global
+// whatever the mode.
+func (s FgaService) withInvalidation(mode invalidationMode, graph *modelGraph) FgaService {
+	s.invalidation = invalidationConfig{mode: mode, graph: graph}
+	return s
+}
+
+// invalidationPlan decides which cache markers a write must bump. It is the
+// global plan unless scoped writes are enabled and the model graph can vouch
+// for a narrower one.
+func (s FgaService) invalidationPlan(
+	writes []ClientTupleKey,
+	deletes []ClientTupleKeyWithoutCondition,
+) invalidationPlan {
+	if !s.invalidation.writesScoped() {
+		if s.invalidation.mode == invalidationScoped {
+			return globalPlanFor(globalReasonNoGraph)
+		}
+		return globalPlanFor(globalReasonModeGlobal)
+	}
+	return s.invalidation.graph.planInvalidation(tupleRefs(writes, deletes))
+}
+
+// recordLookupOutcomes sets the hit, stale-hit and miss counts on a
+// fga_sync.cache.lookup span. Stale hits are also broken down by the marker
+// that caused them, so a burst can be told apart as a scoped write (type or
+// user marker) or a global one.
+func recordLookupOutcomes(span trace.Span, hits, staleHits, misses int, staleByKind map[markerKind]int) {
+	span.SetAttributes(
+		attribute.Int("fga_sync.cache.lookup.hits", hits),
+		attribute.Int("fga_sync.cache.lookup.stale_hits", staleHits),
+		attribute.Int("fga_sync.cache.lookup.misses", misses),
+	)
+	for _, kind := range staleMarkerKinds {
+		if n := staleByKind[kind]; n > 0 {
+			span.SetAttributes(attribute.Int("fga_sync.cache.lookup.stale_hits."+string(kind), n))
+		}
+	}
 }
 
 // newFgaService creates a FgaService with the given FGA client, JetStream KV
@@ -224,7 +266,7 @@ func (s FgaService) WriteAndDeleteTuples(
 		// (e.g. expired deadline after batch 1 committed) cannot block the Put.
 		invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer invCancel()
-		if err := s.cache.invalidate(invCtx); err != nil {
+		if err := s.cache.applyInvalidation(invCtx, s.invalidationPlan(writes, deletes)); err != nil {
 			// Log but don't fail; the write result is already determined.
 			logger.With(errKey, err).WarnContext(ctx, "cache invalidation failed")
 		}
@@ -472,7 +514,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	// With the cache disabled the write-back has no invalidation read to guard
 	// against, so answers are not written back.
 	writeBack := CacheLayer{}
-	var lastInvalidation time.Time
+	var cutoffs invalidationCutoffs
 	if !s.useCache {
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
@@ -481,8 +523,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// Get the most recent cache invalidation. Only read when the cache is
 		// enabled: the read holds a cacheOpSem slot, and its result is unused
 		// otherwise.
-		var err error
-		lastInvalidation, err = s.cache.getLastInvalidation(ctx)
+		lastInvalidation, err := s.cache.getLastInvalidation(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -497,15 +538,22 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		// so overall response order is not guaranteed and callers must not
 		// rely on it.
 		lookupCtx, lookupSpan := tracer.Start(ctx, "fga_sync.cache.lookup",
-			trace.WithAttributes(attribute.Int("fga_sync.cache.lookup.requested", len(tupleItems))),
+			trace.WithAttributes(
+				attribute.Int("fga_sync.cache.lookup.requested", len(tupleItems)),
+				attribute.String("fga_sync.cache.invalidation_mode", s.invalidation.mode.String()),
+			),
 		)
 
+		cutoffs = invalidationCutoffs{global: lastInvalidation}
+		if s.invalidation.readsScoped() {
+			cutoffs = s.cache.loadInvalidationCutoffs(lookupCtx, lastInvalidation, tupleItems)
+		}
 		outcomes := make([]cacheLookupOutcome, len(tupleItems))
 		g, gctx := errgroup.WithContext(lookupCtx)
 		g.SetLimit(cacheLookupConcurrency)
 		for i, tuple := range tupleItems {
 			g.Go(func() error {
-				outcomes[i] = s.cache.lookupEntry(gctx, tuple, lastInvalidation)
+				outcomes[i] = s.cache.lookupEntry(gctx, tuple, cutoffs.cutoffFor(tuple))
 				return nil
 			})
 		}
@@ -516,12 +564,14 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		}
 
 		var hits, staleHits, misses int
+		staleByKind := make(map[markerKind]int)
 		for i, outcome := range outcomes {
 			switch outcome.kind {
 			case cacheOutcomeHit:
 				hits++
 			case cacheOutcomeStaleHit:
 				staleHits++
+				staleByKind[outcome.staleBy]++
 			default:
 				misses++
 			}
@@ -531,11 +581,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 			}
 			message = append(message, outcome.hitLine...)
 		}
-		lookupSpan.SetAttributes(
-			attribute.Int("fga_sync.cache.lookup.hits", hits),
-			attribute.Int("fga_sync.cache.lookup.stale_hits", staleHits),
-			attribute.Int("fga_sync.cache.lookup.misses", misses),
-		)
+		recordLookupOutcomes(lookupSpan, hits, staleHits, misses, staleByKind)
 		lookupSpan.End()
 	}
 
@@ -575,7 +621,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 
 	// Assemble result lines and fan out cache write-backs.
 	message = writeBack.buildResponseAndWriteBack(
-		ctx, message, *batchResp.Result, mapCorrelationIDToTuple, lastInvalidation,
+		ctx, message, *batchResp.Result, mapCorrelationIDToTuple, cutoffs, s.invalidation.readsScoped(),
 	)
 
 	if len(message) < 1 {

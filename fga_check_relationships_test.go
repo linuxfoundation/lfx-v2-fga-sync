@@ -392,7 +392,7 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 
 	start := time.Now()
 	message := service.cache.buildResponseAndWriteBack(
-		context.Background(), nil, result, mapCorrelationIDToTuple, time.Time{},
+		context.Background(), nil, result, mapCorrelationIDToTuple, invalidationCutoffs{}, false,
 	)
 	elapsed := time.Since(start)
 

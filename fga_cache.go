@@ -126,6 +126,8 @@ type cacheLookupOutcome struct {
 	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
+	// staleBy names the marker that made a stale hit stale; empty otherwise.
+	staleBy markerKind
 }
 
 // CacheLayer wraps the JetStream KV bucket and owns all cache operations:
@@ -199,21 +201,35 @@ func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, erro
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
 // no-op while no bucket exists.
-func (c CacheLayer) invalidate(ctx context.Context) error {
+// reason says why the write is global rather than scoped (one of the
+// globalReason constants); it is recorded on the span, and logged unless the
+// service is simply running in global mode.
+func (c CacheLayer) invalidate(ctx context.Context, reason string) error {
 	bucket, err := c.invalidationBucket(ctx)
 	if err != nil || bucket == nil {
 		return err
 	}
 
-	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeGlobal),
+			attribute.Int("fga_sync.cache.invalidate.markers", 1),
+			attribute.String("fga_sync.cache.invalidate.reason", reason),
+		),
+	)
 	defer span.End()
 
 	_, err = bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+		logger.With(errKey, err, "reason", reason).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
+	}
+	if reason != globalReasonModeGlobal {
+		// Scoping was expected but a write fell back to the global marker:
+		// worth an info line, since it widens what gets invalidated.
+		logger.With("reason", reason).InfoContext(ctx, "wrote global cache invalidation marker")
 	}
 	return nil
 }
@@ -252,7 +268,7 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	cutoff invalidationCutoff,
 ) cacheLookupOutcome {
 	if c.bucket == nil {
 		cacheMisses.Add(1)
@@ -288,20 +304,21 @@ func (c CacheLayer) lookupEntry(
 
 	// Cache entry was found. If the cache entry is older than the invalidation
 	// timestamp, skip it.
-	if lastInvalidation.After(entry.Created()) {
+	if cutoff.at.After(entry.Created()) {
 		logger.With(
 			"relation_key", relationKey,
-			"last_invalidation", lastInvalidation,
+			"last_invalidation", cutoff.at,
+			"marker_kind", string(cutoff.kind),
 			"entry_created", entry.Created(),
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true, staleBy: cutoff.kind}
 	}
 
 	logger.With(
 		"relation_key", relationKey,
-		"last_invalidation", lastInvalidation,
+		"last_invalidation", cutoff.at,
 		"entry_created", entry.Created(),
 		"entry_value", string(entry.Value()),
 	).DebugContext(ctx, "cache hit")
@@ -366,17 +383,20 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 // run at once, not whether the reply waits for them. With a nil bucket the
 // result lines are still assembled and no write-backs are queued.
 //
-// lastInvalidation is the marker read before the cache lookup; writeBack
-// uses it to drop answers that an invalidation has overtaken.
+// before holds the invalidation cutoffs the cache lookup used, and scoped
+// whether they include scoped markers; writeBack uses them to drop answers
+// that an invalidation has overtaken.
 func (c CacheLayer) buildResponseAndWriteBack(
 	ctx context.Context,
 	message []byte,
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	before invalidationCutoffs,
+	scoped bool,
 ) []byte {
-	cachePuts := make([]func(), 0, len(result))
+	cachePuts := make([]func(context.Context), 0, len(result))
 	cacheKeys := make([]string, 0, len(result))
+	cachedItems := make([]ClientBatchCheckItem, 0, len(result))
 
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -413,15 +433,16 @@ func (c CacheLayer) buildResponseAndWriteBack(
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
 			cacheKeys = append(cacheKeys, cacheKey)
-			cachePuts = append(cachePuts, func() {
-				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			cachedItems = append(cachedItems, req)
+			cachePuts = append(cachePuts, func(putParent context.Context) {
+				putCtx, cancel := context.WithTimeout(putParent, 5*time.Second)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
-						logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+						logger.With(errKey, err).ErrorContext(putCtx, "failed to cache relation")
 					}
 				}); slotErr != nil {
-					logger.With(errKey, slotErr).ErrorContext(ctx, "failed to cache relation")
+					logger.With(errKey, slotErr).ErrorContext(putCtx, "failed to cache relation")
 				}
 			})
 		}
@@ -431,7 +452,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		putCtx, putSpan := tracer.Start(ctx, "fga_sync.cache.write_back",
 			trace.WithAttributes(attribute.Int("fga_sync.cache.write_back.puts", len(cachePuts))),
 		)
-		discarded, err := c.writeBack(putCtx, lastInvalidation, cachePuts, cacheKeys)
+		discarded, err := c.writeBack(putCtx, before, scoped, cachedItems, cachePuts, cacheKeys)
 		putSpan.SetAttributes(attribute.Bool("fga_sync.cache.write_back.discarded", discarded))
 		if err != nil {
 			putSpan.RecordError(err)
@@ -442,28 +463,47 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	return message
 }
 
-// writeBack runs the queued cache writes unless an invalidation has landed
-// since lastInvalidation, and removes them if one lands while they run. An
+// writeBack runs the queued cache writes unless the cutoff of any written item
+// has moved past before, and removes them if one moves while they run. An
 // entry written after an invalidation looks fresh, so an answer from before a
-// revocation would otherwise outlive it. A marker that cannot be read counts
-// as moved. It reports whether the answers were discarded, and the error of
-// the marker write when removing them failed.
+// revocation would otherwise outlive it. It reports whether the answers were
+// discarded, and the error of the marker write when removing them failed.
 func (c CacheLayer) writeBack(
-	ctx context.Context, lastInvalidation time.Time, puts []func(), keys []string,
+	ctx context.Context, before invalidationCutoffs, scoped bool,
+	items []ClientBatchCheckItem, puts []func(context.Context), keys []string,
 ) (bool, error) {
-	if c.invalidatedSince(ctx, lastInvalidation) {
+	if c.invalidatedSince(ctx, before, scoped, items) {
 		return true, nil
 	}
-	runBounded(ctx, len(puts), func(i int) { puts[i]() })
-	if !c.invalidatedSince(ctx, lastInvalidation) {
+	runBounded(ctx, len(puts), func(putCtx context.Context, i int) { puts[i](putCtx) })
+	if !c.invalidatedSince(ctx, before, scoped, items) {
 		return false, nil
 	}
 	return true, c.removeWriteBack(ctx, keys)
 }
 
-func (c CacheLayer) invalidatedSince(ctx context.Context, since time.Time) bool {
-	current, err := c.getLastInvalidation(ctx)
-	return err != nil || current.After(since)
+// invalidatedSince re-reads the markers before was built from and reports
+// whether any item's cutoff has moved. A marker that cannot be read, now or
+// when before was built, counts as moved: with no baseline, a revocation
+// since the check started cannot be ruled out.
+func (c CacheLayer) invalidatedSince(
+	ctx context.Context, before invalidationCutoffs, scoped bool, items []ClientBatchCheckItem,
+) bool {
+	global, err := c.getLastInvalidation(ctx)
+	if err != nil {
+		return true
+	}
+	current := invalidationCutoffs{global: global}
+	if scoped {
+		current = c.loadInvalidationCutoffs(ctx, global, items)
+	}
+	for _, item := range items {
+		was, now := before.cutoffFor(item), current.cutoffFor(item)
+		if was.kind == markerKindUnreadable || now.kind == markerKindUnreadable || now.at.After(was.at) {
+			return true
+		}
+	}
+	return false
 }
 
 // removeWriteBack deletes written answers, and writes the marker only if a
@@ -475,7 +515,7 @@ func (c CacheLayer) removeWriteBack(ctx context.Context, keys []string) error {
 	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
 	defer cancel()
 	var deleted atomic.Int64
-	runBounded(deleteCtx, len(keys), func(i int) {
+	runBounded(deleteCtx, len(keys), func(_ context.Context, i int) {
 		var err error
 		slotErr := withCacheOpSlot(deleteCtx, func() { err = c.bucket.Delete(deleteCtx, keys[i]) })
 		if slotErr == nil && err == nil {
@@ -488,13 +528,13 @@ func (c CacheLayer) removeWriteBack(ctx context.Context, keys []string) error {
 	logger.WarnContext(ctx, "could not remove cache write-back overtaken by an invalidation; invalidating the cache")
 	invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
 	defer invCancel()
-	return c.invalidate(invCtx)
+	return c.invalidate(invCtx, globalReasonWriteBackCleanup)
 }
 
 // runBounded calls fn for each index in [0, n), at most cacheLookupConcurrency
 // at a time, and returns when all calls are done. Calls not yet started when
 // ctx is done are skipped.
-func runBounded(ctx context.Context, n int, fn func(int)) {
+func runBounded(ctx context.Context, n int, fn func(context.Context, int)) {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(cacheLookupConcurrency)
 	for i := range n {
@@ -502,7 +542,7 @@ func runBounded(ctx context.Context, n int, fn func(int)) {
 			select {
 			case <-gctx.Done():
 			default:
-				fn(i)
+				fn(gctx, i)
 			}
 			return nil
 		})
