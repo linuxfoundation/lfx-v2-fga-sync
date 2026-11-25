@@ -67,6 +67,10 @@ var (
 	// stay identical. Change them in both repos and upgrade both services together.
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+	// cacheWriteTimeout bounds one write-back or seed write to the shared cache.
+	// modelFollowUpDelay is derived from it.
+	cacheWriteTimeout = 5 * time.Second
+
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
 	// KV Get/Put in this file acquires a slot before the round-trip and
 	// releases it after, except the inv write in invalidate, which must never
@@ -117,6 +121,8 @@ type cacheLookupOutcome struct {
 	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
+	// staleBy names the marker that made a stale hit stale; empty otherwise.
+	staleBy markerKind
 }
 
 // CacheLayer wraps the JetStream KV bucket and owns all cache operations:
@@ -131,6 +137,10 @@ type CacheLayer struct {
 	// so this replica's writes must invalidate them. Reads stay disabled until
 	// restart.
 	recovery *bucketRecovery
+	// fence stops write-backs and seeding while another authorization model is
+	// announced. It is shared by every copy of the CacheLayer; nil means no
+	// fencing.
+	fence *modelFence
 }
 
 // bucketRecovery binds the cache bucket on demand after it was missing at
@@ -171,6 +181,17 @@ func (r *bucketRecovery) get(ctx context.Context) (INatsKeyValue, error) {
 	return r.bucket, nil
 }
 
+// withoutCacheUse returns a copy that no longer reads from, writes back to or
+// seeds the cache, but still writes invalidation markers to the same bucket. It
+// reuses the missing-bucket mode: no bucket for lookups, a recovery handle that
+// is already bound for invalidation.
+func (c CacheLayer) withoutCacheUse() CacheLayer {
+	if c.bucket == nil {
+		return c
+	}
+	return CacheLayer{recovery: &bucketRecovery{bucket: c.bucket}}
+}
+
 // invalidationBucket returns the bucket invalidate writes to, or nil when no
 // bucket exists.
 func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, error) {
@@ -188,21 +209,35 @@ func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, erro
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
 // no-op while no bucket exists.
-func (c CacheLayer) invalidate(ctx context.Context) error {
+// reason says why the write is global rather than scoped (one of the
+// globalReason constants); it is recorded on the span, and logged unless the
+// service is simply running in global mode.
+func (c CacheLayer) invalidate(ctx context.Context, reason string) error {
 	bucket, err := c.invalidationBucket(ctx)
 	if err != nil || bucket == nil {
 		return err
 	}
 
-	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeGlobal),
+			attribute.Int("fga_sync.cache.invalidate.markers", 1),
+			attribute.String("fga_sync.cache.invalidate.reason", reason),
+		),
+	)
 	defer span.End()
 
 	_, err = bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+		logger.With(errKey, err, "reason", reason).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
+	}
+	if reason != globalReasonModeGlobal {
+		// Scoping was expected but a write fell back to the global marker:
+		// worth an info line, since it widens what gets invalidated.
+		logger.With("reason", reason).InfoContext(ctx, "wrote global cache invalidation marker")
 	}
 	return nil
 }
@@ -241,7 +276,7 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	cutoff invalidationCutoff,
 ) cacheLookupOutcome {
 	if c.bucket == nil {
 		cacheMisses.Add(1)
@@ -277,20 +312,21 @@ func (c CacheLayer) lookupEntry(
 
 	// Cache entry was found. If the cache entry is older than the invalidation
 	// timestamp, skip it.
-	if lastInvalidation.After(entry.Created()) {
+	if cutoff.at.After(entry.Created()) {
 		logger.With(
 			"relation_key", relationKey,
-			"last_invalidation", lastInvalidation,
+			"last_invalidation", cutoff.at,
+			"marker_kind", string(cutoff.kind),
 			"entry_created", entry.Created(),
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true, staleBy: cutoff.kind}
 	}
 
 	logger.With(
 		"relation_key", relationKey,
-		"last_invalidation", lastInvalidation,
+		"last_invalidation", cutoff.at,
 		"entry_created", entry.Created(),
 		"entry_value", string(entry.Value()),
 	).DebugContext(ctx, "cache hit")
@@ -322,6 +358,10 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 	if c.bucket == nil || len(cacheKeys) == 0 {
 		return
 	}
+	if c.fence.isBlocked() {
+		cacheWriteBacksFenced.Add(int64(len(cacheKeys)))
+		return
+	}
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.seed",
 		trace.WithAttributes(attribute.Int("fga_sync.cache.seed.keys", len(cacheKeys))),
 	)
@@ -332,11 +372,17 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			timeoutCtx, cancel := context.WithTimeout(ctx, cacheWriteTimeout)
 			defer cancel()
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
 			_ = withCacheOpSlot(timeoutCtx, func() {
+				// Re-check: this write may have waited for a slot past a model
+				// announcement and the follow-up flush.
+				if c.fence.isBlocked() {
+					cacheWriteBacksFenced.Add(1)
+					return
+				}
 				_, _ = c.bucket.PutString(timeoutCtx, key, trueString)
 			})
 		}(cacheKey)
@@ -360,7 +406,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
 ) []byte {
-	cachePuts := make([]func() error, 0, len(result))
+	cachePuts := make([]func(context.Context) error, 0, len(result))
 
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -392,19 +438,26 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		// Append the result to our response message.
 		message = append(message, []byte(relationKey+"\t"+allowed+"\n")...)
 
-		// Queue the cache write.
-		if shouldCache && c.bucket != nil {
+		// Queue the cache write, unless this replica's authorization model is
+		// not the announced one: see modelFence.
+		if shouldCache && c.bucket != nil && c.fence.isBlocked() {
+			cacheWriteBacksFenced.Add(1)
+		} else if shouldCache && c.bucket != nil {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
-			cachePuts = append(cachePuts, func() error {
-				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			cachePuts = append(cachePuts, func(putParent context.Context) error {
+				if c.fence.isBlocked() {
+					cacheWriteBacksFenced.Add(1)
+					return nil
+				}
+				putCtx, cancel := context.WithTimeout(putParent, cacheWriteTimeout)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
-						logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+						logger.With(errKey, err).ErrorContext(putCtx, "failed to cache relation")
 					}
 				}); slotErr != nil {
-					logger.With(errKey, slotErr).ErrorContext(ctx, "failed to cache relation")
+					logger.With(errKey, slotErr).ErrorContext(putCtx, "failed to cache relation")
 				}
 				return nil
 			})
@@ -424,7 +477,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 				case <-gctx.Done():
 					return nil
 				default:
-					return put()
+					return put(gctx)
 				}
 			})
 		}

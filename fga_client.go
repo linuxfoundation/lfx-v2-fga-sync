@@ -22,6 +22,7 @@ type IFgaClient interface {
 		body ClientListObjectsRequest,
 		options ClientListObjectsOptions,
 	) (*ClientListObjectsResponse, error)
+	ReadAuthorizationModel(ctx context.Context) (*openfga.AuthorizationModel, error)
 }
 
 // FgaAdapter is a wrapper around the OpenFGA client that implements IFgaClient.
@@ -71,4 +72,14 @@ func (c FgaAdapter) ListObjects(
 	options ClientListObjectsOptions,
 ) (*ClientListObjectsResponse, error) {
 	return c.OpenFgaClient.ListObjects(ctx).Body(body).Options(options).Execute()
+}
+
+// ReadAuthorizationModel fetches the authorization model this client is
+// configured with (OPENFGA_AUTH_MODEL_ID).
+func (c FgaAdapter) ReadAuthorizationModel(ctx context.Context) (*openfga.AuthorizationModel, error) {
+	resp, err := c.OpenFgaClient.ReadAuthorizationModel(ctx).Execute()
+	if err != nil {
+		return nil, err
+	}
+	return resp.AuthorizationModel, nil
 }

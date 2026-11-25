@@ -104,6 +104,12 @@
     "triggerer",
     "zizmor",
     "authorizationmodel",
+    "userset",
+    "usersets",
+    "tupleset",
+    "tuplesets",
+    "fixpoint",
+    "nocolon",
     "valkey"
   ],
   "overrides": [

@@ -39,6 +39,18 @@ func (m *MockNatsKeyValue) Put(ctx context.Context, key string, value []byte) (u
 	return args.Get(0).(uint64), args.Error(1)
 }
 
+func (m *MockNatsKeyValue) Create(
+	ctx context.Context, key string, value []byte, _ ...jetstream.KVCreateOpt,
+) (uint64, error) {
+	args := m.Called(ctx, key, value)
+	return args.Get(0).(uint64), args.Error(1)
+}
+
+func (m *MockNatsKeyValue) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	args := m.Called(ctx, key, value, revision)
+	return args.Get(0).(uint64), args.Error(1)
+}
+
 func (m *MockNatsKeyValue) PutString(ctx context.Context, key string, value string) (uint64, error) {
 	args := m.Called(ctx, key, value)
 	return args.Get(0).(uint64), args.Error(1)

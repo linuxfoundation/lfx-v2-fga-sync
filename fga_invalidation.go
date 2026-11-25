@@ -1,0 +1,944 @@
+// Copyright The Linux Foundation and each contributor to LFX.
+// SPDX-License-Identifier: MIT
+
+// Package main provides the fga-sync service entry point and supporting types.
+package main
+
+import (
+	"context"
+	"errors"
+	"expvar"
+	"fmt"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
+
+	. "github.com/openfga/go-sdk/client"
+
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
+)
+
+const (
+	// globalInvalidationKey is the KV key whose creation time makes every
+	// older cache entry stale.
+	globalInvalidationKey = "inv"
+
+	// typeMarkerPrefix prefixes per-object-type markers: every cached check on
+	// objects of that type older than the marker is stale, for all users.
+	typeMarkerPrefix = "inv.t."
+
+	// userMarkerPrefix prefixes per-(object type, user) markers: cached checks
+	// on objects of that type for that one user older than the marker are
+	// stale. The user is base32-encoded like cache keys.
+	userMarkerPrefix = "inv.u."
+
+	// maxScopedUserMarkers bounds how many per-(type, user) markers one write
+	// may produce. A bulk write touching many users would otherwise issue one
+	// KV Put per user per affected type; past this bound the user markers fold
+	// into per-type markers, which are still narrower than a global bump.
+	maxScopedUserMarkers = 32
+
+	// invalidationWriteConcurrency bounds parallel marker Puts for one write.
+	invalidationWriteConcurrency = 8
+	// invalidationFallbackTimeout bounds the global write that runs after
+	// scoped marker writes fail.
+	invalidationFallbackTimeout = 5 * time.Second
+
+	// modelMarkerKey holds the ID of the newest authorization model announced
+	// by a replica in scoped mode. OpenFGA model IDs are ULIDs, so they sort by
+	// creation time and a replica can tell it is the older one. Scoped writes check it so a
+	// replica on an older model, whose graph can miss dependencies, writes
+	// globally instead. It expires with the bucket TTL, which is far longer than
+	// a rollout, so a missing marker is treated as a match.
+	modelMarkerKey = "inv.model"
+	// modelMarkerReadTimeout bounds the read of modelMarkerKey on a scoped
+	// write, so a slow read cannot use up the whole invalidation budget and
+	// leave the global fallback with nothing.
+	modelMarkerReadTimeout = 2 * time.Second
+	// modelFollowUpDelay is how long after announcing a model the replica bumps
+	// the global key once more. It must outlast the slowest path by which a
+	// replica on the previous model can still write after the announcement: it
+	// notices the new marker within modelFenceInterval plus two marker reads
+	// (the poll in flight when the marker lands, then the next one), and a cache
+	// write it had already started can run for cacheWriteTimeout. With the
+	// defaults that is 2s + 2*2s + 5s = 11s. A scoped marker write started just
+	// before the announcement is covered by invalidationFallbackTimeout, which is
+	// shorter. The margin absorbs scheduling delays.
+	modelFollowUpDelay = 15 * time.Second
+
+	// modelMarkerWriteAttempts bounds how often one announcement re-reads the
+	// marker after losing a race to another replica's write.
+	modelMarkerWriteAttempts = 5
+	// modelAnnounceAttempts is how many times startup tries to record the
+	// model announcement before degrading.
+	modelAnnounceAttempts = 3
+
+	// invalidationModeEnv selects how cache invalidation is scoped.
+	invalidationModeEnv = "INVALIDATION_MODE"
+
+	// Accepted INVALIDATION_MODE values.
+	modeNameGlobal     = "global"
+	modeNameReadScoped = "read-scoped"
+	modeNameScoped     = "scoped"
+)
+
+// Values of the fga_sync.cache.invalidate.scope span attribute.
+const (
+	invalidateScopeGlobal = "global"
+	invalidateScopeScoped = "scoped"
+)
+
+// Reasons a write used the global marker instead of scoped ones, recorded on
+// the fga_sync.cache.invalidate span as fga_sync.cache.invalidate.reason.
+const (
+	// globalReasonModeGlobal is the default: scoped writes are not enabled.
+	globalReasonModeGlobal = "mode_global"
+	// globalReasonNoGraph means scoped mode is on but there is no model graph.
+	globalReasonNoGraph = "no_graph"
+	// globalReasonNoTuples means the plan had no tuples to scope.
+	globalReasonNoTuples = "no_tuples"
+	// globalReasonConditionedTuple means a tuple carried a condition.
+	globalReasonConditionedTuple = "conditioned_tuple"
+	// globalReasonMalformedObject means an object could not be parsed.
+	globalReasonMalformedObject = "malformed_object"
+	// globalReasonUnknownRelation means the model does not define the relation.
+	globalReasonUnknownRelation = "unknown_relation"
+	// globalReasonScopedWriteFailed means a scoped marker write failed and the
+	// write fell back to the global key.
+	globalReasonScopedWriteFailed = "scoped_write_failed"
+	// globalReasonModelMismatch means another replica announced a different
+	// authorization model, so this replica's graph cannot be trusted.
+	globalReasonModelMismatch = "model_mismatch"
+	// globalReasonModelCheckFailed means the announced model could not be read,
+	// so the write fell back to the global key.
+	globalReasonModelCheckFailed = "model_check_failed"
+	// globalReasonModelAnnounce is the flush a replica writes when it announces
+	// its authorization model at startup.
+	globalReasonModelAnnounce = "model_announce"
+)
+
+// markerKind names which marker decided the invalidation cutoff for one
+// cached entry. It shows up on stale-hit logs and lookup spans so a stale hit
+// can be traced to the kind of write that caused it.
+type markerKind string
+
+const (
+	// markerKindGlobal is the global inv key.
+	markerKindGlobal markerKind = "global"
+	// markerKindType is the per-object-type marker.
+	markerKindType markerKind = "type"
+	// markerKindUser is the per-(object type, user) marker.
+	markerKindUser markerKind = "user"
+	// markerKindUnreadable means a marker could not be read, so the entry is
+	// treated as stale.
+	markerKindUnreadable markerKind = "unreadable"
+)
+
+// staleMarkerKinds lists every kind in a stable order for span attributes.
+var staleMarkerKinds = []markerKind{
+	markerKindGlobal, markerKindType, markerKindUser, markerKindUnreadable,
+}
+
+// modelMarkerKeepAliveInterval is how often a replica renews its own model
+// marker. It must stay well below the cache bucket TTL (3h by default). It is a
+// variable so tests do not wait.
+var modelMarkerKeepAliveInterval = time.Hour
+
+// modelFenceInterval is how often a replica re-reads modelMarkerKey to see
+// whether a different model has been announced. It must stay well below
+// modelFollowUpDelay: whatever an outdated replica writes back before it notices
+// is cleared by the follow-up flush. It is a variable so tests do not wait.
+var modelFenceInterval = 2 * time.Second
+
+// modelAnnounceRetryDelay separates announcement attempts. It is a variable so
+// tests do not wait on it.
+var modelAnnounceRetryDelay = time.Second
+
+var (
+	cacheInvalidationsGlobal *expvar.Int
+	cacheInvalidationsScoped *expvar.Int
+	cacheWriteBacksFenced    *expvar.Int
+)
+
+func init() {
+	cacheInvalidationsGlobal = expvar.NewInt("cache_invalidations_global")
+	cacheInvalidationsScoped = expvar.NewInt("cache_invalidations_scoped")
+	cacheWriteBacksFenced = expvar.NewInt("cache_write_backs_fenced")
+}
+
+// invalidationMode selects how writes invalidate the cache and how lookups
+// honor invalidation markers. The modes exist so a rolling deploy cannot leave
+// a pod writing only scoped markers while another pod, still on old code,
+// ignores them and serves revoked access from cache: roll out read-scoped
+// everywhere first, then switch to scoped.
+type invalidationMode int
+
+const (
+	// invalidationGlobal is the original behavior: every write bumps the
+	// single inv key, and lookups consult only that key.
+	invalidationGlobal invalidationMode = iota
+	// invalidationReadScoped makes lookups honor scoped markers while writes
+	// still bump the global key. Safe to run alongside any other mode.
+	invalidationReadScoped
+	// invalidationScoped makes writes emit scoped markers (when the model
+	// graph is available) and lookups honor them. Only safe once every
+	// replica runs at least invalidationReadScoped.
+	invalidationScoped
+)
+
+// parseInvalidationMode maps the INVALIDATION_MODE value to a mode. The empty
+// string means the default (global). ok is false for unrecognized values, which
+// map to read-scoped: it writes global markers, so it never under-invalidates,
+// and it still honors scoped markers written by other replicas. Falling back to
+// global would make a typo ignore those markers and serve revoked access.
+func parseInvalidationMode(value string) (mode invalidationMode, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", modeNameGlobal:
+		return invalidationGlobal, true
+	case modeNameReadScoped:
+		return invalidationReadScoped, true
+	case modeNameScoped:
+		return invalidationScoped, true
+	}
+	return invalidationReadScoped, false
+}
+
+func (m invalidationMode) String() string {
+	switch m {
+	case invalidationReadScoped:
+		return modeNameReadScoped
+	case invalidationScoped:
+		return modeNameScoped
+	default:
+		return modeNameGlobal
+	}
+}
+
+// invalidationConfig is the scoping configuration carried by FgaService.
+type invalidationConfig struct {
+	mode  invalidationMode
+	graph *modelGraph
+	// modelID is the authorization model the graph was built from. When set,
+	// scoped plans carry it so writes can check the announced model.
+	modelID string
+}
+
+// readsScoped reports whether lookups must consult scoped markers.
+func (c invalidationConfig) readsScoped() bool {
+	return c.mode >= invalidationReadScoped
+}
+
+// writesScoped reports whether writes may emit scoped markers. It needs the
+// model graph; without one every write stays global, which is always safe.
+func (c invalidationConfig) writesScoped() bool {
+	return c.mode == invalidationScoped && c.graph != nil
+}
+
+// tupleRef is the part of a written or deleted tuple that decides which cache
+// entries it can affect.
+type tupleRef struct {
+	user        string
+	relation    string
+	object      string
+	conditioned bool
+}
+
+// userMarker names one per-(object type, user) marker.
+type userMarker struct {
+	typ  string
+	user string
+}
+
+// invalidationPlan says which markers one write (a batch of tuples) must
+// bump. A global plan bumps only the global key; otherwise types and users
+// list the scoped markers.
+type invalidationPlan struct {
+	global bool
+	// reason says why the plan is global (a globalReason constant); empty for
+	// scoped plans.
+	reason string
+	types  []string
+	users  []userMarker
+	// modelID is the authorization model the plan was computed from. It is set
+	// on scoped plans so applyInvalidation can check no other model has been
+	// announced since.
+	modelID string
+}
+
+// globalPlan is the plan used whenever scoping cannot be proven safe.
+func globalPlan() invalidationPlan { return invalidationPlan{global: true} }
+
+// globalPlanFor is globalPlan with the reason scoping was not possible.
+func globalPlanFor(reason string) invalidationPlan {
+	return invalidationPlan{global: true, reason: reason}
+}
+
+// markerKeys returns every KV key the plan writes, in a stable order.
+func (p invalidationPlan) markerKeys() []string {
+	keys := make([]string, 0, len(p.types)+len(p.users))
+	for _, typ := range p.types {
+		keys = append(keys, typeMarkerKey(typ))
+	}
+	for _, u := range p.users {
+		keys = append(keys, userMarkerKey(u.typ, u.user))
+	}
+	return keys
+}
+
+func typeMarkerKey(typ string) string {
+	return typeMarkerPrefix + typ
+}
+
+func userMarkerKey(typ, user string) string {
+	return userMarkerPrefix + typ + "." + cacheKeyEncoder.EncodeToString([]byte(user))
+}
+
+// objectType returns the type part of an OpenFGA object ("meeting" for
+// "meeting:abc"). ok is false when the object is malformed or the type holds
+// characters that are not safe inside a marker key.
+func objectType(object string) (string, bool) {
+	typ, id, found := strings.Cut(object, ":")
+	if !found || typ == "" || id == "" {
+		return "", false
+	}
+	if !validTypeName(typ) {
+		return "", false
+	}
+	return typ, true
+}
+
+// validTypeName reports whether an OpenFGA type name is safe inside a marker
+// key. The model graph uses it to reject models objectType could not read back,
+// so a type is never given scoped markers that lookups would then skip.
+func validTypeName(typ string) bool {
+	if typ == "" {
+		return false
+	}
+	for _, r := range typ {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isConcreteUser reports whether subject names exactly one user, as opposed
+// to a wildcard (user:*), a userset (team:t#member) or another object. Only a
+// concrete user's tuples can be scoped to that user's checks.
+func isConcreteUser(subject string) bool {
+	if !strings.HasPrefix(subject, constants.ObjectTypeUser) || subject == constants.UserWildcard {
+		return false
+	}
+	return len(subject) > len(constants.ObjectTypeUser) && !strings.Contains(subject, "#")
+}
+
+// planInvalidation decides which markers a batch of tuple changes must bump.
+//
+// For each tuple the model graph gives the object types whose check results
+// can change. If the tuple's subject is one concrete user, only that user's
+// checks can change, so the plan is a (type, user) marker per affected type.
+// Any other subject (a wildcard, a userset such as team#member, or an object
+// such as a parent project) can change results for an unknown set of users,
+// so the plan is a type marker per affected type. A tuple on a tupleset
+// relation (the "parent" in "viewer from parent") is treated the same way
+// even when its subject is a user, because that user is the object being
+// traversed rather than the one gaining access.
+//
+// Anything the graph cannot vouch for yields the global plan: no graph, a
+// malformed object, a relation the model does not define, or a conditioned
+// tuple whose effect depends on request context the cache key does not carry.
+func (g *modelGraph) planInvalidation(tuples []tupleRef) invalidationPlan {
+	if g == nil {
+		return globalPlanFor(globalReasonNoGraph)
+	}
+	if len(tuples) == 0 {
+		return globalPlanFor(globalReasonNoTuples)
+	}
+
+	types := make(map[string]struct{})
+	users := make(map[userMarker]struct{})
+
+	for _, tuple := range tuples {
+		if tuple.conditioned {
+			return globalPlanFor(globalReasonConditionedTuple)
+		}
+		typ, ok := objectType(tuple.object)
+		if !ok {
+			return globalPlanFor(globalReasonMalformedObject)
+		}
+		affected, ok := g.affectedTypes(typ, tuple.relation)
+		if !ok {
+			return globalPlanFor(globalReasonUnknownRelation)
+		}
+		// A concrete user is only scoped when the tuple grants that user
+		// access. On a tupleset relation the subject is the object being
+		// traversed, so other users' checks through it change too.
+		perUser := isConcreteUser(tuple.user) && !g.isTupleset(typ, tuple.relation)
+		for _, affectedType := range affected {
+			if perUser {
+				users[userMarker{typ: affectedType, user: tuple.user}] = struct{}{}
+			} else {
+				types[affectedType] = struct{}{}
+			}
+		}
+	}
+
+	// Fold user markers into type markers when a bulk write would otherwise
+	// issue too many Puts.
+	if len(users) > maxScopedUserMarkers {
+		for marker := range users {
+			types[marker.typ] = struct{}{}
+		}
+		users = nil
+	}
+
+	plan := invalidationPlan{}
+	for typ := range types {
+		plan.types = append(plan.types, typ)
+	}
+	sort.Strings(plan.types)
+	for marker := range users {
+		// A type marker already covers every user of that type.
+		if _, covered := types[marker.typ]; covered {
+			continue
+		}
+		plan.users = append(plan.users, marker)
+	}
+	sort.Slice(plan.users, func(i, j int) bool {
+		if plan.users[i].typ != plan.users[j].typ {
+			return plan.users[i].typ < plan.users[j].typ
+		}
+		return plan.users[i].user < plan.users[j].user
+	})
+	return plan
+}
+
+// tupleRefs flattens the tuples of one write request for planInvalidation.
+func tupleRefs(writes []ClientTupleKey, deletes []ClientTupleKeyWithoutCondition) []tupleRef {
+	refs := make([]tupleRef, 0, len(writes)+len(deletes))
+	for _, w := range writes {
+		refs = append(refs, tupleRef{
+			user:        w.User,
+			relation:    w.Relation,
+			object:      w.Object,
+			conditioned: w.Condition != nil,
+		})
+	}
+	for _, d := range deletes {
+		refs = append(refs, tupleRef{user: d.User, relation: d.Relation, object: d.Object})
+	}
+	return refs
+}
+
+// applyInvalidation bumps the markers in plan. A global plan bumps only the
+// global key. If any scoped marker fails to write, it falls back to the
+// global key: a partially applied scoped invalidation must never leave stale
+// entries alive.
+func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan) error {
+	// Resolve the bucket through recovery: a replica that started without the
+	// bucket must still invalidate once other replicas begin caching in it.
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return err
+	}
+	if plan.global || (len(plan.types) == 0 && len(plan.users) == 0) {
+		reason := plan.reason
+		if reason == "" {
+			reason = globalReasonNoTuples
+		}
+		cacheInvalidationsGlobal.Add(1)
+		return c.invalidate(ctx, reason)
+	}
+
+	if reason := checkModelMarker(ctx, bucket, plan.modelID); reason != "" {
+		cacheInvalidationsGlobal.Add(1)
+		// The marker read may have used up the caller's deadline, so the global
+		// write gets its own, or it could not land and the write would leave
+		// nothing invalidated.
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidationFallbackTimeout)
+		defer cancel()
+		return c.invalidate(fallbackCtx, reason)
+	}
+
+	keys := plan.markerKeys()
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeScoped),
+			attribute.Int("fga_sync.cache.invalidate.markers", len(keys)),
+		),
+	)
+	defer span.End()
+
+	var wg errgroup.Group
+	wg.SetLimit(invalidationWriteConcurrency)
+	for _, key := range keys {
+		wg.Go(func() error {
+			_, putErr := bucket.Put(ctx, key, []byte("1"))
+			return putErr
+		})
+	}
+	if err = wg.Wait(); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		logger.With(errKey, err).ErrorContext(ctx, "failed to write scoped invalidation markers; falling back to global")
+		cacheInvalidationsGlobal.Add(1)
+		// The scoped writes may have used up the caller's deadline, so the
+		// fallback gets its own, or it could not write the marker even if
+		// the bucket has recovered.
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidationFallbackTimeout)
+		defer cancel()
+		return c.invalidate(fallbackCtx, globalReasonScopedWriteFailed)
+	}
+
+	cacheInvalidationsScoped.Add(1)
+	// Info rather than debug: one line per write batch, and the only place a
+	// scoped write is visible without trace sampling.
+	logger.With(
+		"types", plan.types,
+		"user_markers", len(plan.users),
+	).InfoContext(ctx, "wrote scoped cache invalidation markers")
+	return nil
+}
+
+// checkModelMarker returns the global reason a scoped plan must not be applied,
+// or "" when it may. A scoped plan is only valid if no replica on a different
+// authorization model has announced itself: such a replica's graph may have
+// dependencies this one lacks. A missing marker is a match, because it expires
+// long after any rollout has finished. A read failure is not, since global
+// invalidation is always safe.
+func checkModelMarker(ctx context.Context, bucket INatsKeyValue, modelID string) string {
+	if modelID == "" {
+		return ""
+	}
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		return ""
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; invalidating globally")
+		return globalReasonModelCheckFailed
+	case string(entry.Value()) != modelID:
+		return globalReasonModelMismatch
+	}
+	return ""
+}
+
+// errOutdatedModel means a replica on a newer authorization model has already
+// announced itself, so this one must not touch the marker and must write
+// globally.
+var errOutdatedModel = errors.New("a newer authorization model has been announced")
+
+// announceModel records modelID as the authorization model in use. It reports
+// whether it flushed the cache.
+//
+//   - No marker, or one for an older model: bump inv, then write the marker. The
+//     flush covers anything a replica on an older model scoped before this one
+//     started; the marker makes those replicas write globally and stop writing
+//     to the cache from then on. The marker goes last so that it only ever means
+//     "the flush after the previous model completed": a replica that finds its
+//     own model's marker can skip the flush, and must be able to trust that it
+//     was done. If the flush fails nothing is announced and the caller retries
+//     the whole announcement.
+//   - The same model: another replica already flushed and announced, so only
+//     refresh the marker's TTL. A pod restart must not flush the whole cache.
+//   - A newer model: return errOutdatedModel without changing anything, so a
+//     replica of an older model that restarts mid-rollout cannot take the marker
+//     back and re-enable scoped writes from its outdated graph.
+//
+// Every marker write is conditional on the revision just read (Create when
+// there was none), so a newer announcement that lands between the read and the
+// write is never overwritten: the write conflicts, the marker is read again and
+// the same rules apply. A flush made before such a conflict is wasted but
+// harmless.
+//
+// It is a no-op while no bucket exists. If the flush succeeds but the marker
+// cannot be written, the error is returned so the caller can stop trusting the
+// shared cache.
+func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed bool, err error) {
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return false, err
+	}
+	for attempt := 0; attempt < modelMarkerWriteAttempts; attempt++ {
+		entry, getErr := bucket.Get(ctx, modelMarkerKey)
+		var writeMarker func() error
+		switch {
+		case errors.Is(getErr, jetstream.ErrKeyNotFound):
+			writeMarker = func() error {
+				_, e := bucket.Create(ctx, modelMarkerKey, []byte(modelID))
+				return e
+			}
+		case getErr != nil:
+			return false, fmt.Errorf("error reading model marker: %w", getErr)
+		case string(entry.Value()) > modelID:
+			return false, errOutdatedModel
+		case string(entry.Value()) == modelID:
+			_, putErr := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+			if errors.Is(putErr, jetstream.ErrKeyExists) {
+				continue
+			}
+			if putErr != nil {
+				logger.With(errKey, putErr).WarnContext(ctx, "could not refresh model marker")
+			}
+			return false, nil
+		default:
+			writeMarker = func() error {
+				_, e := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+				return e
+			}
+		}
+		if flushErr := c.invalidate(ctx, globalReasonModelAnnounce); flushErr != nil {
+			return false, fmt.Errorf("error flushing the cache for the model announcement: %w", flushErr)
+		}
+		putErr := writeMarker()
+		if errors.Is(putErr, jetstream.ErrKeyExists) {
+			continue // another replica announced first; read it again
+		}
+		if putErr != nil {
+			return true, fmt.Errorf("error writing model marker: %w", putErr)
+		}
+		return true, nil
+	}
+	return false, errors.New("model marker kept changing while announcing the model")
+}
+
+// modelFence stops a replica from writing to the shared cache while the
+// announced authorization model is not its own. Cache keys do not carry the
+// model, so an outdated replica that kept answering checks during a rollout
+// would write answers computed under the old model where replicas on the new
+// model read them as fresh, and the startup flushes cannot clear what is
+// written after them. Reads are unaffected: the replica keeps serving, from the
+// cache and from OpenFGA.
+//
+// The zero value is not fenced, and so is a nil *modelFence.
+type modelFence struct {
+	blocked atomic.Bool
+	// sawOther is set once the marker has held a different model ID, and cleared
+	// only when it holds this replica's. It keeps the fence closed if the marker
+	// later expires: a missing marker only means "nobody has announced" for a
+	// replica that has never seen another model.
+	sawOther atomic.Bool
+	// announceAgain, when set, announces this replica's model again. It is used
+	// when the marker has gone missing after a different model was seen: nothing
+	// renews another model's marker once its replicas are gone, so without it a
+	// replica left on the older model, for instance after a rollback, would stay
+	// fenced until it restarted.
+	// It gets a short-lived context for the announcement itself and the
+	// replica's long-lived one for the follow-up flush it schedules.
+	announceAgain func(announceCtx, runCtx context.Context) error
+}
+
+// isBlocked reports whether write-backs and seeding must be skipped.
+func (f *modelFence) isBlocked() bool {
+	return f != nil && f.blocked.Load()
+}
+
+// refresh re-reads modelMarkerKey and updates the fence. A marker for a
+// different model fences, and stays fencing if the marker later expires; only
+// this replica's own model ID lifts it. A missing marker fences nothing for a
+// replica that has not seen another model. A failed read fences too: not being
+// able to tell is treated as not safe to write, at the cost of cache misses
+// served by OpenFGA.
+func (f *modelFence) refresh(ctx context.Context, bucket INatsKeyValue, modelID string) {
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	var block bool
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		block = f.sawOther.Load()
+		if block && f.announceAgain != nil {
+			block = !f.tryAnnounceAgain(ctx)
+		}
+	case err != nil:
+		block = true
+	case string(entry.Value()) != modelID:
+		f.sawOther.Store(true)
+		block = true
+	default:
+		f.sawOther.Store(false)
+	}
+	if f.blocked.Swap(block) == block {
+		return
+	}
+	switch {
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; not writing to the shared cache")
+	case block:
+		logger.With("model_id", modelID).WarnContext(ctx,
+			"a different authorization model has been announced; not writing to the shared cache")
+	default:
+		logger.With("model_id", modelID).InfoContext(ctx,
+			"announced authorization model matches; writing to the shared cache")
+	}
+}
+
+// tryAnnounceAgain announces this replica's model again and reports whether the
+// fence may lift. It does not lift it if a newer model announced in the
+// meantime (the marker then names it, and the next refresh sees that) or if the
+// announcement failed; the next refresh tries again.
+func (f *modelFence) tryAnnounceAgain(ctx context.Context) bool {
+	announceCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+	defer cancel()
+	err := f.announceAgain(announceCtx, ctx)
+	switch {
+	case err == nil:
+		f.sawOther.Store(false)
+		logger.InfoContext(ctx, "model marker expired after a different model was seen; announced this replica's model again")
+		return true
+	case errors.Is(err, errOutdatedModel):
+		return false
+	default:
+		logger.With(errKey, err).WarnContext(ctx, "could not announce the model again after the marker expired")
+		return false
+	}
+}
+
+// watch refreshes the fence every interval until ctx ends. It also keeps the
+// replica's own marker from expiring, on its own goroutine so a slow renewal
+// cannot delay the refresh that closes the fence.
+func (f *modelFence) watch(ctx context.Context, bucket INatsKeyValue, modelID string, interval time.Duration) {
+	var keepAlive sync.WaitGroup
+	keepAlive.Add(1)
+	go func(every time.Duration) {
+		defer keepAlive.Done()
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				keepModelMarkerAlive(ctx, bucket, modelID)
+			}
+		}
+	}(modelMarkerKeepAliveInterval)
+	defer keepAlive.Wait()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.refresh(ctx, bucket, modelID)
+		}
+	}
+}
+
+// keepModelMarkerAlive renews modelMarkerKey's TTL while it still holds this
+// replica's model ID. The marker is written once, at announcement, and expires
+// with the bucket TTL; without renewal a replica left on an older model after
+// that would find no marker and take it for "nobody has announced". A missing
+// marker is left alone, and a conflicting write (another replica announced or
+// refreshed first) is not an error.
+func keepModelMarkerAlive(ctx context.Context, bucket INatsKeyValue, modelID string) {
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	if err != nil || string(entry.Value()) != modelID {
+		return
+	}
+	if _, err = bucket.Update(readCtx, modelMarkerKey, []byte(modelID), entry.Revision()); err != nil &&
+		!errors.Is(err, jetstream.ErrKeyExists) {
+		logger.With(errKey, err).WarnContext(ctx, "could not renew model marker")
+	}
+}
+
+// followUpFlush bumps the global key once more after delay. It clears what a
+// replica on the previous model wrote before it noticed the new announcement: a
+// scoped marker from a write that read the old model ID just before
+// announceModel ran, or a cache write-back made before its fence closed (the
+// fence polls, so it can lag by a few seconds). A failed flush is retried up to
+// modelAnnounceAttempts times, and gives up with an error log. It returns
+// immediately and stops when ctx is canceled. It runs in the announcing
+// replica, so it does not run if that replica exits during the delay.
+func (c CacheLayer) followUpFlush(ctx context.Context, delay time.Duration) {
+	go func() {
+		wait := delay
+		var err error
+		for attempt := 0; attempt < modelAnnounceAttempts; attempt++ {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			wait = modelAnnounceRetryDelay
+
+			flushCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+			err = c.invalidate(flushCtx, globalReasonModelAnnounce)
+			cancel()
+			if err == nil {
+				return
+			}
+			logger.With(errKey, err, "attempt", attempt+1).WarnContext(ctx,
+				"follow-up cache flush after model announcement failed")
+		}
+		logger.With(errKey, err).ErrorContext(ctx,
+			"follow-up cache flush after model announcement gave up; entries written by old-model replicas "+
+				"during the rollout may stay cached until they expire")
+	}()
+}
+
+// markerRead is one marker lookup result. A marker that does not exist has a
+// zero time; one that could not be read is failed and makes every dependent
+// entry stale, because falling through to OpenFGA is always safe.
+type markerRead struct {
+	at     time.Time
+	failed bool
+}
+
+// invalidationCutoffs holds the invalidation times relevant to one batch of
+// checks. An entry is fresh only if it was created after the cutoff for its
+// own tuple.
+type invalidationCutoffs struct {
+	global time.Time
+	types  map[string]markerRead
+	users  map[userMarker]markerRead
+}
+
+// invalidationCutoff is the invalidation time that applies to one check and
+// the kind of marker it came from. An entry created before at is stale.
+type invalidationCutoff struct {
+	at   time.Time
+	kind markerKind
+}
+
+// forTuple returns the latest invalidation time that applies to one check.
+func (c invalidationCutoffs) forTuple(item ClientBatchCheckItem) time.Time {
+	return c.cutoffFor(item).at
+}
+
+// cutoffFor returns the latest invalidation that applies to one check, and
+// which marker it came from: the global marker, the marker for the checked
+// object's type, or the marker for that type and the checked user. The first
+// marker to reach the latest time wins a tie, in that order.
+func (c invalidationCutoffs) cutoffFor(item ClientBatchCheckItem) invalidationCutoff {
+	cutoff := invalidationCutoff{at: c.global, kind: markerKindGlobal}
+	typ, ok := objectType(item.Object)
+	if !ok {
+		return cutoff
+	}
+	unreadable := invalidationCutoff{at: staleEverythingCutoff(), kind: markerKindUnreadable}
+	if read, found := c.types[typ]; found {
+		if read.failed {
+			return unreadable
+		}
+		if read.at.After(cutoff.at) {
+			cutoff = invalidationCutoff{at: read.at, kind: markerKindType}
+		}
+	}
+	if read, found := c.users[userMarker{typ: typ, user: item.User}]; found {
+		if read.failed {
+			return unreadable
+		}
+		if read.at.After(cutoff.at) {
+			cutoff = invalidationCutoff{at: read.at, kind: markerKindUser}
+		}
+	}
+	return cutoff
+}
+
+// staleEverythingCutoff is later than any entry's creation time, so every
+// entry compared against it counts as stale.
+func staleEverythingCutoff() time.Time {
+	return time.Now().Add(time.Hour)
+}
+
+// loadInvalidationCutoffs reads the scoped markers a batch of checks needs:
+// one per distinct object type and one per distinct (type, concrete user).
+// It never fails; unreadable markers are recorded as failed so the affected
+// checks fall through to OpenFGA.
+func (c CacheLayer) loadInvalidationCutoffs(
+	ctx context.Context,
+	global time.Time,
+	items []ClientBatchCheckItem,
+) invalidationCutoffs {
+	cutoffs := invalidationCutoffs{
+		global: global,
+		types:  make(map[string]markerRead),
+		users:  make(map[userMarker]markerRead),
+	}
+
+	typeSet := make(map[string]struct{})
+	userSet := make(map[userMarker]struct{})
+	for _, item := range items {
+		typ, ok := objectType(item.Object)
+		if !ok {
+			continue
+		}
+		typeSet[typ] = struct{}{}
+		if isConcreteUser(item.User) {
+			userSet[userMarker{typ: typ, user: item.User}] = struct{}{}
+		}
+	}
+
+	var mu sync.Mutex
+	var wg errgroup.Group
+	wg.SetLimit(cacheLookupConcurrency)
+
+	fetch := func(key string, store func(markerRead)) {
+		wg.Go(func() error {
+			read := c.readMarker(ctx, key)
+			mu.Lock()
+			store(read)
+			mu.Unlock()
+			return nil
+		})
+	}
+	for typ := range typeSet {
+		fetch(typeMarkerKey(typ), func(r markerRead) { cutoffs.types[typ] = r })
+	}
+	for marker := range userSet {
+		fetch(userMarkerKey(marker.typ, marker.user), func(r markerRead) { cutoffs.users[marker] = r })
+	}
+	//nolint:errcheck // every goroutine above returns nil; Wait only blocks.
+	_ = wg.Wait()
+	return cutoffs
+}
+
+// readMarker reads one marker key.
+func (c CacheLayer) readMarker(ctx context.Context, key string) markerRead {
+	var (
+		created time.Time
+		err     error
+	)
+	if slotErr := withCacheOpSlot(ctx, func() {
+		created, err = c.markerCreated(ctx, key)
+	}); slotErr != nil {
+		return markerRead{failed: true}
+	}
+	if err != nil {
+		logger.With(errKey, err).WarnContext(ctx, "failed to read invalidation marker; treating entries as stale")
+		return markerRead{failed: true}
+	}
+	return markerRead{at: created}
+}
+
+// markerCreated returns the creation time of a marker key, or the zero time
+// when it does not exist.
+func (c CacheLayer) markerCreated(ctx context.Context, key string) (time.Time, error) {
+	entry, err := c.bucket.Get(ctx, key)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		return time.Time{}, nil
+	case err != nil:
+		return time.Time{}, err
+	}
+	return entry.Created(), nil
+}

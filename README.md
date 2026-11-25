@@ -2,7 +2,7 @@
 
 ![Build Status](https://github.com/linuxfoundation/lfx-v2-fga-sync/workflows/FGA%20Sync%20Build/badge.svg)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
-![Go Version](https://img.shields.io/badge/Go-1.27.4+-00ADD8?logo=go)
+![Go Version](https://img.shields.io/badge/Go-1.26.11+-00ADD8?logo=go)
 
 A high-performance microservice that synchronizes authorization data between NATS messaging and OpenFGA
 (Fine-Grained Authorization), providing cached relationship checks and real-time access control updates for the
@@ -18,7 +18,7 @@ LFX Platform v2.
 
 - **Real-time Authorization Sync**: Synchronizes resource access tuples between NATS and OpenFGA
 - **Durable Access Mutations**: Applies update and delete access messages in order through JetStream
-- **Cache-first Access Checks**: JetStream KV caching with global timestamp invalidation
+- **Cache-first Access Checks**: JetStream KV caching with timestamp invalidation (global, or scoped per type/user from the OpenFGA model)
 - **Batch Operations**: Efficient bulk relationship checking and updates
 - **Health Monitoring**: Kubernetes-ready health checks and observability
 - **Security First**: Non-root container image, CodeQL, MegaLinter, and pinned workflow actions
@@ -54,7 +54,7 @@ graph TB
 
 ### Prerequisites
 
-- Go 1.27.4+
+- Go 1.26.11+
 - Kubernetes 1.19+
 - Helm 3.2.0+
 - Docker (optional)
@@ -179,6 +179,7 @@ make helm-install-local
 | `OPENFGA_AUTH_MODEL_ID` | OpenFGA authorization model ID | - | Yes |
 | `CACHE_BUCKET` | JetStream KeyValue bucket name | `fga-sync-cache` | No |
 | `USE_CACHE` | Whether to try to use cache for access checks | `false` | No |
+| `INVALIDATION_MODE` | Cache invalidation scoping: `global`, `read-scoped`, or `scoped` (see `docs/fga-sync-contract.md`) | `global` | No |
 | `PORT` | HTTP server port | `8080` | No |
 | `DEBUG` | Enable debug logging | `false` | No |
 
@@ -295,7 +296,7 @@ latency in the target environment.
 
 1. **Cache Key Format**: `rel.{base32-encoded-relation}`
 2. **Cache Values**: raw `true` / `false` strings; freshness comes from NATS KV entry timestamps
-3. **Cache Invalidation**: global `inv` timestamp marker written after successful OpenFGA writes
+3. **Cache Invalidation**: timestamp markers written after OpenFGA writes: global `inv`, or narrower per-type and per-user markers when `INVALIDATION_MODE=scoped`
 4. **Cache TTL**: Configurable via JetStream bucket settings
 5. **Fallback**: Direct OpenFGA queries on cache miss or stale hit
 
