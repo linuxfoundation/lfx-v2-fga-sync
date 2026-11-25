@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"expvar"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,18 @@ const (
 	// scoped marker writes fail.
 	invalidationFallbackTimeout = 5 * time.Second
 
+	// modelMarkerKey holds the ID of the authorization model of the newest
+	// replica that announced itself in scoped mode. Scoped writes check it so a
+	// replica on an older model, whose graph can miss dependencies, writes
+	// globally instead. It expires with the bucket TTL, which is far longer than
+	// a rollout, so a missing marker is treated as a match.
+	modelMarkerKey = "inv.model"
+	// modelFollowUpDelay is how long after announcing a model the replica bumps
+	// the global key once more. It must exceed invalidationFallbackTimeout so a
+	// write that read the previous model ID just before the announcement has
+	// finished writing its scoped markers first.
+	modelFollowUpDelay = 10 * time.Second
+
 	// invalidationModeEnv selects how cache invalidation is scoped.
 	invalidationModeEnv = "INVALIDATION_MODE"
 
@@ -83,6 +96,15 @@ const (
 	// globalReasonScopedWriteFailed means a scoped marker write failed and the
 	// write fell back to the global key.
 	globalReasonScopedWriteFailed = "scoped_write_failed"
+	// globalReasonModelMismatch means another replica announced a different
+	// authorization model, so this replica's graph cannot be trusted.
+	globalReasonModelMismatch = "model_mismatch"
+	// globalReasonModelCheckFailed means the announced model could not be read,
+	// so the write fell back to the global key.
+	globalReasonModelCheckFailed = "model_check_failed"
+	// globalReasonModelAnnounce is the flush a replica writes when it announces
+	// its authorization model at startup.
+	globalReasonModelAnnounce = "model_announce"
 )
 
 // markerKind names which marker decided the invalidation cutoff for one
@@ -169,6 +191,9 @@ func (m invalidationMode) String() string {
 type invalidationConfig struct {
 	mode  invalidationMode
 	graph *modelGraph
+	// modelID is the authorization model the graph was built from. When set,
+	// scoped plans carry it so writes can check the announced model.
+	modelID string
 }
 
 // readsScoped reports whether lookups must consult scoped markers.
@@ -207,6 +232,10 @@ type invalidationPlan struct {
 	reason string
 	types  []string
 	users  []userMarker
+	// modelID is the authorization model the plan was computed from. It is set
+	// on scoped plans so applyInvalidation can check no other model has been
+	// announced since.
+	modelID string
 }
 
 // globalPlan is the plan used whenever scoping cannot be proven safe.
@@ -396,6 +425,11 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		return c.invalidate(ctx, reason)
 	}
 
+	if reason := checkModelMarker(ctx, bucket, plan.modelID); reason != "" {
+		cacheInvalidationsGlobal.Add(1)
+		return c.invalidate(ctx, reason)
+	}
+
 	keys := plan.markerKeys()
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
 		trace.WithAttributes(
@@ -434,6 +468,69 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		"user_markers", len(plan.users),
 	).InfoContext(ctx, "wrote scoped cache invalidation markers")
 	return nil
+}
+
+// checkModelMarker returns the global reason a scoped plan must not be applied,
+// or "" when it may. A scoped plan is only valid if no replica on a different
+// authorization model has announced itself: such a replica's graph may have
+// dependencies this one lacks. A missing marker is a match, because it expires
+// long after any rollout has finished. A read failure is not, since global
+// invalidation is always safe.
+func checkModelMarker(ctx context.Context, bucket INatsKeyValue, modelID string) string {
+	if modelID == "" {
+		return ""
+	}
+	entry, err := bucket.Get(ctx, modelMarkerKey)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		return ""
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; invalidating globally")
+		return globalReasonModelCheckFailed
+	case string(entry.Value()) != modelID:
+		return globalReasonModelMismatch
+	}
+	return ""
+}
+
+// announceModel records modelID as the authorization model in use and flushes
+// the cache. The flush covers anything a replica on an older model scoped
+// before this one started; the marker makes those replicas write globally from
+// now on. It is a no-op while no bucket exists. If the marker cannot be
+// written the flush still runs, but the error is returned so the caller can
+// stop writing scoped markers.
+func (c CacheLayer) announceModel(ctx context.Context, modelID string) error {
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return err
+	}
+	_, putErr := bucket.Put(ctx, modelMarkerKey, []byte(modelID))
+	flushErr := c.invalidate(ctx, globalReasonModelAnnounce)
+	if putErr != nil {
+		return fmt.Errorf("error writing model marker: %w", putErr)
+	}
+	return flushErr
+}
+
+// followUpFlush bumps the global key once more after delay, so a write that
+// read the previous model ID just before announceModel ran cannot leave scoped
+// markers the announcement's flush did not cover. It returns immediately and
+// gives up when ctx is canceled.
+func (c CacheLayer) followUpFlush(ctx context.Context, delay time.Duration) {
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		flushCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+		defer cancel()
+		if err := c.invalidate(flushCtx, globalReasonModelAnnounce); err != nil {
+			logger.With(errKey, err).WarnContext(ctx, "follow-up cache flush after model announcement failed")
+		}
+	}()
 }
 
 // markerRead is one marker lookup result. A marker that does not exist has a

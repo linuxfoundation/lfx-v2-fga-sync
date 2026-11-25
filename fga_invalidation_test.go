@@ -1450,3 +1450,210 @@ func TestApplyInvalidationRecoversMissingBucket(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckModelMarker(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		modelID    string
+		marker     string // empty means the marker key does not exist
+		getErr     error
+		wantReason string
+		wantGets   int64
+	}{
+		{name: "no model ID skips the check", modelID: "", marker: "m-old", wantReason: "", wantGets: 0},
+		{name: "missing marker is a match", modelID: "m-new", wantReason: "", wantGets: 1},
+		{name: "matching marker", modelID: "m-new", marker: "m-new", wantReason: "", wantGets: 1},
+		{name: "different model announced", modelID: "m-old", marker: "m-new", wantReason: globalReasonModelMismatch, wantGets: 1},
+		{
+			name: "marker read failure", modelID: "m-new", getErr: errors.New("kv down"),
+			wantReason: globalReasonModelCheckFailed, wantGets: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kv := newFlakyKV()
+			if tt.marker != "" {
+				_, err := kv.Put(ctx, modelMarkerKey, []byte(tt.marker))
+				require.NoError(t, err)
+			}
+			if tt.getErr != nil {
+				kv.failGet = func(string) error { return tt.getErr }
+			}
+			assert.Equal(t, tt.wantReason, checkModelMarker(ctx, kv, tt.modelID))
+			assert.Equal(t, tt.wantGets, kv.gets.Load())
+		})
+	}
+}
+
+func TestApplyInvalidationModelGuard(t *testing.T) {
+	ctx := context.Background()
+	scopedPlan := invalidationPlan{types: []string{"meeting"}, modelID: "m-old"}
+
+	t.Run("a different announced model makes the write global", func(t *testing.T) {
+		kv := newFlakyKV()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte("m-new"))
+		require.NoError(t, err)
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, scopedPlan))
+		assert.True(t, kv.written(globalInvalidationKey))
+		assert.False(t, kv.written(typeMarkerKey("meeting")), "no scoped marker from an outdated graph")
+	})
+
+	t.Run("a matching model stays scoped", func(t *testing.T) {
+		kv := newFlakyKV()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte("m-old"))
+		require.NoError(t, err)
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, scopedPlan))
+		assert.True(t, kv.written(typeMarkerKey("meeting")))
+		assert.False(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("an unreadable marker makes the write global", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.failGet = func(key string) error {
+			if key == modelMarkerKey {
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, scopedPlan))
+		assert.True(t, kv.written(globalInvalidationKey))
+		assert.False(t, kv.written(typeMarkerKey("meeting")))
+	})
+
+	t.Run("a global plan never reads the marker", func(t *testing.T) {
+		kv := newFlakyKV()
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, globalPlanFor(globalReasonModeGlobal)))
+		assert.True(t, kv.written(globalInvalidationKey))
+		assert.Zero(t, kv.gets.Load())
+	})
+}
+
+func TestAnnounceModel(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("writes the marker, then flushes", func(t *testing.T) {
+		kv := &keyRecordingKV{}
+		require.NoError(t, CacheLayer{bucket: kv}.announceModel(ctx, "m-new"))
+		assert.Equal(t, []string{modelMarkerKey, globalInvalidationKey}, kv.puts, "marker first, so no replica checks a stale one after the flush")
+	})
+
+	t.Run("flushes and reports a marker write failure", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.failPut = func(key string) error {
+			if key == modelMarkerKey {
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		err := CacheLayer{bucket: kv}.announceModel(ctx, "m-new")
+		require.ErrorContains(t, err, "model marker")
+		assert.True(t, kv.written(globalInvalidationKey), "the flush still runs")
+	})
+
+	t.Run("is a no-op while no bucket exists", func(t *testing.T) {
+		cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
+			return nil, jetstream.ErrBucketNotFound
+		}}}
+		require.NoError(t, cache.announceModel(ctx, "m-new"))
+	})
+}
+
+func TestFollowUpFlush(t *testing.T) {
+	t.Run("bumps the global key after the delay", func(t *testing.T) {
+		kv := newFlakyKV()
+		CacheLayer{bucket: kv}.followUpFlush(context.Background(), time.Millisecond)
+		assert.Eventually(t, func() bool { return kv.written(globalInvalidationKey) }, time.Second, time.Millisecond)
+	})
+
+	t.Run("gives up when the service is shutting down", func(t *testing.T) {
+		kv := &keyRecordingKV{}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		CacheLayer{bucket: kv}.followUpFlush(ctx, time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		assert.Empty(t, kv.puts)
+	})
+}
+
+func TestFgaServiceModelGuard(t *testing.T) {
+	ctx := context.Background()
+	graph := platformGraph(t)
+	newSvc := func(kv INatsKeyValue, mode invalidationMode, g *modelGraph) FgaService {
+		return newFgaService(&recordingFga{}, kv, true).withInvalidation(mode, g).withModelGuard("m-1")
+	}
+
+	t.Run("scoped plans carry the model ID and global plans do not", func(t *testing.T) {
+		svc := newSvc(newFlakyKV(), invalidationScoped, graph)
+		scoped := svc.invalidationPlan([]ClientTupleKey{{User: "user:a", Relation: "participant", Object: "meeting:m1"}}, nil)
+		require.False(t, scoped.global)
+		assert.Equal(t, "m-1", scoped.modelID)
+
+		conditioned := svc.invalidationPlan([]ClientTupleKey{{
+			User: "user:a", Relation: "participant", Object: "meeting:m1",
+			Condition: &openfga.RelationshipCondition{Name: "c"},
+		}}, nil)
+		require.True(t, conditioned.global)
+		assert.Empty(t, conditioned.modelID)
+	})
+
+	t.Run("announces only when scoped writes are enabled", func(t *testing.T) {
+		for _, tt := range []struct {
+			name     string
+			mode     invalidationMode
+			graph    *modelGraph
+			wantPuts []string
+		}{
+			{name: "global mode", mode: invalidationGlobal, graph: graph},
+			{name: "read-scoped mode", mode: invalidationReadScoped, graph: graph},
+			{name: "scoped without a graph", mode: invalidationScoped, graph: nil},
+			{name: "scoped", mode: invalidationScoped, graph: graph, wantPuts: []string{modelMarkerKey, globalInvalidationKey}},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				kv := &keyRecordingKV{}
+				cctx, cancel := context.WithCancel(ctx)
+				defer cancel() // stops the follow-up flush
+				require.NoError(t, newSvc(kv, tt.mode, tt.graph).announceModel(cctx))
+				assert.Equal(t, tt.wantPuts, kv.puts)
+			})
+		}
+	})
+}
+
+// TestModelRolloutDoesNotLeaveStaleGrants plays a model bump: the replica on
+// the old model starts writing globally as soon as the new one announces, so
+// its writes cannot leave entries a scoped marker from its outdated graph
+// would miss.
+func TestModelRolloutDoesNotLeaveStaleGrants(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the follow-up flush
+	graph := platformGraph(t)
+
+	e := newE2E(t, invalidationScoped, graph)
+	oldSvc := e.svc.withModelGuard("m-old")
+	newSvc := newFgaService(e.fga, e.kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-new")
+	require.NoError(t, oldSvc.announceModel(ctx))
+
+	e.seed(seededUniverse...)
+	e.svc = oldSvc
+	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
+	e.fga.takeChecked()
+	scopedOnly := e.check(seededUniverse...)
+	assert.NotEqual(t, sortedStrings(seededUniverse), scopedOnly, "before the new model appears the write is scoped")
+
+	e.seed(seededUniverse...)
+	require.NoError(t, newSvc.announceModel(ctx))
+	e.seed(seededUniverse...)
+	e.svc = oldSvc
+	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
+	e.fga.takeChecked()
+	assert.Equal(t, sortedStrings(seededUniverse), e.check(seededUniverse...), "after the announcement the old replica writes globally")
+
+	e.seed(seededUniverse...)
+	e.svc = newSvc
+	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
+	e.fga.takeChecked()
+	assert.NotEqual(t, sortedStrings(seededUniverse), e.check(seededUniverse...), "the new replica keeps scoping")
+}

@@ -153,7 +153,33 @@ func (s FgaService) invalidationPlan(
 		}
 		return globalPlanFor(globalReasonModeGlobal)
 	}
-	return s.invalidation.graph.planInvalidation(tupleRefs(writes, deletes))
+	plan := s.invalidation.graph.planInvalidation(tupleRefs(writes, deletes))
+	if !plan.global {
+		plan.modelID = s.invalidation.modelID
+	}
+	return plan
+}
+
+// withModelGuard returns a copy of the service whose scoped writes check the
+// announced authorization model against modelID.
+func (s FgaService) withModelGuard(modelID string) FgaService {
+	s.invalidation.modelID = modelID
+	return s
+}
+
+// announceModel announces the service's authorization model to the shared
+// cache, flushes it, and schedules one more flush shortly after. It does
+// nothing unless scoped writes are enabled. An error means the announcement
+// could not be recorded, in which case the caller must stop scoped writes.
+func (s FgaService) announceModel(ctx context.Context) error {
+	if !s.invalidation.writesScoped() || s.invalidation.modelID == "" {
+		return nil
+	}
+	if err := s.cache.announceModel(ctx, s.invalidation.modelID); err != nil {
+		return err
+	}
+	s.cache.followUpFlush(ctx, modelFollowUpDelay)
+	return nil
 }
 
 // recordLookupOutcomes sets the hit, stale-hit and miss counts on a

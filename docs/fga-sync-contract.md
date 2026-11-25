@@ -333,6 +333,11 @@ uses it to bump only the markers that can matter.
 | `inv.t.{type}` | The written tuple's subject is not a single concrete user (a `user:*` wildcard, a userset such as `team:t#member`, or an object such as a parent project) | Every entry on each object type the tuple can affect, for all users |
 | `inv.u.{type}.{base32(user)}` | The written tuple's subject is one concrete user and the tuple is not on a relation that a `X from relation` rewrite traverses | Entries for that user on each object type the tuple can affect |
 
+`inv.model` is not an invalidation marker. It holds the ID of the authorization
+model announced by the newest replica in `scoped` mode, and no lookup reads it
+(so other cache consumers can ignore it). See
+[Changing the authorization model](#changing-the-authorization-model).
+
 The object types a tuple can affect are the transitive closure over the model:
 the tuple's own `type#relation`, relations on the same type derived from it, and
 relations on other types that inherit it through `X from parent` style rewrites,
@@ -390,13 +395,31 @@ Replicas that share the cache bucket must compute the same invalidation scopes.
 During an `OPENFGA_AUTH_MODEL_ID` change, an old-model replica may write markers
 that miss a dependency only the new model has (for example a new
 `viewer from committee` rewrite), and the relation exists in both models so the
-global fallback does not trigger. To change the model safely:
+global fallback does not trigger. In `scoped` mode the service guards against
+this itself:
 
-1. Move every replica to `read-scoped` before changing any model ID, and keep it
-   there for the whole transition.
-2. Change the model ID on every replica and wait for old-model replicas and their
-   in-flight work to drain.
-3. Write any value to the `inv` key, then return to `scoped`.
+1. When a replica starts in `scoped` mode with its model graph loaded, it writes
+   its model ID to `inv.model` and then bumps `inv`. The flush covers anything
+   an old-model replica scoped before this one started. About 10 seconds later it
+   bumps `inv` once more, to cover a write that read `inv.model` just before the
+   announcement.
+2. Before writing scoped markers, every replica reads `inv.model`. If it holds a
+   different model ID, the write bumps `inv` instead (reason `model_mismatch`);
+   if the read fails, the write also bumps `inv` (reason `model_check_failed`).
+   An old-model replica therefore writes globally as soon as the first new-model
+   replica starts, and keeps doing so until it is replaced.
+3. If a replica cannot record its announcement, it logs an error and writes
+   globally for the rest of its life.
+
+`inv.model` expires with the bucket TTL, far longer than a rollout, so a missing
+key counts as a match. The guard only protects replicas that run this check:
+roll out `read-scoped` everywhere first, as above, so no replica without it is
+writing scoped markers. The `global` and `read-scoped` modes need nothing here,
+because every write already bumps `inv`.
+
+A model bump therefore costs one global cache flush, which is deliberate: the
+cache key does not include the model ID, so entries computed under the old model
+may be wrong under the new one.
 
 ### Debugging cache behavior
 
