@@ -18,6 +18,9 @@ const (
 	RelationViewer             = "viewer"
 	RelationExecutiveDirector  = "executive_director"
 
+	// Groups.io mailing list relations
+	RelationPublic = "public"
+
 	// Meeting relations
 	RelationProject                       = "project"
 	RelationCommittee                     = "committee"

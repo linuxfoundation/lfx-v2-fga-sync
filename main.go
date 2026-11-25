@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -175,6 +176,30 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
+// bindCacheBucket binds the JetStream KV cache bucket. When the bucket does
+// not exist it logs a warning and returns a nil bucket with cache use forced
+// off, so the service keeps serving access checks straight from OpenFGA
+// instead of exiting. Any other error is returned: a replica without the
+// bucket cannot invalidate, so it must not keep running while other readers
+// of the shared bucket can.
+func bindCacheBucket(
+	ctx context.Context,
+	bind func(context.Context, string) (jetstream.KeyValue, error),
+	bucketName string,
+	useCache bool,
+) (INatsKeyValue, bool, error) {
+	bucket, err := bind(ctx, bucketName)
+	switch {
+	case errors.Is(err, jetstream.ErrBucketNotFound):
+		logger.With(errKey, err, "bucket", bucketName).
+			Warn("cache bucket not found; running with the cache disabled")
+		return nil, false, nil
+	case err != nil:
+		return nil, false, fmt.Errorf("error binding to cache bucket: %w", err)
+	}
+	return bucket, useCache, nil
+}
+
 // run contains the main service logic. It is separated from main() so that
 // deferred cleanup functions (e.g. OpenTelemetry shutdown) run before
 // main() calls os.Exit on error.
@@ -280,16 +305,22 @@ func run(bind, port string) error {
 	if err != nil {
 		return fmt.Errorf("error creating JetStream client: %w", err)
 	}
-	cacheBucket, err := srv.jsConn.KeyValue(context.Background(), cacheBucketName)
+	cacheBucket, useCache, err := bindCacheBucket(
+		context.Background(), srv.jsConn.KeyValue, cacheBucketName, os.Getenv("USE_CACHE") == trueString,
+	)
 	if err != nil {
-		return fmt.Errorf("error binding to cache bucket: %w", err)
+		return err
 	}
 
-	useCache := os.Getenv("USE_CACHE") == trueString
-
-	handlerService := HandlerService{
-		fgaService: newFgaService(fgaClient, cacheBucket, useCache),
+	fgaService := newFgaService(fgaClient, cacheBucket, useCache)
+	if cacheBucket == nil {
+		fgaService.cache.recovery = &bucketRecovery{
+			bind: func(ctx context.Context) (INatsKeyValue, error) {
+				return srv.jsConn.KeyValue(ctx, cacheBucketName)
+			},
+		}
 	}
+	handlerService := HandlerService{fgaService: fgaService}
 
 	if err = srv.createQueueSubscriptions(handlerService); err != nil {
 		return fmt.Errorf("error creating queue subscriptions: %w", err)

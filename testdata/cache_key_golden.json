@@ -1,0 +1,33 @@
+{
+  "invalidation_key": "inv",
+  "cases": [
+    {
+      "name": "plain user",
+      "object": "project:00000000-0000-4000-8000-000000000001",
+      "relation": "writer",
+      "user": "user:example-user",
+      "want": "rel.OBZG62TFMN2DUMBQGAYDAMBQGAWTAMBQGAWTIMBQGAWTQMBQGAWTAMBQGAYDAMBQGAYDAMJDO5ZGS5DFOJAHK43FOI5GK6DBNVYGYZJNOVZWK4Q"
+    },
+    {
+      "name": "group userset",
+      "object": "committee:00000000-0000-4000-8000-000000000002",
+      "relation": "member",
+      "user": "group:example-group#member",
+      "want": "rel.MNXW23LJOR2GKZJ2GAYDAMBQGAYDALJQGAYDALJUGAYDALJYGAYDALJQGAYDAMBQGAYDAMBQGIRW2ZLNMJSXEQDHOJXXK4B2MV4GC3LQNRSS2Z3SN52XAI3NMVWWEZLS"
+    },
+    {
+      "name": "non-ascii user",
+      "object": "project:00000000-0000-4000-8000-000000000003",
+      "relation": "viewer",
+      "user": "user:usér-ñame",
+      "want": "rel.OBZG62TFMN2DUMBQGAYDAMBQGAWTAMBQGAWTIMBQGAWTQMBQGAWTAMBQGAYDAMBQGAYDAMZDOZUWK53FOJAHK43FOI5HK46DVFZC3Q5RMFWWK"
+    },
+    {
+      "name": "longer than 200 bytes",
+      "object": "project:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "relation": "auditor",
+      "user": "user:long-key-user",
+      "want": "rel.OBZG62TFMN2DUYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCYLBMFQWCI3BOVSGS5DPOJAHK43FOI5GY33OM4WWWZLZFV2XGZLS"
+    }
+  ]
+}

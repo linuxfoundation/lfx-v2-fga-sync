@@ -33,7 +33,7 @@ jobs:
       - name: MegaLinter
         id: ml
         # Use the Go flavor.
-        uses: oxsecurity/megalinter/flavors/go@ef3e84b8b836d76db562d0f3ed7da61e8fd538bc  # v9.6.0
+        uses: oxsecurity/megalinter/flavors/go@9949bad031045f366be2467e00e8371a7328a2e2  # v10.1.0
         # Only Actions-specific values (secrets, runner behavior) belong
         # here. Generic MegaLinter/repo config belongs in .mega-linter.yml
         # so local runs (e.g. mega-linter-runner) get the same behavior.
@@ -44,10 +44,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
           REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
-          # go.mod can require a newer patch than the Go bundled in the
-          # MegaLinter image. osv-scanner's govulncheck call analysis fails
-          # under the image's GOTOOLCHAIN=local, which makes the check exit
-          # non-zero even with no findings.
+          # Lets Go-based linters download the go.mod toolchain when it is
+          # newer than the Go bundled in the MegaLinter image.
           GOTOOLCHAIN: auto
           # zizmor's "artipacked" audit needs the GitHub API (to verify
           # SHA-pinned action tags), which requires GITHUB_TOKEN.

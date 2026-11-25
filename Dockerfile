@@ -27,8 +27,9 @@ RUN go build -o /go/bin/fga-sync -trimpath -ldflags="-w -s" .
 # Run our go binary standalone
 FROM cgr.dev/chainguard/static:latest
 
-# Implicit with base image; setting explicitly for linters.
-USER nonroot
+# Implicit with base image; setting explicitly for linters. 65532 is the
+# numeric UID of the Chainguard nonroot user.
+USER 65532
 
 COPY --from=builder /go/bin/fga-sync /fga-sync
 

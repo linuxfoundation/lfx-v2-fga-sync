@@ -30,18 +30,20 @@ func (h *HandlerService) accessCheckHandler(ctx context.Context, message INatsMs
 	var response []byte
 	var err error
 
-	logger.With("message", string(message.Data())).InfoContext(ctx, "handling access check request")
-
-	// Extract the check requests from the message payload.
+	// Extract the check requests from the message payload. A rejected payload
+	// is attacker-controlled and may be kilobytes long, so it is logged by size
+	// only.
 	checkRequests, err := h.fgaService.ExtractCheckRequests(message.Data())
 	if err != nil {
 		errText := "failed to extract check requests"
-		logger.With(errKey, err).WarnContext(ctx, errText)
+		logger.With(errKey, err, "payload_bytes", len(message.Data())).WarnContext(ctx, errText)
 		if replyErr := h.reply(ctx, message, []byte(errText)); replyErr != nil {
 			return replyErr
 		}
 		return err
 	}
+
+	logger.With("message", string(message.Data())).InfoContext(ctx, "handling access check request")
 
 	if len(checkRequests) == 0 {
 		errText := "no check requests found"

@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
@@ -411,7 +412,12 @@ func (s FgaService) SyncObjectTuples(
 			// explicit querying of resource-parent relationships (or similar)
 			// which don't resolve back to a user.
 			relationKey := relation.Object + "#" + relation.Relation + "@" + relation.User
-			cacheKeysByTuple[relationKey] = "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			// A longer key would put the NATS subject over the server's
+			// control-line limit. Access checks reject such lines, so the entry
+			// could never be read anyway.
+			if len(relationKey) <= maxRelationKeyBytes {
+				cacheKeysByTuple[relationKey] = "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
+			}
 		}
 	}
 
@@ -576,7 +582,9 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 
 // ExtractCheckRequests extracts the check requests from our binary message
 // payload format, which is a newline-delineated list of the format
-// `object#relation@user`.
+// `object#relation@user`. One invalid line fails the whole request (see
+// parseCheckRequest), as OpenFGA fails a whole batch check on one invalid
+// item.
 func (s FgaService) ExtractCheckRequests(payload []byte) ([]ClientCheckRequest, error) {
 	checkRequests := make([]ClientCheckRequest, 0)
 
@@ -604,19 +612,25 @@ func (s FgaService) ExtractCheckRequests(payload []byte) ([]ClientCheckRequest, 
 }
 
 // parseCheckRequest parses a single check request from the format
-// `object#relation@user`.
+// `object#relation@user`. It rejects any line OpenFGA would reject (see
+// validateCheckField) and any line over maxRelationKeyBytes, before the line
+// can reach the cache or OpenFGA. Errors never include the line.
 func (s FgaService) parseCheckRequest(line []byte) (*ClientCheckRequest, error) {
+	if len(line) > maxRelationKeyBytes {
+		return nil, fmt.Errorf("invalid check request: line is %d bytes, limit is %d", len(line), maxRelationKeyBytes)
+	}
+
 	// Split the user from the object and relation.
 	var firstPart, userPart []byte
 	var found bool
 	if firstPart, userPart, found = bytes.Cut(line, []byte("@")); !found {
-		return nil, fmt.Errorf("invalid check request: %s", line)
+		return nil, errors.New("invalid check request: missing @")
 	}
 
 	// Split the object and relation.
 	var objectPart, relationPart []byte
 	if objectPart, relationPart, found = bytes.Cut(firstPart, []byte("#")); !found {
-		return nil, fmt.Errorf("invalid check request: %s", line)
+		return nil, errors.New("invalid check request: missing #")
 	}
 
 	// Create the check request.
@@ -626,7 +640,37 @@ func (s FgaService) parseCheckRequest(line []byte) (*ClientCheckRequest, error) 
 		Object:   string(objectPart),
 	}
 
+	if err := validateCheckField("object", checkRequest.Object, 2, 256, openfgaWhitespace); err != nil {
+		return nil, err
+	}
+	if err := validateCheckField("relation", checkRequest.Relation, 1, 50, openfgaWhitespace+":#@"); err != nil {
+		return nil, err
+	}
+	if err := validateCheckField("user", checkRequest.User, 2, 512, openfgaWhitespace); err != nil {
+		return nil, err
+	}
+
 	return checkRequest, nil
+}
+
+// openfgaWhitespace is the set OpenFGA's `\s` matches (Go RE2): narrower than
+// unicode.IsSpace, which would also reject vertical tab and Unicode spaces
+// that OpenFGA accepts.
+const openfgaWhitespace = "\t\n\f\r "
+
+// validateCheckField applies one OpenFGA CheckRequestTupleKey field rule
+// (openfga/api openfga_service.proto): a length in characters, as OpenFGA's
+// regular expressions count, and characters the field may not contain. The
+// limits must equal OpenFGA's; stricter ones would reject checks OpenFGA
+// answers today.
+func validateCheckField(name, value string, minChars, maxChars int, disallowed string) error {
+	if n := utf8.RuneCountInString(value); n < minChars || n > maxChars {
+		return fmt.Errorf("invalid check request: %s is %d characters, allowed %d-%d", name, n, minChars, maxChars)
+	}
+	if strings.ContainsAny(value, disallowed) {
+		return fmt.Errorf("invalid check request: %s contains a disallowed character", name)
+	}
+	return nil
 }
 
 // ── Span helpers ──────────────────────────────────────────────────────────────
