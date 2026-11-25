@@ -30,6 +30,14 @@ func (r *cacheWriteRecorder) Put(context.Context, string, []byte) (uint64, error
 	return 1, nil
 }
 
+func (r *cacheWriteRecorder) Create(context.Context, string, []byte, ...jetstream.KVCreateOpt) (uint64, error) {
+	return 1, nil
+}
+
+func (r *cacheWriteRecorder) Update(context.Context, string, []byte, uint64) (uint64, error) {
+	return 1, nil
+}
+
 func (r *cacheWriteRecorder) PutString(_ context.Context, key, _ string) (uint64, error) {
 	r.writes <- key
 	return 1, nil
@@ -350,4 +358,82 @@ func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {
 
 	err := cache.invalidate(context.Background(), globalReasonModeGlobal)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestCacheLayerFenceStopsWriteBacksAndSeeding covers a replica whose model is
+// not the announced one: it still builds replies but writes nothing to the
+// shared cache, and writes again once the fence lifts.
+func TestCacheLayerFenceStopsWriteBacksAndSeeding(t *testing.T) {
+	ctx := context.Background()
+	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
+	result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
+	byID := map[string]client.ClientBatchCheckItem{"1": tuple}
+	wantKey := "rel." + cacheKeyEncoder.EncodeToString([]byte("project:example#viewer@user:example-user"))
+
+	t.Run("a blocked fence skips both and still replies", func(t *testing.T) {
+		kv := &keyRecordingKV{}
+		fence := &modelFence{}
+		fence.blocked.Store(true)
+		cache := CacheLayer{bucket: kv, fence: fence}
+		before := cacheWriteBacksFenced.Value()
+
+		out := cache.buildResponseAndWriteBack(ctx, nil, result, byID)
+		cache.seedPositiveEntries(ctx, []string{"rel.KEY1", "rel.KEY2"})
+
+		assert.Contains(t, string(out), "project:example#viewer@user:example-user\ttrue")
+		assert.Empty(t, kv.puts)
+		assert.Equal(t, int64(3), cacheWriteBacksFenced.Value()-before)
+	})
+
+	t.Run("an unblocked or missing fence writes", func(t *testing.T) {
+		for name, fence := range map[string]*modelFence{"unblocked": {}, "none": nil} {
+			t.Run(name, func(t *testing.T) {
+				kv := &keyRecordingKV{}
+				cache := CacheLayer{bucket: kv, fence: fence}
+				cache.buildResponseAndWriteBack(ctx, nil, result, byID)
+				assert.Equal(t, []string{wantKey}, kv.puts)
+			})
+		}
+	})
+}
+
+// TestSeedPositiveEntriesRechecksFenceBeforeWriting covers a seed write that
+// waited for a cache slot while a different model was announced: it must not
+// write an old-model entry after the announcement's flush.
+func TestSeedPositiveEntriesRechecksFenceBeforeWriting(t *testing.T) {
+	for i := 0; i < cap(cacheOpSem); i++ {
+		cacheOpSem <- struct{}{}
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		for i := 0; i < cap(cacheOpSem); i++ {
+			<-cacheOpSem
+		}
+	}
+	t.Cleanup(release)
+
+	kv := &keyRecordingKV{}
+	fence := &modelFence{}
+	cache := CacheLayer{bucket: kv, fence: fence}
+	before := cacheWriteBacksFenced.Value()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cache.seedPositiveEntries(context.Background(), []string{"rel.KEY1", "rel.KEY2"})
+	}()
+	time.Sleep(50 * time.Millisecond) // both writes are admitted and waiting for a slot
+
+	fence.blocked.Store(true)
+	release()
+	<-done
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	assert.Empty(t, kv.puts, "a seed write that waited past the announcement must not be written")
+	assert.Equal(t, int64(2), cacheWriteBacksFenced.Value()-before)
 }

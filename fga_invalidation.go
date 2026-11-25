@@ -8,9 +8,11 @@ import (
 	"context"
 	"errors"
 	"expvar"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -50,6 +52,35 @@ const (
 	// scoped marker writes fail.
 	invalidationFallbackTimeout = 5 * time.Second
 
+	// modelMarkerKey holds the ID of the newest authorization model announced
+	// by a replica in scoped mode. OpenFGA model IDs are ULIDs, so they sort by
+	// creation time and a replica can tell it is the older one. Scoped writes check it so a
+	// replica on an older model, whose graph can miss dependencies, writes
+	// globally instead. It expires with the bucket TTL, which is far longer than
+	// a rollout, so a missing marker is treated as a match.
+	modelMarkerKey = "inv.model"
+	// modelMarkerReadTimeout bounds the read of modelMarkerKey on a scoped
+	// write, so a slow read cannot use up the whole invalidation budget and
+	// leave the global fallback with nothing.
+	modelMarkerReadTimeout = 2 * time.Second
+	// modelFollowUpDelay is how long after announcing a model the replica bumps
+	// the global key once more. It must outlast the slowest path by which a
+	// replica on the previous model can still write after the announcement: it
+	// notices the new marker within modelFenceInterval plus two marker reads
+	// (the poll in flight when the marker lands, then the next one), and a cache
+	// write it had already started can run for cacheWriteTimeout. With the
+	// defaults that is 2s + 2*2s + 5s = 11s. A scoped marker write started just
+	// before the announcement is covered by invalidationFallbackTimeout, which is
+	// shorter. The margin absorbs scheduling delays.
+	modelFollowUpDelay = 15 * time.Second
+
+	// modelMarkerWriteAttempts bounds how often one announcement re-reads the
+	// marker after losing a race to another replica's write.
+	modelMarkerWriteAttempts = 5
+	// modelAnnounceAttempts is how many times startup tries to record the
+	// model announcement before degrading.
+	modelAnnounceAttempts = 3
+
 	// invalidationModeEnv selects how cache invalidation is scoped.
 	invalidationModeEnv = "INVALIDATION_MODE"
 
@@ -83,6 +114,15 @@ const (
 	// globalReasonScopedWriteFailed means a scoped marker write failed and the
 	// write fell back to the global key.
 	globalReasonScopedWriteFailed = "scoped_write_failed"
+	// globalReasonModelMismatch means another replica announced a different
+	// authorization model, so this replica's graph cannot be trusted.
+	globalReasonModelMismatch = "model_mismatch"
+	// globalReasonModelCheckFailed means the announced model could not be read,
+	// so the write fell back to the global key.
+	globalReasonModelCheckFailed = "model_check_failed"
+	// globalReasonModelAnnounce is the flush a replica writes when it announces
+	// its authorization model at startup.
+	globalReasonModelAnnounce = "model_announce"
 )
 
 // markerKind names which marker decided the invalidation cutoff for one
@@ -107,14 +147,31 @@ var staleMarkerKinds = []markerKind{
 	markerKindGlobal, markerKindType, markerKindUser, markerKindUnreadable,
 }
 
+// modelMarkerKeepAliveInterval is how often a replica renews its own model
+// marker. It must stay well below the cache bucket TTL (3h by default). It is a
+// variable so tests do not wait.
+var modelMarkerKeepAliveInterval = time.Hour
+
+// modelFenceInterval is how often a replica re-reads modelMarkerKey to see
+// whether a different model has been announced. It must stay well below
+// modelFollowUpDelay: whatever an outdated replica writes back before it notices
+// is cleared by the follow-up flush. It is a variable so tests do not wait.
+var modelFenceInterval = 2 * time.Second
+
+// modelAnnounceRetryDelay separates announcement attempts. It is a variable so
+// tests do not wait on it.
+var modelAnnounceRetryDelay = time.Second
+
 var (
 	cacheInvalidationsGlobal *expvar.Int
 	cacheInvalidationsScoped *expvar.Int
+	cacheWriteBacksFenced    *expvar.Int
 )
 
 func init() {
 	cacheInvalidationsGlobal = expvar.NewInt("cache_invalidations_global")
 	cacheInvalidationsScoped = expvar.NewInt("cache_invalidations_scoped")
+	cacheWriteBacksFenced = expvar.NewInt("cache_write_backs_fenced")
 }
 
 // invalidationMode selects how writes invalidate the cache and how lookups
@@ -169,6 +226,9 @@ func (m invalidationMode) String() string {
 type invalidationConfig struct {
 	mode  invalidationMode
 	graph *modelGraph
+	// modelID is the authorization model the graph was built from. When set,
+	// scoped plans carry it so writes can check the announced model.
+	modelID string
 }
 
 // readsScoped reports whether lookups must consult scoped markers.
@@ -207,6 +267,10 @@ type invalidationPlan struct {
 	reason string
 	types  []string
 	users  []userMarker
+	// modelID is the authorization model the plan was computed from. It is set
+	// on scoped plans so applyInvalidation can check no other model has been
+	// announced since.
+	modelID string
 }
 
 // globalPlan is the plan used whenever scoping cannot be proven safe.
@@ -396,6 +460,16 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		return c.invalidate(ctx, reason)
 	}
 
+	if reason := checkModelMarker(ctx, bucket, plan.modelID); reason != "" {
+		cacheInvalidationsGlobal.Add(1)
+		// The marker read may have used up the caller's deadline, so the global
+		// write gets its own, or it could not land and the write would leave
+		// nothing invalidated.
+		fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), invalidationFallbackTimeout)
+		defer cancel()
+		return c.invalidate(fallbackCtx, reason)
+	}
+
 	keys := plan.markerKeys()
 	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
 		trace.WithAttributes(
@@ -434,6 +508,291 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 		"user_markers", len(plan.users),
 	).InfoContext(ctx, "wrote scoped cache invalidation markers")
 	return nil
+}
+
+// checkModelMarker returns the global reason a scoped plan must not be applied,
+// or "" when it may. A scoped plan is only valid if no replica on a different
+// authorization model has announced itself: such a replica's graph may have
+// dependencies this one lacks. A missing marker is a match, because it expires
+// long after any rollout has finished. A read failure is not, since global
+// invalidation is always safe.
+func checkModelMarker(ctx context.Context, bucket INatsKeyValue, modelID string) string {
+	if modelID == "" {
+		return ""
+	}
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		return ""
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; invalidating globally")
+		return globalReasonModelCheckFailed
+	case string(entry.Value()) != modelID:
+		return globalReasonModelMismatch
+	}
+	return ""
+}
+
+// errOutdatedModel means a replica on a newer authorization model has already
+// announced itself, so this one must not touch the marker and must write
+// globally.
+var errOutdatedModel = errors.New("a newer authorization model has been announced")
+
+// announceModel records modelID as the authorization model in use. It reports
+// whether it flushed the cache.
+//
+//   - No marker, or one for an older model: bump inv, then write the marker. The
+//     flush covers anything a replica on an older model scoped before this one
+//     started; the marker makes those replicas write globally and stop writing
+//     to the cache from then on. The marker goes last so that it only ever means
+//     "the flush after the previous model completed": a replica that finds its
+//     own model's marker can skip the flush, and must be able to trust that it
+//     was done. If the flush fails nothing is announced and the caller retries
+//     the whole announcement.
+//   - The same model: another replica already flushed and announced, so only
+//     refresh the marker's TTL. A pod restart must not flush the whole cache.
+//   - A newer model: return errOutdatedModel without changing anything, so a
+//     replica of an older model that restarts mid-rollout cannot take the marker
+//     back and re-enable scoped writes from its outdated graph.
+//
+// Every marker write is conditional on the revision just read (Create when
+// there was none), so a newer announcement that lands between the read and the
+// write is never overwritten: the write conflicts, the marker is read again and
+// the same rules apply. A flush made before such a conflict is wasted but
+// harmless.
+//
+// It is a no-op while no bucket exists. If the flush succeeds but the marker
+// cannot be written, the error is returned so the caller can stop trusting the
+// shared cache.
+func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed bool, err error) {
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return false, err
+	}
+	for attempt := 0; attempt < modelMarkerWriteAttempts; attempt++ {
+		entry, getErr := bucket.Get(ctx, modelMarkerKey)
+		var writeMarker func() error
+		switch {
+		case errors.Is(getErr, jetstream.ErrKeyNotFound):
+			writeMarker = func() error {
+				_, e := bucket.Create(ctx, modelMarkerKey, []byte(modelID))
+				return e
+			}
+		case getErr != nil:
+			return false, fmt.Errorf("error reading model marker: %w", getErr)
+		case string(entry.Value()) > modelID:
+			return false, errOutdatedModel
+		case string(entry.Value()) == modelID:
+			_, putErr := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+			if errors.Is(putErr, jetstream.ErrKeyExists) {
+				continue
+			}
+			if putErr != nil {
+				logger.With(errKey, putErr).WarnContext(ctx, "could not refresh model marker")
+			}
+			return false, nil
+		default:
+			writeMarker = func() error {
+				_, e := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+				return e
+			}
+		}
+		if flushErr := c.invalidate(ctx, globalReasonModelAnnounce); flushErr != nil {
+			return false, fmt.Errorf("error flushing the cache for the model announcement: %w", flushErr)
+		}
+		putErr := writeMarker()
+		if errors.Is(putErr, jetstream.ErrKeyExists) {
+			continue // another replica announced first; read it again
+		}
+		if putErr != nil {
+			return true, fmt.Errorf("error writing model marker: %w", putErr)
+		}
+		return true, nil
+	}
+	return false, errors.New("model marker kept changing while announcing the model")
+}
+
+// modelFence stops a replica from writing to the shared cache while the
+// announced authorization model is not its own. Cache keys do not carry the
+// model, so an outdated replica that kept answering checks during a rollout
+// would write answers computed under the old model where replicas on the new
+// model read them as fresh, and the startup flushes cannot clear what is
+// written after them. Reads are unaffected: the replica keeps serving, from the
+// cache and from OpenFGA.
+//
+// The zero value is not fenced, and so is a nil *modelFence.
+type modelFence struct {
+	blocked atomic.Bool
+	// sawOther is set once the marker has held a different model ID, and cleared
+	// only when it holds this replica's. It keeps the fence closed if the marker
+	// later expires: a missing marker only means "nobody has announced" for a
+	// replica that has never seen another model.
+	sawOther atomic.Bool
+	// announceAgain, when set, announces this replica's model again. It is used
+	// when the marker has gone missing after a different model was seen: nothing
+	// renews another model's marker once its replicas are gone, so without it a
+	// replica left on the older model, for instance after a rollback, would stay
+	// fenced until it restarted.
+	// It gets a short-lived context for the announcement itself and the
+	// replica's long-lived one for the follow-up flush it schedules.
+	announceAgain func(announceCtx, runCtx context.Context) error
+}
+
+// isBlocked reports whether write-backs and seeding must be skipped.
+func (f *modelFence) isBlocked() bool {
+	return f != nil && f.blocked.Load()
+}
+
+// refresh re-reads modelMarkerKey and updates the fence. A marker for a
+// different model fences, and stays fencing if the marker later expires; only
+// this replica's own model ID lifts it. A missing marker fences nothing for a
+// replica that has not seen another model. A failed read fences too: not being
+// able to tell is treated as not safe to write, at the cost of cache misses
+// served by OpenFGA.
+func (f *modelFence) refresh(ctx context.Context, bucket INatsKeyValue, modelID string) {
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	var block bool
+	switch {
+	case errors.Is(err, jetstream.ErrKeyNotFound):
+		block = f.sawOther.Load()
+		if block && f.announceAgain != nil {
+			block = !f.tryAnnounceAgain(ctx)
+		}
+	case err != nil:
+		block = true
+	case string(entry.Value()) != modelID:
+		f.sawOther.Store(true)
+		block = true
+	default:
+		f.sawOther.Store(false)
+	}
+	if f.blocked.Swap(block) == block {
+		return
+	}
+	switch {
+	case err != nil:
+		logger.With(errKey, err).WarnContext(ctx, "could not read model marker; not writing to the shared cache")
+	case block:
+		logger.With("model_id", modelID).WarnContext(ctx,
+			"a different authorization model has been announced; not writing to the shared cache")
+	default:
+		logger.With("model_id", modelID).InfoContext(ctx,
+			"announced authorization model matches; writing to the shared cache")
+	}
+}
+
+// tryAnnounceAgain announces this replica's model again and reports whether the
+// fence may lift. It does not lift it if a newer model announced in the
+// meantime (the marker then names it, and the next refresh sees that) or if the
+// announcement failed; the next refresh tries again.
+func (f *modelFence) tryAnnounceAgain(ctx context.Context) bool {
+	announceCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+	defer cancel()
+	err := f.announceAgain(announceCtx, ctx)
+	switch {
+	case err == nil:
+		f.sawOther.Store(false)
+		logger.InfoContext(ctx, "model marker expired after a different model was seen; announced this replica's model again")
+		return true
+	case errors.Is(err, errOutdatedModel):
+		return false
+	default:
+		logger.With(errKey, err).WarnContext(ctx, "could not announce the model again after the marker expired")
+		return false
+	}
+}
+
+// watch refreshes the fence every interval until ctx ends. It also keeps the
+// replica's own marker from expiring, on its own goroutine so a slow renewal
+// cannot delay the refresh that closes the fence.
+func (f *modelFence) watch(ctx context.Context, bucket INatsKeyValue, modelID string, interval time.Duration) {
+	var keepAlive sync.WaitGroup
+	keepAlive.Add(1)
+	go func(every time.Duration) {
+		defer keepAlive.Done()
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				keepModelMarkerAlive(ctx, bucket, modelID)
+			}
+		}
+	}(modelMarkerKeepAliveInterval)
+	defer keepAlive.Wait()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.refresh(ctx, bucket, modelID)
+		}
+	}
+}
+
+// keepModelMarkerAlive renews modelMarkerKey's TTL while it still holds this
+// replica's model ID. The marker is written once, at announcement, and expires
+// with the bucket TTL; without renewal a replica left on an older model after
+// that would find no marker and take it for "nobody has announced". A missing
+// marker is left alone, and a conflicting write (another replica announced or
+// refreshed first) is not an error.
+func keepModelMarkerAlive(ctx context.Context, bucket INatsKeyValue, modelID string) {
+	readCtx, cancel := context.WithTimeout(ctx, modelMarkerReadTimeout)
+	defer cancel()
+	entry, err := bucket.Get(readCtx, modelMarkerKey)
+	if err != nil || string(entry.Value()) != modelID {
+		return
+	}
+	if _, err = bucket.Update(readCtx, modelMarkerKey, []byte(modelID), entry.Revision()); err != nil &&
+		!errors.Is(err, jetstream.ErrKeyExists) {
+		logger.With(errKey, err).WarnContext(ctx, "could not renew model marker")
+	}
+}
+
+// followUpFlush bumps the global key once more after delay. It clears what a
+// replica on the previous model wrote before it noticed the new announcement: a
+// scoped marker from a write that read the old model ID just before
+// announceModel ran, or a cache write-back made before its fence closed (the
+// fence polls, so it can lag by a few seconds). A failed flush is retried up to
+// modelAnnounceAttempts times, and gives up with an error log. It returns
+// immediately and stops when ctx is canceled. It runs in the announcing
+// replica, so it does not run if that replica exits during the delay.
+func (c CacheLayer) followUpFlush(ctx context.Context, delay time.Duration) {
+	go func() {
+		wait := delay
+		var err error
+		for attempt := 0; attempt < modelAnnounceAttempts; attempt++ {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			wait = modelAnnounceRetryDelay
+
+			flushCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+			err = c.invalidate(flushCtx, globalReasonModelAnnounce)
+			cancel()
+			if err == nil {
+				return
+			}
+			logger.With(errKey, err, "attempt", attempt+1).WarnContext(ctx,
+				"follow-up cache flush after model announcement failed")
+		}
+		logger.With(errKey, err).ErrorContext(ctx,
+			"follow-up cache flush after model announcement gave up; entries written by old-model replicas "+
+				"during the rollout may stay cached until they expire")
+	}()
 }
 
 // markerRead is one marker lookup result. A marker that does not exist has a

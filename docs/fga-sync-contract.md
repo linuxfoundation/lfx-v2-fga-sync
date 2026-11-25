@@ -333,6 +333,11 @@ uses it to bump only the markers that can matter.
 | `inv.t.{type}` | The written tuple's subject is not a single concrete user (a `user:*` wildcard, a userset such as `team:t#member`, or an object such as a parent project) | Every entry on each object type the tuple can affect, for all users |
 | `inv.u.{type}.{base32(user)}` | The written tuple's subject is one concrete user and the tuple is not on a relation that a `X from relation` rewrite traverses | Entries for that user on each object type the tuple can affect |
 
+`inv.model` is not an invalidation marker. It holds the ID of the authorization
+model announced by the newest replica in `scoped` mode, and no lookup reads it
+(so other cache consumers can ignore it). See
+[Changing the authorization model](#changing-the-authorization-model).
+
 The object types a tuple can affect are the transitive closure over the model:
 the tuple's own `type#relation`, relations on the same type derived from it, and
 relations on other types that inherit it through `X from parent` style rewrites,
@@ -390,18 +395,97 @@ Replicas that share the cache bucket must compute the same invalidation scopes.
 During an `OPENFGA_AUTH_MODEL_ID` change, an old-model replica may write markers
 that miss a dependency only the new model has (for example a new
 `viewer from committee` rewrite), and the relation exists in both models so the
-global fallback does not trigger. To change the model safely:
+global fallback does not trigger. In `scoped` mode the service guards against
+this itself, and access checks keep being answered throughout:
 
-1. Move every replica to `read-scoped` before changing any model ID, and keep it
-   there for the whole transition.
-2. Change the model ID on every replica and wait for old-model replicas and their
-   in-flight work to drain.
-3. Write any value to the `inv` key, then return to `scoped`.
+1. A replica in `scoped` mode announces its model ID in `inv.model` at startup,
+   whether or not its model graph loaded.
+   - No marker, or one for an older model: it bumps `inv`, then writes the
+     marker. The flush covers anything an old-model replica scoped before this
+     one started. About 15 seconds later it bumps `inv` once more, to cover a
+     write made between the flush and the marker. The marker goes last so it only
+     ever means the flush completed; if the flush fails nothing is announced and
+     the whole announcement is retried.
+   - The same model: another replica already flushed and announced, so it only
+     refreshes the marker. An ordinary pod restart does not flush the cache.
+   - A newer model: it leaves the marker alone and writes globally. Model IDs are
+     ULIDs, which sort by creation time, so an old-model pod that restarts
+     mid-rollout cannot take the marker back. After a rollback to an older model,
+     replicas stay on global writes until the marker expires (at most the bucket
+     TTL).
+   Every marker write is conditional on the revision just read, so a newer
+   announcement that lands in between is never overwritten: the write conflicts
+   and the marker is read again.
+2. Before writing scoped markers, every replica reads `inv.model`. If it holds a
+   different model ID, the write bumps `inv` instead (reason `model_mismatch`);
+   if the read fails or times out, the write also bumps `inv` (reason
+   `model_check_failed`). The fallback write has its own deadline. An old-model
+   replica therefore writes globally as soon as the first new-model replica
+   starts, and keeps doing so until it is replaced.
+3. If a replica cannot record its announcement after 3 attempts, it logs an error
+   and stops reading from and writing to the shared cache, because older
+   replicas may keep scoping with an outdated graph. It still starts, answers
+   access checks from OpenFGA, and still writes `inv` on tuple writes.
+
+`inv.model` expires with the bucket TTL unless a replica on that model is running
+(replicas renew it hourly), so a missing key means nobody has announced recently
+and counts as a match. The guard only protects replicas that run this check:
+roll out `read-scoped` everywhere first, as above, so no replica without it is
+writing scoped markers. The `global` and `read-scoped` modes need nothing here,
+because every write already bumps `inv`.
+
+A model bump costs one global cache flush, which is deliberate: the cache key
+does not include the model ID, so entries computed under the old model may be
+wrong under the new one.
+
+**Replicas on a different model stop writing to the cache.** The flushes above
+run at startup, so on their own they cannot clear what an old-model replica
+writes back afterwards: the cache key does not carry the model, and a replica
+that is still answering checks during the rollout would write answers computed
+under the old model where new-model replicas read them as fresh. Each replica in
+`scoped` mode therefore re-reads `inv.model` every 2 seconds. While the marker
+holds a different model ID, or cannot be read, it skips cache write-backs and
+seeding (counted in `cache_write_backs_fenced`), re-checking just before each
+write. It keeps serving access checks, from the cache where an entry is fresh and
+from OpenFGA otherwise.
+
+- **Lifting the fence.** A replica that has seen a different model stays fenced
+  until the marker holds its own model ID again, even if the marker expires in
+  the meantime. A replica that has never seen another model treats a missing
+  marker as "nobody has announced". Replicas renew their own marker hourly, on a
+  separate goroutine so a slow renewal cannot delay the poll, so it does not
+  expire while a replica on that model is running. If the marker expires while a
+  replica is fenced (for example after a rollback, once the replicas on the newer
+  model are gone and nothing renews their marker), that replica announces its own
+  model again: it flushes, creates the marker and lifts the fence. If a newer
+  model announced in the meantime, it stays fenced.
+- **What clears the gap.** Whatever an outdated replica wrote before its next
+  poll is cleared by the follow-up flush, 15 seconds after the announcement. It
+  is retried up to 3 times and logs an error if it gives up.
+- **The residual window.** For up to about 15 seconds after an announcement, a
+  new-model replica can serve an answer that an old-model replica cached just
+  before it noticed. The delay is chosen to outlast the slowest path: the old
+  replica notices within one 2-second poll plus two marker reads (the poll in
+  flight when the marker lands, then the next, 2 seconds each when the KV is
+  slow), and a cache write it had already started can take up to 5 seconds, 11
+  seconds in all. The announcement flushes before it writes the marker so that
+  the marker only ever means the flush completed. That leaves the old replicas
+  unfenced for the gap between those two back-to-back writes, which is far
+  shorter than the poll lag, so ordering them the other way would not shrink the
+  window.
+
+No manual `inv` write is needed after a model change once every replica runs this
+version, with two exceptions. A replica running an older version does not fence,
+so the first rollout that introduces this version still needs one `inv` write
+after it has drained. And the follow-up flush runs in the announcing replica, so
+if that replica exits within 15 seconds of announcing, or the follow-up gives up,
+write `inv` once the rollout has drained.
 
 ### Debugging cache behavior
 
 - Counters at `/debug/vars`: `cache_hits`, `cache_misses`, `cache_stale_hits`,
-  `cache_invalidations_global`, `cache_invalidations_scoped`. A high global count in
+  `cache_invalidations_global`, `cache_invalidations_scoped`,
+  `cache_write_backs_fenced`. A high global count in
   `scoped` mode means writes are not being scoped; check the logs for
   `could not build model graph` and for writes with conditions or unknown relations.
 - OTel spans for cache operations: `fga_sync.cache.lookup` (requested and
