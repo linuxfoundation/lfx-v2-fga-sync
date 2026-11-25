@@ -168,18 +168,19 @@ make run
 ### Kubernetes
 
 ```bash
-# Deploy with Helm
+# Deploy without fga-operator.
 helm install fga-sync ./charts/lfx-v2-fga-sync \
   --set nats.url=nats://lfx-platform-nats.lfx.svc.cluster.local:4222 \
   --set fga.apiUrl=http://lfx-platform-openfga.lfx.svc.cluster.local:8080 \
+  --set deployment.labels.openfga-store=null \
   --set fga.storeId=$OPENFGA_STORE_ID \
   --set fga.modelId=$OPENFGA_AUTH_MODEL_ID
 ```
 
 Clusters running `fga-operator` populate `OPENFGA_STORE_ID`/`OPENFGA_AUTH_MODEL_ID`
-automatically from the `openfga-store` Deployment label, so the `--set fga.storeId`/
-`--set fga.modelId` overrides above are only needed for standalone (non-operator)
-setups.
+automatically from the default `openfga-store` Deployment label. For standalone
+setups, remove that label as shown above; the chart omits the ID environment
+variables whenever the label is present, even if the operator is not running.
 
 ## Troubleshooting
 

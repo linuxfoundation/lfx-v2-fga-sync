@@ -42,11 +42,6 @@ jobs:
           # All available variables are described in documentation
           # https://megalinter.io/configuration/
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Allow GITHUB_TOKEN for working around rate limits (aquasecurity/trivy#7668).
-          REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN
           # Lets Go-based linters download the go.mod toolchain when it is
           # newer than the Go bundled in the MegaLinter image.
           GOTOOLCHAIN: auto
-          # zizmor's "artipacked" audit needs the GitHub API (to verify
-          # SHA-pinned action tags), which requires GITHUB_TOKEN.
-          ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES: GITHUB_TOKEN

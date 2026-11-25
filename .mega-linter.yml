@@ -14,12 +14,7 @@ GITHUB_COMMENT_REPORTER: false
 # File filters
 # Templates directory is excluded since it contains Helm templating macros
 # that typically fail YAML linting and/or schema checking.
-FILTER_REGEX_EXCLUDE: |
-  (\.git/)
-  (bin/)
-  (coverage\.(out|html))
-  (\.claude)
-  (templates/.*\.yaml)
+FILTER_REGEX_EXCLUDE: '(\.git/|bin/|coverage\.(out|html)|\.claude|templates/.*\.yaml)'
 
 DISABLE_LINTERS:
   # We are setting KUBERNETES_DIRECTORY to the helm chart so the
@@ -52,6 +47,10 @@ DISABLE_ERRORS_LINTERS:
 # YAML settings
 YAML_YAMLLINT_CONFIG_FILE: .yamllint.yml
 
+# Helm settings.
+KUBERNETES_DIRECTORY: charts/lfx-v2-fga-sync
+KUBERNETES_HELM_ARGUMENTS: charts/lfx-v2-fga-sync
+
 # Markdown settings
 MARKDOWN_MARKDOWNLINT_CONFIG_FILE: .markdownlint.yml
 
@@ -76,4 +75,7 @@ SPELL_CSPELL_POST_COMMANDS:
 REPOSITORY_CHECKOV_ARGUMENTS: --skip-check CKV_DOCKER_2,CKV_DOCKER_3
 REPOSITORY_TRIVY_ARGUMENTS: --skip-dirs bin,vendor --severity HIGH,CRITICAL
 REPOSITORY_TRIVY_UNSECURED_ENV_VARIABLES:
+  - GITHUB_TOKEN
+# zizmor's online audits use the GitHub API to verify pinned action refs.
+ACTION_ZIZMOR_UNSECURED_ENV_VARIABLES:
   - GITHUB_TOKEN
