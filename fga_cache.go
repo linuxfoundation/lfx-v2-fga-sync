@@ -79,6 +79,10 @@ var (
 	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
 	// capacity hostage.
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
+
+	// writeBackCleanupTimeout bounds each step of removing an overtaken
+	// write-back: the deletes, then the fallback marker write.
+	writeBackCleanupTimeout = 5 * time.Second
 )
 
 func init() {
@@ -465,22 +469,26 @@ func (c CacheLayer) invalidatedSince(ctx context.Context, since time.Time) bool 
 // removeWriteBack deletes written answers, and writes the marker only if a
 // delete fails. Deleting comes first: a marker write here would make every
 // other in-flight write-back discard its answers and could make it write the
-// marker in turn.
+// marker in turn. A delete skipped at the deadline counts as failed, and the
+// marker write gets its own deadline so slow deletes cannot use it up.
 func (c CacheLayer) removeWriteBack(ctx context.Context, keys []string) error {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
 	defer cancel()
-	var failed atomic.Bool
-	runBounded(ctx, len(keys), func(i int) {
+	var deleted atomic.Int64
+	runBounded(deleteCtx, len(keys), func(i int) {
 		var err error
-		if slotErr := withCacheOpSlot(ctx, func() { err = c.bucket.Delete(ctx, keys[i]) }); slotErr != nil || err != nil {
-			failed.Store(true)
+		slotErr := withCacheOpSlot(deleteCtx, func() { err = c.bucket.Delete(deleteCtx, keys[i]) })
+		if slotErr == nil && err == nil {
+			deleted.Add(1)
 		}
 	})
-	if !failed.Load() {
+	if deleted.Load() == int64(len(keys)) {
 		return nil
 	}
 	logger.WarnContext(ctx, "could not remove cache write-back overtaken by an invalidation; invalidating the cache")
-	return c.invalidate(ctx)
+	invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
+	defer invCancel()
+	return c.invalidate(invCtx)
 }
 
 // runBounded calls fn for each index in [0, n), at most cacheLookupConcurrency

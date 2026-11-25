@@ -350,14 +350,16 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 // clockKV is an in-memory bucket whose creation times come from a counter, so
 // the order of writes is exact. onRelPut, when set, runs before each write of a
 // relation key. Reads of inv fail once more than invGetsOK have succeeded.
+// With deleteBlocks, Delete waits until its context is done.
 type clockKV struct {
-	mu        sync.Mutex
-	tick      int
-	entries   map[string]fixedEntry
-	onRelPut  func()
-	deleteErr error
-	invGets   int
-	invGetsOK int
+	mu           sync.Mutex
+	tick         int
+	entries      map[string]fixedEntry
+	onRelPut     func()
+	deleteErr    error
+	deleteBlocks bool
+	invGets      int
+	invGetsOK    int
 }
 
 func newClockKV() *clockKV { return &clockKV{entries: map[string]fixedEntry{}} }
@@ -378,7 +380,10 @@ func (k *clockKV) Get(_ context.Context, key string) (jetstream.KeyValueEntry, e
 	return entry, nil
 }
 
-func (k *clockKV) Put(_ context.Context, key string, value []byte) (uint64, error) {
+func (k *clockKV) Put(ctx context.Context, key string, value []byte) (uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	k.mu.Lock()
 	hook := k.onRelPut
 	k.mu.Unlock()
@@ -396,7 +401,11 @@ func (k *clockKV) PutString(ctx context.Context, key, value string) (uint64, err
 	return k.Put(ctx, key, []byte(value))
 }
 
-func (k *clockKV) Delete(_ context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+func (k *clockKV) Delete(ctx context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+	if k.deleteBlocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.deleteErr != nil {
@@ -436,6 +445,7 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 		revokeInCheck   bool
 		revokeInWrite   bool
 		deleteErr       error
+		deleteBlocks    bool
 		invGetsOK       int
 		wantCached      bool
 		wantNoRelWrites bool
@@ -446,6 +456,7 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 		{name: "invalidation while OpenFGA answers, existing marker", existingMarker: true, revokeInCheck: true},
 		{name: "invalidation during the write-back", revokeInWrite: true},
 		{name: "invalidation during the write-back, delete fails", revokeInWrite: true, deleteErr: assert.AnError},
+		{name: "invalidation during the write-back, delete times out", revokeInWrite: true, deleteBlocks: true},
 		{name: "marker re-read fails before the write-back", invGetsOK: 1, wantNoRelWrites: true},
 		{name: "marker re-read fails after the write-back", invGetsOK: 2, wantNoRelWrites: true},
 	}
@@ -455,7 +466,13 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 			ctx := context.Background()
 			kv := newClockKV()
 			kv.deleteErr = tt.deleteErr
+			kv.deleteBlocks = tt.deleteBlocks
 			kv.invGetsOK = tt.invGetsOK
+			if tt.deleteBlocks {
+				timeout := writeBackCleanupTimeout
+				writeBackCleanupTimeout = 50 * time.Millisecond
+				t.Cleanup(func() { writeBackCleanupTimeout = timeout })
+			}
 			if tt.existingMarker {
 				_, _ = kv.Put(ctx, "inv", []byte("1"))
 			}
