@@ -396,3 +396,44 @@ func TestCacheLayerFenceStopsWriteBacksAndSeeding(t *testing.T) {
 		}
 	})
 }
+
+// TestSeedPositiveEntriesRechecksFenceBeforeWriting covers a seed write that
+// waited for a cache slot while a different model was announced: it must not
+// write an old-model entry after the announcement's flush.
+func TestSeedPositiveEntriesRechecksFenceBeforeWriting(t *testing.T) {
+	for i := 0; i < cap(cacheOpSem); i++ {
+		cacheOpSem <- struct{}{}
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		for i := 0; i < cap(cacheOpSem); i++ {
+			<-cacheOpSem
+		}
+	}
+	t.Cleanup(release)
+
+	kv := &keyRecordingKV{}
+	fence := &modelFence{}
+	cache := CacheLayer{bucket: kv, fence: fence}
+	before := cacheWriteBacksFenced.Value()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cache.seedPositiveEntries(context.Background(), []string{"rel.KEY1", "rel.KEY2"})
+	}()
+	time.Sleep(50 * time.Millisecond) // both writes are admitted and waiting for a slot
+
+	fence.blocked.Store(true)
+	release()
+	<-done
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	assert.Empty(t, kv.puts, "a seed write that waited past the announcement must not be written")
+	assert.Equal(t, int64(2), cacheWriteBacksFenced.Value()-before)
+}

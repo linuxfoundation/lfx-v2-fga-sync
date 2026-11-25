@@ -427,8 +427,9 @@ this itself, and access checks keep being answered throughout:
    replicas may keep scoping with an outdated graph. It still starts, answers
    access checks from OpenFGA, and still writes `inv` on tuple writes.
 
-`inv.model` expires with the bucket TTL, far longer than a rollout, so a missing
-key counts as a match. The guard only protects replicas that run this check:
+`inv.model` expires with the bucket TTL unless a replica on that model is running
+(replicas renew it hourly), so a missing key means nobody has announced recently
+and counts as a match. The guard only protects replicas that run this check:
 roll out `read-scoped` everywhere first, as above, so no replica without it is
 writing scoped markers. The `global` and `read-scoped` modes need nothing here,
 because every write already bumps `inv`.
@@ -444,16 +445,25 @@ that is still answering checks during the rollout would write answers computed
 under the old model where new-model replicas read them as fresh. Each replica in
 `scoped` mode therefore re-reads `inv.model` every 2 seconds. While the marker
 holds a different model ID, or cannot be read, it skips cache write-backs and
-seeding (counted in `cache_write_backs_fenced`). It keeps serving access checks,
-from the cache where an entry is fresh and from OpenFGA otherwise. Whatever it
-wrote before it noticed is cleared by the follow-up flush, which runs 10 seconds
-after the announcement. The fence lifts when the marker matches again or
-expires.
+seeding (counted in `cache_write_backs_fenced`), re-checking just before each
+write. It keeps serving access checks, from the cache where an entry is fresh and
+from OpenFGA otherwise.
 
-No manual `inv` write is needed after a model change once every replica runs
-this version. A replica running an older version does not fence, so the first
-rollout that introduces this version still needs one `inv` write after it has
-drained.
+- **Lifting the fence.** A replica that has seen a different model stays fenced
+  until the marker holds its own model ID again, even if the marker expires in
+  the meantime. A replica that has never seen another model treats a missing
+  marker as "nobody has announced". Replicas renew their own marker hourly, so it
+  does not expire while a replica on that model is running.
+- **What clears the gap.** Whatever an outdated replica wrote before its next
+  poll is cleared by the follow-up flush, 10 seconds after the announcement. It
+  is retried up to 3 times and logs an error if it gives up.
+
+No manual `inv` write is needed after a model change once every replica runs this
+version, with two exceptions. A replica running an older version does not fence,
+so the first rollout that introduces this version still needs one `inv` write
+after it has drained. And the follow-up flush runs in the announcing replica, so
+if that replica exits within 10 seconds of announcing, or the follow-up gives up,
+write `inv` once the rollout has drained.
 
 ### Debugging cache behavior
 

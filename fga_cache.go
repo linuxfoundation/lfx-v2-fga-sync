@@ -373,6 +373,12 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
 			_ = withCacheOpSlot(timeoutCtx, func() {
+				// Re-check: this write may have waited for a slot past a model
+				// announcement and the follow-up flush.
+				if c.fence.isBlocked() {
+					cacheWriteBacksFenced.Add(1)
+					return
+				}
 				_, _ = c.bucket.PutString(timeoutCtx, key, trueString)
 			})
 		}(cacheKey)
