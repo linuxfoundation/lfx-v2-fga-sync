@@ -320,6 +320,9 @@ func run(bind, port string) error {
 			},
 		}
 	}
+	invMode, invGraph := configureInvalidation(context.Background(), fgaClient)
+	fgaService = fgaService.withInvalidation(invMode, invGraph)
+
 	handlerService := HandlerService{fgaService: fgaService}
 
 	if err = srv.createQueueSubscriptions(handlerService); err != nil {
@@ -639,4 +642,33 @@ func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfi
 			description: "read tuples",
 		},
 	}
+}
+
+// configureInvalidation resolves INVALIDATION_MODE and, for scoped mode, loads
+// the model graph that scoped writes depend on. Every failure degrades toward
+// global invalidation, which is always safe: an unrecognized mode is
+// read-scoped (global writes, scoped reads, so scoped markers from other
+// replicas are still honored), and a model that cannot be loaded or interpreted keeps writes global while
+// lookups still honor scoped markers.
+func configureInvalidation(ctx context.Context, fgaClient IFgaClient) (invalidationMode, *modelGraph) {
+	raw := os.Getenv(invalidationModeEnv)
+	mode, ok := parseInvalidationMode(raw)
+	if !ok {
+		logger.With("value", raw).Warn("unrecognized " + invalidationModeEnv + "; using " + modeNameReadScoped)
+	}
+	modelID := os.Getenv("OPENFGA_AUTH_MODEL_ID")
+	logger.With("mode", mode.String(), "model_id", modelID).Info("cache invalidation mode configured")
+	if mode != invalidationScoped {
+		return mode, nil
+	}
+
+	loadCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	graph, err := loadModelGraph(loadCtx, fgaClient)
+	if err != nil {
+		logger.With(errKey, err).Error("could not build model graph; scoped writes disabled, invalidating globally")
+		return mode, nil
+	}
+	logger.With("mode", mode.String(), "model_id", modelID).Info("model graph loaded; scoped cache invalidation enabled")
+	return mode, graph
 }

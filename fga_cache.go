@@ -117,6 +117,8 @@ type cacheLookupOutcome struct {
 	kind       cacheOutcomeKind
 	needsCheck bool
 	hitLine    []byte
+	// staleBy names the marker that made a stale hit stale; empty otherwise.
+	staleBy markerKind
 }
 
 // CacheLayer wraps the JetStream KV bucket and owns all cache operations:
@@ -188,21 +190,35 @@ func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, erro
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
 // no-op while no bucket exists.
-func (c CacheLayer) invalidate(ctx context.Context) error {
+// reason says why the write is global rather than scoped (one of the
+// globalReason constants); it is recorded on the span, and logged unless the
+// service is simply running in global mode.
+func (c CacheLayer) invalidate(ctx context.Context, reason string) error {
 	bucket, err := c.invalidationBucket(ctx)
 	if err != nil || bucket == nil {
 		return err
 	}
 
-	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate")
+	ctx, span := tracer.Start(ctx, "fga_sync.cache.invalidate",
+		trace.WithAttributes(
+			attribute.String("fga_sync.cache.invalidate.scope", invalidateScopeGlobal),
+			attribute.Int("fga_sync.cache.invalidate.markers", 1),
+			attribute.String("fga_sync.cache.invalidate.reason", reason),
+		),
+	)
 	defer span.End()
 
 	_, err = bucket.Put(ctx, "inv", []byte("1"))
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		logger.With(errKey, err).ErrorContext(ctx, "failed to write cache invalidation marker")
+		logger.With(errKey, err, "reason", reason).ErrorContext(ctx, "failed to write cache invalidation marker")
 		return err
+	}
+	if reason != globalReasonModeGlobal {
+		// Scoping was expected but a write fell back to the global marker:
+		// worth an info line, since it widens what gets invalidated.
+		logger.With("reason", reason).InfoContext(ctx, "wrote global cache invalidation marker")
 	}
 	return nil
 }
@@ -241,7 +257,7 @@ func (c CacheLayer) getLastInvalidation(ctx context.Context) (time.Time, error) 
 func (c CacheLayer) lookupEntry(
 	ctx context.Context,
 	tuple ClientBatchCheckItem,
-	lastInvalidation time.Time,
+	cutoff invalidationCutoff,
 ) cacheLookupOutcome {
 	if c.bucket == nil {
 		cacheMisses.Add(1)
@@ -277,20 +293,21 @@ func (c CacheLayer) lookupEntry(
 
 	// Cache entry was found. If the cache entry is older than the invalidation
 	// timestamp, skip it.
-	if lastInvalidation.After(entry.Created()) {
+	if cutoff.at.After(entry.Created()) {
 		logger.With(
 			"relation_key", relationKey,
-			"last_invalidation", lastInvalidation,
+			"last_invalidation", cutoff.at,
+			"marker_kind", string(cutoff.kind),
 			"entry_created", entry.Created(),
 			"entry_value", string(entry.Value()),
 		).DebugContext(ctx, "cache stale hit")
 		cacheStaleHits.Add(1)
-		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true}
+		return cacheLookupOutcome{kind: cacheOutcomeStaleHit, needsCheck: true, staleBy: cutoff.kind}
 	}
 
 	logger.With(
 		"relation_key", relationKey,
-		"last_invalidation", lastInvalidation,
+		"last_invalidation", cutoff.at,
 		"entry_created", entry.Created(),
 		"entry_value", string(entry.Value()),
 	).DebugContext(ctx, "cache hit")
@@ -360,7 +377,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
 ) []byte {
-	cachePuts := make([]func() error, 0, len(result))
+	cachePuts := make([]func(context.Context) error, 0, len(result))
 
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -396,15 +413,15 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		if shouldCache && c.bucket != nil {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
-			cachePuts = append(cachePuts, func() error {
-				putCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			cachePuts = append(cachePuts, func(putParent context.Context) error {
+				putCtx, cancel := context.WithTimeout(putParent, 5*time.Second)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {
-						logger.With(errKey, err).ErrorContext(ctx, "failed to cache relation")
+						logger.With(errKey, err).ErrorContext(putCtx, "failed to cache relation")
 					}
 				}); slotErr != nil {
-					logger.With(errKey, slotErr).ErrorContext(ctx, "failed to cache relation")
+					logger.With(errKey, slotErr).ErrorContext(putCtx, "failed to cache relation")
 				}
 				return nil
 			})
@@ -424,7 +441,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 				case <-gctx.Done():
 					return nil
 				default:
-					return put()
+					return put(gctx)
 				}
 			})
 		}

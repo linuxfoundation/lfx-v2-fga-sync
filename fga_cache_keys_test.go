@@ -10,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	"github.com/nats-io/nats.go/jetstream"
@@ -80,7 +79,7 @@ func TestCacheKeyMatchesGolden(t *testing.T) {
 			cache := CacheLayer{bucket: kv}
 			tuple := client.ClientBatchCheckItem{Object: tc.Object, Relation: tc.Relation, User: tc.User}
 
-			cache.lookupEntry(context.Background(), tuple, time.Time{})
+			cache.lookupEntry(context.Background(), tuple, invalidationCutoff{})
 			assert.Equal(t, []string{tc.Want}, kv.gets, "lookupEntry read key")
 
 			result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
@@ -115,7 +114,7 @@ func TestCacheKeyBoundForLongestAcceptedLine(t *testing.T) {
 			kv := &keyRecordingKV{}
 			cache := CacheLayer{bucket: kv}
 			tuple := client.ClientBatchCheckItem{Object: req.Object, Relation: req.Relation, User: req.User}
-			cache.lookupEntry(context.Background(), tuple, time.Time{})
+			cache.lookupEntry(context.Background(), tuple, invalidationCutoff{})
 			result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
 			cache.buildResponseAndWriteBack(context.Background(), nil, result,
 				map[string]client.ClientBatchCheckItem{"1": tuple})
@@ -132,7 +131,7 @@ func TestInvalidationKeyMatchesGolden(t *testing.T) {
 	golden := loadCacheKeyGolden(t)
 
 	kv := &keyRecordingKV{}
-	require.NoError(t, CacheLayer{bucket: kv}.invalidate(context.Background()))
+	require.NoError(t, CacheLayer{bucket: kv}.invalidate(context.Background(), globalReasonModeGlobal))
 	assert.Equal(t, []string{golden.InvalidationKey}, kv.puts)
 
 	_, err := CacheLayer{bucket: kv}.getLastInvalidation(context.Background())

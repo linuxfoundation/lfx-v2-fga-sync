@@ -65,6 +65,13 @@ func (m *MockFgaClient) ListObjects(
 	return args.Get(0).(*ClientListObjectsResponse), args.Error(1)
 }
 
+// ReadAuthorizationModel implements the IFgaClient interface
+func (m *MockFgaClient) ReadAuthorizationModel(ctx context.Context) (*openfga.AuthorizationModel, error) {
+	args := m.Called(ctx)
+	//nolint:errcheck // the error is passed through to the caller
+	return args.Get(0).(*openfga.AuthorizationModel), args.Error(1)
+}
+
 // MockNatsMsg is a mock implementation of the INatsMsg interface
 type MockNatsMsg struct {
 	mock.Mock
@@ -115,6 +122,10 @@ type MockKeyValue struct {
 	createdTimes map[string]time.Time
 	returnError  error
 	notFoundKeys map[string]bool
+	// clock supplies creation times for Put. It defaults to time.Now; tests
+	// that depend on the ordering of entries and invalidation markers set a
+	// deterministic one with SetClock.
+	clock func() time.Time
 }
 
 // NewMockKeyValue creates a new MockKeyValue instance
@@ -123,7 +134,23 @@ func NewMockKeyValue() *MockKeyValue {
 		data:         make(map[string][]byte),
 		createdTimes: make(map[string]time.Time),
 		notFoundKeys: make(map[string]bool),
+		clock:        time.Now,
 	}
+}
+
+// SetClock replaces the clock used to stamp entries written by Put.
+func (m *MockKeyValue) SetClock(clock func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clock = clock
+}
+
+// PutAt stores a value with an explicit creation time.
+func (m *MockKeyValue) PutAt(key string, value []byte, created time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[key] = value
+	m.createdTimes[key] = created
 }
 
 // Get implements the jetstream.KeyValue interface
@@ -156,7 +183,7 @@ func (m *MockKeyValue) Put(_ context.Context, key string, value []byte) (uint64,
 		return 0, m.returnError
 	}
 	m.data[key] = value
-	m.createdTimes[key] = time.Now()
+	m.createdTimes[key] = m.clock()
 	return 1, nil
 }
 

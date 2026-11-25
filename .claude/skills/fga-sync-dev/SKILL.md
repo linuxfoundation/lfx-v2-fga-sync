@@ -88,7 +88,7 @@ There is no `cmd/`, `internal/`, `api/`, or `gen/` tree. Do not introduce a Goa 
 
 - Cache bucket name comes from `CACHE_BUCKET` (default `fga-sync-cache`). Do not hardcode the bucket name; use `constants.KVBucketNameSyncCache` or the resolved `cacheBucketName`.
 - Cache keys are `rel.{base32-encoded-relation}`. Values are raw text booleans (`true` or `false`); freshness comes from the NATS KV entry timestamp. Do not change either shape without coordinating with consumers and updating `docs/fga-sync-contract.md`.
-- Invalidation is a single `inv` timestamp key. Every successful OpenFGA write must bump it (`invalidateCache`); any cached entry older than `inv` is treated as stale.
+- Invalidation: every OpenFGA write must invalidate through `FgaService.WriteAndDeleteTuples`, which calls `applyInvalidation`. In `global` mode that bumps the single `inv` timestamp key; in `scoped` mode it writes the narrower `inv.t.*` / `inv.u.*` markers planned from the model graph (`fga_model_graph.go`, `fga_invalidation.go`) and falls back to `inv` whenever scoping cannot be proven safe. A cached entry older than any marker that applies to it is stale. See `docs/fga-sync-contract.md` (Invalidation scoping) and keep `INVALIDATION_MODE` rollout order (read-scoped everywhere, then scoped).
 - Stale hits are counted separately at `/debug/vars` (`cache_stale_hits`); do not collapse them into `cache_hits`.
 - Cache operations are traced with `fga_sync.cache.{lookup,write_back,invalidate,seed}` spans started from the package-level `tracer`; keep hit/stale/miss counts as span attributes on `fga_sync.cache.lookup` when changing the lookup path.
 - Local development against an externally written OpenFGA store should run with `USE_CACHE=false` to avoid serving stale results.

@@ -249,7 +249,7 @@ func TestInvalidateWritesWithoutCacheBudgetSlot(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- cache.invalidate(context.Background())
+		done <- cache.invalidate(context.Background(), globalReasonModeGlobal)
 	}()
 
 	select {
@@ -273,13 +273,13 @@ func TestCacheLayerNilBucket(t *testing.T) {
 	assert.NotPanics(t, func() {
 		cache.seedPositiveEntries(ctx, []string{"rel.KEY1", "rel.KEY2"})
 	})
-	require.NoError(t, cache.invalidate(ctx))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
 
 	lastInvalidation, err := cache.getLastInvalidation(ctx)
 	require.NoError(t, err)
 	assert.True(t, lastInvalidation.IsZero())
 
-	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	outcome := cache.lookupEntry(ctx, tuple, invalidationCutoff{})
 	assert.True(t, outcome.needsCheck)
 	assert.Equal(t, cacheOutcomeMiss, outcome.kind)
 
@@ -305,17 +305,17 @@ func TestCacheLayerRecoversBucketForInvalidation(t *testing.T) {
 		return bound, nil
 	}}}
 
-	require.NoError(t, cache.invalidate(ctx), "a still-missing bucket is not an error")
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal), "a still-missing bucket is not an error")
 	assert.Empty(t, kv.puts)
 
 	bound = kv
-	require.NoError(t, cache.invalidate(ctx))
-	require.NoError(t, cache.invalidate(ctx))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
+	require.NoError(t, cache.invalidate(ctx, globalReasonModeGlobal))
 	assert.Equal(t, []string{"inv", "inv"}, kv.puts)
 	assert.Equal(t, 2, binds, "the bucket is bound once and then reused")
 
 	tuple := client.ClientBatchCheckItem{Object: "project:example", Relation: "viewer", User: "user:example-user"}
-	outcome := cache.lookupEntry(ctx, tuple, time.Time{})
+	outcome := cache.lookupEntry(ctx, tuple, invalidationCutoff{})
 	assert.Equal(t, cacheOutcomeMiss, outcome.kind, "reads stay disabled after recovery")
 	cache.seedPositiveEntries(ctx, []string{"rel.KEY1"})
 	assert.Equal(t, []string{"inv", "inv"}, kv.puts, "seeding stays disabled after recovery")
@@ -334,7 +334,7 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 		wg.Add(1)
 		go func(cache CacheLayer) {
 			defer wg.Done()
-			assert.NoError(t, cache.invalidate(context.Background()))
+			assert.NoError(t, cache.invalidate(context.Background(), globalReasonModeGlobal))
 		}(shared)
 	}
 	wg.Wait()
@@ -348,6 +348,6 @@ func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {
 		return nil, context.DeadlineExceeded
 	}}}
 
-	err := cache.invalidate(context.Background())
+	err := cache.invalidate(context.Background(), globalReasonModeGlobal)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
