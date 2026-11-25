@@ -530,19 +530,18 @@ func checkModelMarker(ctx context.Context, bucket INatsKeyValue, modelID string)
 // globally.
 var errOutdatedModel = errors.New("a newer authorization model has been announced")
 
-// errAnnounceFlushFailed means the model marker was written but the flush that
-// must follow it was not, so the announcement is not complete. Retrying the
-// whole announcement would see its own marker and skip the flush, so callers
-// retry only the flush.
-var errAnnounceFlushFailed = errors.New("announced the model but could not flush the cache")
-
 // announceModel records modelID as the authorization model in use. It reports
 // whether it flushed the cache.
 //
-//   - No marker, or one for an older model: write the marker, then bump inv. The
+//   - No marker, or one for an older model: bump inv, then write the marker. The
 //     flush covers anything a replica on an older model scoped before this one
-//     started; the marker makes those replicas write globally from now on.
-//   - The same model: another replica already announced and flushed, so only
+//     started; the marker makes those replicas write globally and stop writing
+//     to the cache from then on. The marker goes last so that it only ever means
+//     "the flush after the previous model completed": a replica that finds its
+//     own model's marker can skip the flush, and must be able to trust that it
+//     was done. If the flush fails nothing is announced and the caller retries
+//     the whole announcement.
+//   - The same model: another replica already flushed and announced, so only
 //     refresh the marker's TTL. A pod restart must not flush the whole cache.
 //   - A newer model: return errOutdatedModel without changing anything, so a
 //     replica of an older model that restarts mid-rollout cannot take the marker
@@ -551,12 +550,12 @@ var errAnnounceFlushFailed = errors.New("announced the model but could not flush
 // Every marker write is conditional on the revision just read (Create when
 // there was none), so a newer announcement that lands between the read and the
 // write is never overwritten: the write conflicts, the marker is read again and
-// the same rules apply.
+// the same rules apply. A flush made before such a conflict is wasted but
+// harmless.
 //
-// It is a no-op while no bucket exists. If the marker cannot be written the
-// flush still runs, but the error is returned so the caller can stop trusting
-// the shared cache. If the flush after a written marker fails, the error wraps
-// errAnnounceFlushFailed.
+// It is a no-op while no bucket exists. If the flush succeeds but the marker
+// cannot be written, the error is returned so the caller can stop trusting the
+// shared cache.
 func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed bool, err error) {
 	bucket, err := c.invalidationBucket(ctx)
 	if err != nil || bucket == nil {
@@ -564,16 +563,19 @@ func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed 
 	}
 	for attempt := 0; attempt < modelMarkerWriteAttempts; attempt++ {
 		entry, getErr := bucket.Get(ctx, modelMarkerKey)
-		var putErr error
+		var writeMarker func() error
 		switch {
 		case errors.Is(getErr, jetstream.ErrKeyNotFound):
-			_, putErr = bucket.Create(ctx, modelMarkerKey, []byte(modelID))
+			writeMarker = func() error {
+				_, e := bucket.Create(ctx, modelMarkerKey, []byte(modelID))
+				return e
+			}
 		case getErr != nil:
 			return false, fmt.Errorf("error reading model marker: %w", getErr)
 		case string(entry.Value()) > modelID:
 			return false, errOutdatedModel
 		case string(entry.Value()) == modelID:
-			_, putErr = bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+			_, putErr := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
 			if errors.Is(putErr, jetstream.ErrKeyExists) {
 				continue
 			}
@@ -582,17 +584,20 @@ func (c CacheLayer) announceModel(ctx context.Context, modelID string) (flushed 
 			}
 			return false, nil
 		default:
-			_, putErr = bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+			writeMarker = func() error {
+				_, e := bucket.Update(ctx, modelMarkerKey, []byte(modelID), entry.Revision())
+				return e
+			}
 		}
+		if flushErr := c.invalidate(ctx, globalReasonModelAnnounce); flushErr != nil {
+			return false, fmt.Errorf("error flushing the cache for the model announcement: %w", flushErr)
+		}
+		putErr := writeMarker()
 		if errors.Is(putErr, jetstream.ErrKeyExists) {
 			continue // another replica announced first; read it again
 		}
-		flushErr := c.invalidate(ctx, globalReasonModelAnnounce)
 		if putErr != nil {
 			return true, fmt.Errorf("error writing model marker: %w", putErr)
-		}
-		if flushErr != nil {
-			return false, fmt.Errorf("%w: %w", errAnnounceFlushFailed, flushErr)
 		}
 		return true, nil
 	}

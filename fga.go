@@ -181,13 +181,7 @@ func (s FgaService) announceModel(ctx context.Context) error {
 	if s.invalidation.mode != invalidationScoped || s.invalidation.modelID == "" {
 		return nil
 	}
-	var (
-		err        error
-		flushOnly  bool // the marker is written; only the flush is left
-		flushed    bool
-		modelID    = s.invalidation.modelID
-		attemptLog = logger.With("model_id", modelID)
-	)
+	var err error
 	for attempt := 0; attempt < modelAnnounceAttempts; attempt++ {
 		if attempt > 0 {
 			select {
@@ -196,12 +190,8 @@ func (s FgaService) announceModel(ctx context.Context) error {
 			case <-time.After(modelAnnounceRetryDelay):
 			}
 		}
-		if flushOnly {
-			err = s.cache.invalidate(ctx, globalReasonModelAnnounce)
-			flushed = err == nil
-		} else {
-			flushed, err = s.cache.announceModel(ctx, modelID)
-		}
+		var flushed bool
+		flushed, err = s.cache.announceModel(ctx, s.invalidation.modelID)
 		if err == nil {
 			if flushed {
 				s.cache.followUpFlush(ctx, modelFollowUpDelay)
@@ -211,8 +201,8 @@ func (s FgaService) announceModel(ctx context.Context) error {
 		if errors.Is(err, errOutdatedModel) {
 			return err
 		}
-		flushOnly = flushOnly || errors.Is(err, errAnnounceFlushFailed)
-		attemptLog.With(errKey, err, "attempt", attempt+1).WarnContext(ctx, "could not announce authorization model")
+		logger.With(errKey, err, "model_id", s.invalidation.modelID, "attempt", attempt+1).
+			WarnContext(ctx, "could not announce authorization model")
 	}
 	return err
 }

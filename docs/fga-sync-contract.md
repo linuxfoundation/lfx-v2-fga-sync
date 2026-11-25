@@ -400,28 +400,28 @@ this itself, and access checks keep being answered throughout:
 
 1. A replica in `scoped` mode announces its model ID in `inv.model` at startup,
    whether or not its model graph loaded.
-   - No marker, or one for an older model: it writes the marker, then bumps
-     `inv`. The flush covers anything an old-model replica scoped before this
+   - No marker, or one for an older model: it bumps `inv`, then writes the
+     marker. The flush covers anything an old-model replica scoped before this
      one started. About 10 seconds later it bumps `inv` once more, to cover a
-     write that read `inv.model` just before the announcement.
-   - The same model: another replica already announced, so it only refreshes the
-     marker. An ordinary pod restart does not flush the cache.
+     write made between the flush and the marker. The marker goes last so it only
+     ever means the flush completed; if the flush fails nothing is announced and
+     the whole announcement is retried.
+   - The same model: another replica already flushed and announced, so it only
+     refreshes the marker. An ordinary pod restart does not flush the cache.
    - A newer model: it leaves the marker alone and writes globally. Model IDs are
      ULIDs, which sort by creation time, so an old-model pod that restarts
      mid-rollout cannot take the marker back. After a rollback to an older model,
      replicas stay on global writes until the marker expires (at most the bucket
      TTL).
+   Every marker write is conditional on the revision just read, so a newer
+   announcement that lands in between is never overwritten: the write conflicts
+   and the marker is read again.
 2. Before writing scoped markers, every replica reads `inv.model`. If it holds a
    different model ID, the write bumps `inv` instead (reason `model_mismatch`);
    if the read fails or times out, the write also bumps `inv` (reason
    `model_check_failed`). The fallback write has its own deadline. An old-model
    replica therefore writes globally as soon as the first new-model replica
    starts, and keeps doing so until it is replaced.
-   Every marker write is conditional on the revision just read, so a newer
-   announcement that lands in between is never overwritten: the write conflicts
-   and the marker is read again. If the marker is written but the flush fails,
-   the retry repeats only the flush, so the announcement is not reported complete
-   until the flush has succeeded.
 3. If a replica cannot record its announcement after 3 attempts, it logs an error
    and stops reading from and writing to the shared cache, because older
    replicas may keep scoping with an outdated graph. It still starts, answers

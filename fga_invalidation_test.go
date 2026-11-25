@@ -1589,12 +1589,13 @@ func TestAnnounceModel(t *testing.T) {
 		return string(entry.Value())
 	}
 
-	t.Run("writes the marker, then flushes", func(t *testing.T) {
+	t.Run("flushes, then writes the marker", func(t *testing.T) {
 		kv := &keyRecordingKV{}
 		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
 		require.NoError(t, err)
 		assert.True(t, flushed)
-		assert.Equal(t, []string{modelMarkerKey, globalInvalidationKey}, kv.puts, "marker first, so no replica checks a stale one after the flush")
+		assert.Equal(t, []string{globalInvalidationKey, modelMarkerKey}, kv.puts,
+			"the marker goes last, so it only ever means the flush completed")
 	})
 
 	t.Run("an older marker is replaced and the cache flushed", func(t *testing.T) {
@@ -1671,8 +1672,7 @@ func TestAnnounceModel(t *testing.T) {
 		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
 		require.ErrorIs(t, err, errOutdatedModel)
 		assert.False(t, flushed)
-		assert.Equal(t, "m-3", markerValue(t, kv))
-		assert.False(t, kv.written(globalInvalidationKey))
+		assert.Equal(t, "m-3", markerValue(t, kv), "the flush made before losing the race is harmless")
 	})
 
 	t.Run("a newer announcement landing after an older-marker read is not overwritten", func(t *testing.T) {
@@ -1682,7 +1682,6 @@ func TestAnnounceModel(t *testing.T) {
 		_, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
 		require.ErrorIs(t, err, errOutdatedModel)
 		assert.Equal(t, "m-3", markerValue(t, kv))
-		assert.False(t, kv.written(globalInvalidationKey))
 	})
 
 	t.Run("a newer announcement landing after a same-model read is not overwritten by the refresh", func(t *testing.T) {
@@ -1714,10 +1713,9 @@ func TestAnnounceModel(t *testing.T) {
 		racing(kv, writes...)
 		_, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
 		require.ErrorContains(t, err, "kept changing")
-		assert.False(t, kv.written(globalInvalidationKey))
 	})
 
-	t.Run("a failed flush after the marker is written is reported as incomplete", func(t *testing.T) {
+	t.Run("a failed flush leaves nothing announced", func(t *testing.T) {
 		kv := newFlakyKV()
 		kv.failPut = func(key string) error {
 			if key == globalInvalidationKey {
@@ -1726,9 +1724,9 @@ func TestAnnounceModel(t *testing.T) {
 			return nil
 		}
 		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
-		require.ErrorIs(t, err, errAnnounceFlushFailed)
+		require.ErrorContains(t, err, "flushing the cache")
 		assert.False(t, flushed)
-		assert.Equal(t, "m-2", markerValue(t, kv))
+		assert.False(t, kv.written(modelMarkerKey), "a marker without its flush would let later replicas skip it")
 	})
 
 	t.Run("is a no-op while no bucket exists", func(t *testing.T) {
@@ -1790,8 +1788,8 @@ func TestFgaServiceModelGuard(t *testing.T) {
 		}{
 			{name: "global mode", mode: invalidationGlobal, graph: graph},
 			{name: "read-scoped mode", mode: invalidationReadScoped, graph: graph},
-			{name: "scoped without a graph", mode: invalidationScoped, graph: nil, wantPuts: []string{modelMarkerKey, globalInvalidationKey}},
-			{name: "scoped", mode: invalidationScoped, graph: graph, wantPuts: []string{modelMarkerKey, globalInvalidationKey}},
+			{name: "scoped without a graph", mode: invalidationScoped, graph: nil, wantPuts: []string{globalInvalidationKey, modelMarkerKey}},
+			{name: "scoped", mode: invalidationScoped, graph: graph, wantPuts: []string{globalInvalidationKey, modelMarkerKey}},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				kv := &keyRecordingKV{}
@@ -1827,7 +1825,7 @@ func TestAnnounceModelRetries(t *testing.T) {
 		assert.True(t, kv.written(modelMarkerKey))
 	})
 
-	t.Run("retries only the flush when the marker was written but the flush failed", func(t *testing.T) {
+	t.Run("retries the whole announcement when the flush fails", func(t *testing.T) {
 		kv := newFlakyKV()
 		var markerWrites, flushAttempts atomic.Int64
 		kv.failPut = func(key string) error {
@@ -1844,7 +1842,7 @@ func TestAnnounceModelRetries(t *testing.T) {
 		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
 		require.NoError(t, svc.announceModel(ctx))
 		assert.True(t, kv.written(globalInvalidationKey), "the flush that failed is retried, not skipped")
-		assert.Equal(t, int64(1), markerWrites.Load(), "the marker is not written again")
+		assert.Equal(t, int64(1), markerWrites.Load(), "the marker is only written once the flush has succeeded")
 		assert.Equal(t, int64(2), flushAttempts.Load())
 	})
 
@@ -1935,6 +1933,40 @@ func TestAnnounceModelOrDegrade(t *testing.T) {
 		require.NoError(t, got.WriteTuples(ctx, tuple))
 		assert.True(t, kv.written(globalInvalidationKey))
 	})
+}
+
+// TestFailedFlushIsNotHiddenFromLaterReplicas covers a replica whose flush fails
+// on every attempt. It must not leave a marker behind, or a later replica on the
+// same model would read it, skip the flush and enable the shared cache over
+// entries nobody cleared.
+func TestFailedFlushIsNotHiddenFromLaterReplicas(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the watchers and follow-up flushes
+	prevFence, prevRetry := modelFenceInterval, modelAnnounceRetryDelay
+	modelFenceInterval, modelAnnounceRetryDelay = time.Hour, time.Millisecond
+	t.Cleanup(func() { modelFenceInterval, modelAnnounceRetryDelay = prevFence, prevRetry })
+	graph := platformGraph(t)
+
+	kv := newFlakyKV()
+	var flushing atomic.Bool
+	kv.failPut = func(key string) error {
+		if key == globalInvalidationKey && !flushing.Load() {
+			return errors.New("kv down")
+		}
+		return nil
+	}
+	first := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2").
+		announceModelOrDegrade(ctx)
+	assert.False(t, first.useCache, "the first replica could not announce and stops using the shared cache")
+	assert.False(t, kv.written(modelMarkerKey), "no marker without a completed flush")
+
+	flushing.Store(true) // the bucket recovers
+	second := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2").
+		announceModelOrDegrade(ctx)
+	assert.True(t, kv.written(globalInvalidationKey), "the later replica does the flush")
+	assert.True(t, kv.written(modelMarkerKey))
+	assert.True(t, second.useCache)
+	assert.NotNil(t, second.cache.bucket, "and may use the shared cache")
 }
 
 // TestModelRolloutDoesNotLeaveStaleGrants plays a model bump: the replica on
