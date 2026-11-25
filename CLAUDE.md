@@ -76,6 +76,23 @@ build/test/lint workflow. Quick reference:
 - `make check` (runs `fmt`, `vet`, `lint`)
 - `make docker-build`, `make helm-install-local`
 
+### Go version
+
+This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
+supersedes the Go version policy in the `lfx-megalinter` skill, which targets
+the latest stable minor minus one: don't move `go.mod` back to Go 1.26. Take
+every 1.27.x patch release, and update `go.mod`, this file and `README.md`
+together. The build and release workflows read the Go version from `go.mod`
+through `go-version-file`.
+
+MegaLinter (v10.2.0) runs Go 1.26.10 in its image, so
+`.github/workflows/mega-linter.yml` sets `GOTOOLCHAIN: auto` to let its Go
+linters download the `go.mod` toolchain. Its bundled golangci-lint 2.15.0 is
+built with Go 1.27.0 and lints this module with `.golangci.yml`, which also
+runs gosec. `.mega-linter.yml` lists the enabled linters in
+`ENABLE_LINTERS`, so MegaLinter's vulnerability scanners (osv-scanner, grype,
+trivy) don't run here.
+
 ## Configuration
 
 ### Required Environment Variables
@@ -88,7 +105,11 @@ build/test/lint workflow. Quick reference:
 
 ### Optional Environment Variables
 
-- `CACHE_BUCKET`: JetStream KeyValue bucket name (default: `fga-sync-cache`)
+- `CACHE_BUCKET`: JetStream KeyValue bucket name (default: `fga-sync-cache`).
+  If the bucket does not exist at startup, the service logs a warning and
+  runs with the cache disabled, retrying the bind on each tuple write so
+  invalidations resume once the bucket exists; any other bind error stops
+  startup.
 - `USE_CACHE`: Enable JetStream KV reads for access checks when set to `true`
   (chart default is true; binary default is false)
 - `PORT`: HTTP server port (default: `8080`)
@@ -165,7 +186,7 @@ helm install fga-sync ./charts/lfx-v2-fga-sync \
 
 ## Troubleshooting
 
-- **Build failures**: ensure Go matches `go.mod` (currently 1.25+) and run `go mod tidy`.
+- **Build failures**: ensure Go matches `go.mod` (currently 1.27.4+) and run `go mod tidy`.
 - **NATS / OpenFGA connection**: verify `NATS_URL` and `OPENFGA_API_URL`.
 - **Cache or stale access checks**: see the cache behavior and "Debugging Access Issues"
   sections in `docs/fga-sync-contract.md` (covers `/debug/vars` counters, the

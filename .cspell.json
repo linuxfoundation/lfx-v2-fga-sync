@@ -18,6 +18,8 @@
     "OPENSEARCH",
     "jetstream",
     "nats",
+    "natskv",
+    "fgacache",
     "unittests",
     "gosec",
     "sarif",
@@ -100,7 +102,8 @@
     "tupleset",
     "tuplesets",
     "fixpoint",
-    "nocolon"
+    "nocolon",
+    "valkey"
   ],
   "overrides": [
     {

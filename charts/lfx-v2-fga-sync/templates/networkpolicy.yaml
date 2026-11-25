@@ -1,0 +1,42 @@
+# Copyright The Linux Foundation and each contributor to LFX.
+# SPDX-License-Identifier: MIT
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # NATS
+    - ports:
+        - port: {{ .Values.networkPolicy.natsPort }}
+          protocol: TCP
+    # OpenFGA API
+    - ports:
+        - port: {{ .Values.networkPolicy.openfgaPort }}
+          protocol: TCP
+    # OpenTelemetry collector (gRPC and HTTP)
+    - ports:
+        - port: {{ .Values.networkPolicy.otelGRPCPort }}
+          protocol: TCP
+        - port: {{ .Values.networkPolicy.otelHTTPPort }}
+          protocol: TCP
+    # Valkey index cache. Port-based egress does not stop pods without a
+    # policy from reaching it.
+    - ports:
+        - port: {{ .Values.networkPolicy.valkeyPort }}
+          protocol: TCP
+{{- end }}

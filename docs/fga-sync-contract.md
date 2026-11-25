@@ -157,6 +157,23 @@ type GenericFGAMessage struct {
   enabling permission inheritance from the parent project.
 - `exclude_relations` lets a publisher manage some relations separately (e.g. members
   managed by a different subject). Those relations are left untouched.
+- `"public": true` writes a `user:*` tuple on `viewer`. Object types that also define a
+  `public` relation separate from `viewer` (e.g. `groupsio_mailing_list`, so a caller can
+  check "is this list public" without matching existing writers/auditors/members of
+  non-public lists) get that tuple the same way any other relation is written: the
+  publisher includes `"public": ["*"]` in `relations` for public objects and omits it for
+  private ones. There is no object-type-specific handling in this service — if the
+  OpenFGA model for an object type doesn't define a `public` relation, OpenFGA rejects
+  that tuple write. `writeAndDeleteTuplesBatch` logs "skipping invalid tuple and
+  retrying batch write", drops the `public` tuple from the batch, and commits the rest
+  — the request still succeeds overall, but the `public` tuple is silently dropped and
+  **not retried later**. Any object synced during that window stays without `public`
+  until its access message is published again.
+  **Rollout note:** a publisher must not include `"public"` in `relations` for an object
+  type until the OpenFGA model that type uses has had the `public` relation added and
+  deployed (see `linuxfoundation/lfx-v2-helm#189` for the `groupsio_mailing_list` case) —
+  deploy the model change first, then the publisher change. Objects synced before the
+  model deploy will need their access message republished afterward to pick up `public`.
 - Team-subject tuples are preserved when their relation name does not begin
   with `global_`. A `global_*` team relation is part of the publisher-managed
   full sync and is removed when omitted unless it appears in `exclude_relations`.
@@ -211,6 +228,18 @@ Reply is plain text, one line per check, tab-delimited `{request}\t{true|false}`
 
 **Order is not guaranteed** (cached results may be returned first); callers must
 match on the request token, not by index.
+
+Each line must meet OpenFGA's check-request limits, counted in characters:
+`object` 2-256 with no whitespace, `relation` 1-50 with no `:`, `#`, `@` or
+whitespace, and `user` 2-512 with no whitespace, where whitespace is space, tab,
+newline, form feed or carriage return. A whole line may be at most 1,024 bytes,
+which keeps the cache key inside the NATS subject length limit. A request with
+any line that breaks these rules, or that has no `@` or `#`, gets the reply
+`failed to extract check requests`. The reply does not repeat the line. OpenFGA
+already rejects lines that break the field limits, and it fails the whole batch
+when one item is invalid. The only lines newly rejected are those within the
+field limits but over 1,024 bytes, which needs multi-byte characters: the
+longest line of ASCII characters is 820 bytes.
 
 ### `lfx.access_check.read_tuples`
 

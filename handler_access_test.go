@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linuxfoundation/lfx-v2-fga-sync/pkg/constants"
 	nats "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	openfga "github.com/openfga/go-sdk"
@@ -254,6 +256,34 @@ func TestAccessCheckHandler(t *testing.T) {
 	}
 }
 
+// TestAccessCheckHandlerRejectsOversizedLine verifies that a line over the
+// limits gets the existing error reply without touching the cache or OpenFGA,
+// and that the line is not written to the log.
+func TestAccessCheckHandlerRejectsOversizedLine(t *testing.T) {
+	var logs bytes.Buffer
+	previous := logger
+	logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { logger = previous })
+
+	oversized := "project:" + strings.Repeat("x", 3000) + "#viewer@user:456"
+	msg := CreateMockNatsMsg([]byte("project:123#writer@user:456\n" + oversized))
+	msg.reply = "reply.subject"
+	msg.On("Respond", []byte("failed to extract check requests")).Return(nil).Once()
+
+	kv := &keyRecordingKV{}
+	fgaClient := &MockFgaClient{}
+	service := &HandlerService{fgaService: newFgaService(fgaClient, kv, true)}
+
+	err := service.accessCheckHandler(context.Background(), msg)
+
+	require.Error(t, err)
+	msg.AssertExpectations(t)
+	fgaClient.AssertNotCalled(t, "BatchCheck", mock.Anything, mock.Anything)
+	assert.Empty(t, kv.gets, "no cache lookup for a rejected request")
+	assert.Empty(t, kv.puts, "no cache write for a rejected request")
+	assert.NotContains(t, logs.String(), strings.Repeat("x", 100), "log must not contain the rejected line")
+}
+
 // TestAccessCheckHandlerBoundsContextDeadline verifies accessCheckHandler
 // wraps the incoming context with accessCheckHandlerTimeout, so a slow or
 // hung OpenFGA call cannot hold the handler's concurrency slot open past
@@ -375,6 +405,105 @@ func TestProcessStandardAccessUpdate(t *testing.T) {
 						}
 					}
 					return true
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+
+		{
+			name: "groupsio_mailing_list with a public relation in the Relations map gets a public tuple",
+			obj: &standardAccessStub{
+				UID:        "mailing-list-123",
+				ObjectType: "groupsio_mailing_list",
+				Public:     true,
+				Relations:  map[string][]string{"writer": {"user1"}, constants.RelationPublic: {"*"}},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have: public viewer (from Public bool) + public "public" relation
+					// (from the generic Relations loop, same as any other relation) + 1 writer = 3 tuples
+					if len(req.Writes) != 3 || len(req.Deletes) != 0 {
+						return false
+					}
+					sawPublicViewer, sawPublicRelation := false, false
+					for _, tuple := range req.Writes {
+						if tuple.User == "user:*" && tuple.Relation == "viewer" {
+							sawPublicViewer = true
+						}
+						if tuple.User == "user:*" && tuple.Relation == constants.RelationPublic {
+							sawPublicRelation = true
+						}
+					}
+					return sawPublicViewer && sawPublicRelation
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "groupsio_mailing_list without a public relation in the Relations map does not get a public tuple",
+			obj: &standardAccessStub{
+				UID:        "mailing-list-456",
+				ObjectType: "groupsio_mailing_list",
+				Public:     false,
+				Relations:  map[string][]string{"writer": {"user1"}},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have only the 1 writer tuple; no viewer or public wildcard tuples
+					if len(req.Writes) != 1 || len(req.Deletes) != 0 {
+						return false
+					}
+					for _, tuple := range req.Writes {
+						if tuple.User == "user:*" {
+							return false
+						}
+					}
+					return true
+				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
+				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
+			},
+			expectedError:  false,
+			expectedCalled: true,
+		},
+		{
+			name: "any object type with a public relation in the Relations map gets a public tuple (no object-type gating)",
+			obj: &standardAccessStub{
+				UID:        "committee-789",
+				ObjectType: "committee",
+				Public:     true,
+				Relations:  map[string][]string{constants.RelationPublic: {"*"}},
+				References: map[string][]string{},
+			},
+			replySubject: "reply.subject",
+			setupMocks: func(service *HandlerService, msg *MockNatsMsg) {
+				msg.On("Respond", []byte("OK")).Return(nil).Once()
+				service.fgaService.store.client.(*MockFgaClient).On("Write", mock.Anything, mock.MatchedBy(func(req client.ClientWriteRequest) bool {
+					// Should have the public viewer tuple plus the "public" relation tuple —
+					// the handler has no object-type-specific logic; any object type gets a
+					// "public" tuple if (and only if) its publisher includes it in Relations.
+					if len(req.Writes) != 2 || len(req.Deletes) != 0 {
+						return false
+					}
+					sawPublicViewer, sawPublicRelation := false, false
+					for _, tuple := range req.Writes {
+						if tuple.User == "user:*" && tuple.Relation == "viewer" {
+							sawPublicViewer = true
+						}
+						if tuple.User == "user:*" && tuple.Relation == constants.RelationPublic {
+							sawPublicRelation = true
+						}
+					}
+					return sawPublicViewer && sawPublicRelation
 				}), mock.Anything).Return(&client.ClientWriteResponse{}, nil)
 				service.fgaService.store.client.(*MockFgaClient).On("Read", mock.Anything, mock.Anything, mock.Anything).Return(&client.ClientReadResponse{}, nil)
 			},
