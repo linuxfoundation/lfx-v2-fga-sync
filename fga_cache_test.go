@@ -35,6 +35,10 @@ func (r *cacheWriteRecorder) PutString(_ context.Context, key, _ string) (uint64
 	return 1, nil
 }
 
+func (r *cacheWriteRecorder) Delete(context.Context, string, ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+
 func TestSyncObjectTuplesSeedsPositiveCacheOnlyAfterSuccessfulWrite(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -287,7 +291,7 @@ func TestCacheLayerNilBucket(t *testing.T) {
 	assert.NotPanics(t, func() {
 		message = cache.buildResponseAndWriteBack(ctx, nil,
 			map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}},
-			map[string]client.ClientBatchCheckItem{"1": tuple})
+			map[string]client.ClientBatchCheckItem{"1": tuple}, time.Time{})
 	})
 	assert.Equal(t, "project:example#viewer@user:example-user\ttrue\n", string(message))
 }
@@ -341,6 +345,151 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 
 	assert.Len(t, kv.puts, writers, "every write invalidates")
 	assert.NotNil(t, shared.recovery.bucket)
+}
+
+// clockKV is an in-memory bucket whose creation times come from a counter, so
+// the order of writes is exact. onRelPut, when set, runs before each write of a
+// relation key. Reads of inv fail once more than invGetsOK have succeeded.
+type clockKV struct {
+	mu        sync.Mutex
+	tick      int
+	entries   map[string]fixedEntry
+	onRelPut  func()
+	deleteErr error
+	invGets   int
+	invGetsOK int
+}
+
+func newClockKV() *clockKV { return &clockKV{entries: map[string]fixedEntry{}} }
+
+func (k *clockKV) Get(_ context.Context, key string) (jetstream.KeyValueEntry, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if key == "inv" {
+		k.invGets++
+		if k.invGetsOK > 0 && k.invGets > k.invGetsOK {
+			return nil, assert.AnError
+		}
+	}
+	entry, ok := k.entries[key]
+	if !ok {
+		return nil, jetstream.ErrKeyNotFound
+	}
+	return entry, nil
+}
+
+func (k *clockKV) Put(_ context.Context, key string, value []byte) (uint64, error) {
+	k.mu.Lock()
+	hook := k.onRelPut
+	k.mu.Unlock()
+	if hook != nil && strings.HasPrefix(key, "rel.") {
+		hook()
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.tick++
+	k.entries[key] = fixedEntry{value: value, created: time.Unix(0, 0).Add(time.Duration(k.tick) * time.Millisecond)}
+	return uint64(k.tick), nil
+}
+
+func (k *clockKV) PutString(ctx context.Context, key, value string) (uint64, error) {
+	return k.Put(ctx, key, []byte(value))
+}
+
+func (k *clockKV) Delete(_ context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.deleteErr != nil {
+		return k.deleteErr
+	}
+	delete(k.entries, key)
+	return nil
+}
+
+func (k *clockKV) relEntries() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	n := 0
+	for key := range k.entries {
+		if strings.HasPrefix(key, "rel.") {
+			n++
+		}
+	}
+	return n
+}
+
+// TestCheckWriteBackRacingInvalidation covers a check whose "allowed" answer
+// is revoked, and the cache invalidated, before or while fga-sync writes the
+// answer back. The next check must not be answered "allowed" from the cache.
+func TestCheckWriteBackRacingInvalidation(t *testing.T) {
+	tuple := client.ClientCheckRequest{User: "user:example-user", Relation: "viewer", Object: "project:example"}
+	revoke := func(kv *clockKV) func() {
+		var once sync.Once
+		return func() {
+			once.Do(func() { _, _ = kv.Put(context.Background(), "inv", []byte("1")) })
+		}
+	}
+
+	tests := []struct {
+		name            string
+		existingMarker  bool
+		revokeInCheck   bool
+		revokeInWrite   bool
+		deleteErr       error
+		invGetsOK       int
+		wantCached      bool
+		wantNoRelWrites bool
+	}{
+		{name: "no invalidation, no marker yet", wantCached: true},
+		{name: "no invalidation, existing marker", existingMarker: true, wantCached: true},
+		{name: "invalidation while OpenFGA answers", revokeInCheck: true},
+		{name: "invalidation while OpenFGA answers, existing marker", existingMarker: true, revokeInCheck: true},
+		{name: "invalidation during the write-back", revokeInWrite: true},
+		{name: "invalidation during the write-back, delete fails", revokeInWrite: true, deleteErr: assert.AnError},
+		{name: "marker re-read fails before the write-back", invGetsOK: 1, wantNoRelWrites: true},
+		{name: "marker re-read fails after the write-back", invGetsOK: 2, wantNoRelWrites: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			kv := newClockKV()
+			kv.deleteErr = tt.deleteErr
+			kv.invGetsOK = tt.invGetsOK
+			if tt.existingMarker {
+				_, _ = kv.Put(ctx, "inv", []byte("1"))
+			}
+			if tt.revokeInWrite {
+				kv.onRelPut = revoke(kv)
+			}
+
+			fgaClient := new(MockFgaClient)
+			call := fgaClient.On("BatchCheck", mock.Anything, mock.Anything).
+				Return(&openfga.BatchCheckResponse{Result: &map[string]openfga.BatchCheckSingleResult{
+					"1": {Allowed: openfga.PtrBool(true)},
+				}}, nil)
+			if tt.revokeInCheck {
+				call.Run(func(mock.Arguments) { revoke(kv)() })
+			}
+			service := newFgaService(fgaClient, kv, true)
+
+			result, err := service.CheckRelationships(ctx, []client.ClientCheckRequest{tuple})
+			require.NoError(t, err, "the guard must never fail the check")
+			assert.Equal(t, "project:example#viewer@user:example-user\ttrue", string(result))
+
+			if tt.wantNoRelWrites {
+				assert.Zero(t, kv.relEntries(), "no write-back is left when the marker cannot be re-read")
+				return
+			}
+			lastInvalidation, err := service.cache.getLastInvalidation(ctx)
+			require.NoError(t, err)
+			outcome := service.cache.lookupEntry(ctx,
+				client.ClientBatchCheckItem{User: tuple.User, Relation: tuple.Relation, Object: tuple.Object},
+				lastInvalidation)
+			cachedAllowed := outcome.kind == cacheOutcomeHit && strings.HasSuffix(string(outcome.hitLine), "\ttrue\n")
+			assert.Equal(t, tt.wantCached, cachedAllowed, "cached allowed")
+		})
+	}
 }
 
 func TestCacheLayerRecoveryBindErrorIsReturned(t *testing.T) {

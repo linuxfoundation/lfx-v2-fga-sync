@@ -116,6 +116,7 @@ type INatsKeyValue interface {
 	Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error)
 	Put(context.Context, string, []byte) (uint64, error)
 	PutString(context.Context, string, string) (uint64, error)
+	Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error
 }
 
 // FgaService coordinates FGA authorization checks and tuple synchronization.
@@ -468,14 +469,20 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		})
 	}
 
+	// With the cache disabled the write-back has no invalidation read to guard
+	// against, so answers are not written back.
+	writeBack := CacheLayer{}
+	var lastInvalidation time.Time
 	if !s.useCache {
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
 	} else {
+		writeBack = s.cache
 		// Get the most recent cache invalidation. Only read when the cache is
 		// enabled: the read holds a cacheOpSem slot, and its result is unused
 		// otherwise.
-		lastInvalidation, err := s.cache.getLastInvalidation(ctx)
+		var err error
+		lastInvalidation, err = s.cache.getLastInvalidation(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -567,7 +574,9 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	}
 
 	// Assemble result lines and fan out cache write-backs.
-	message = s.cache.buildResponseAndWriteBack(ctx, message, *batchResp.Result, mapCorrelationIDToTuple)
+	message = writeBack.buildResponseAndWriteBack(
+		ctx, message, *batchResp.Result, mapCorrelationIDToTuple, lastInvalidation,
+	)
 
 	if len(message) < 1 {
 		// This shouldn't happen (*batchResp was checked for ==0 above with an
