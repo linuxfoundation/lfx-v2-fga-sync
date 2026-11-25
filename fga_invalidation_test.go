@@ -40,7 +40,7 @@ func TestParseInvalidationMode(t *testing.T) {
 		{in: "  Scoped\n", want: invalidationScoped, wantOK: true, str: modeNameScoped},
 		{in: "READ-SCOPED", want: invalidationReadScoped, wantOK: true, str: modeNameReadScoped},
 		{in: "true", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
-		{in: "scopped", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
+		{in: "scopped", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped}, // cspell:disable-line
 		{in: "scoped-writes", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
 	}
 	for _, tt := range tests {
