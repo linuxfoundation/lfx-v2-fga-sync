@@ -138,8 +138,10 @@ const (
 )
 
 // parseInvalidationMode maps the INVALIDATION_MODE value to a mode. The empty
-// string means the default (global). ok is false for unrecognized values,
-// which callers should treat as global.
+// string means the default (global). ok is false for unrecognized values, which
+// map to read-scoped: it writes global markers, so it never under-invalidates,
+// and it still honors scoped markers written by other replicas. Falling back to
+// global would make a typo ignore those markers and serve revoked access.
 func parseInvalidationMode(value string) (mode invalidationMode, ok bool) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", modeNameGlobal:
@@ -149,7 +151,7 @@ func parseInvalidationMode(value string) (mode invalidationMode, ok bool) {
 	case modeNameScoped:
 		return invalidationScoped, true
 	}
-	return invalidationGlobal, false
+	return invalidationReadScoped, false
 }
 
 func (m invalidationMode) String() string {
@@ -243,14 +245,27 @@ func objectType(object string) (string, bool) {
 	if !found || typ == "" || id == "" {
 		return "", false
 	}
+	if !validTypeName(typ) {
+		return "", false
+	}
+	return typ, true
+}
+
+// validTypeName reports whether an OpenFGA type name is safe inside a marker
+// key. The model graph uses it to reject models objectType could not read back,
+// so a type is never given scoped markers that lookups would then skip.
+func validTypeName(typ string) bool {
+	if typ == "" {
+		return false
+	}
 	for _, r := range typ {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
 		default:
-			return "", false
+			return false
 		}
 	}
-	return typ, true
+	return true
 }
 
 // isConcreteUser reports whether subject names exactly one user, as opposed
@@ -366,8 +381,11 @@ func tupleRefs(writes []ClientTupleKey, deletes []ClientTupleKeyWithoutCondition
 // global key: a partially applied scoped invalidation must never leave stale
 // entries alive.
 func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan) error {
-	if c.bucket == nil {
-		return nil
+	// Resolve the bucket through recovery: a replica that started without the
+	// bucket must still invalidate once other replicas begin caching in it.
+	bucket, err := c.invalidationBucket(ctx)
+	if err != nil || bucket == nil {
+		return err
 	}
 	if plan.global || (len(plan.types) == 0 && len(plan.users) == 0) {
 		reason := plan.reason
@@ -391,11 +409,11 @@ func (c CacheLayer) applyInvalidation(ctx context.Context, plan invalidationPlan
 	wg.SetLimit(invalidationWriteConcurrency)
 	for _, key := range keys {
 		wg.Go(func() error {
-			_, err := c.bucket.Put(ctx, key, []byte("1"))
-			return err
+			_, putErr := bucket.Put(ctx, key, []byte("1"))
+			return putErr
 		})
 	}
-	if err := wg.Wait(); err != nil {
+	if err = wg.Wait(); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		logger.With(errKey, err).ErrorContext(ctx, "failed to write scoped invalidation markers; falling back to global")

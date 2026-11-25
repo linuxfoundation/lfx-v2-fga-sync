@@ -58,9 +58,10 @@ type modelGraph struct {
 // newModelGraph builds the dependency graph for an authorization model. It
 // returns an error for anything it cannot interpret (schema versions other
 // than 1.1, relation references to undefined relations, usersets with no
-// recognized rewrite). Callers must treat an error as "scoped invalidation is
-// unavailable" and fall back to global invalidation, because a graph with
-// missing edges would leave stale cache entries alive.
+// recognized rewrite, type names that cannot appear in a marker key). Callers
+// must treat an error as "scoped invalidation is unavailable" and fall back to
+// global invalidation, because a graph with missing edges would leave stale
+// cache entries alive.
 func newModelGraph(model *openfga.AuthorizationModel) (*modelGraph, error) {
 	if model == nil {
 		return nil, fmt.Errorf("authorization model is nil")
@@ -78,6 +79,9 @@ func newModelGraph(model *openfga.AuthorizationModel) (*modelGraph, error) {
 
 	direct := make(map[relNode][]openfga.RelationReference)
 	for _, td := range model.TypeDefinitions {
+		if !validTypeName(td.Type) {
+			return nil, fmt.Errorf("type name %q cannot be used in a cache marker key", td.Type)
+		}
 		if td.Relations == nil {
 			continue
 		}

@@ -646,14 +646,15 @@ func queueSubscriptionConfigs(handlerService HandlerService) []subscriptionConfi
 
 // configureInvalidation resolves INVALIDATION_MODE and, for scoped mode, loads
 // the model graph that scoped writes depend on. Every failure degrades toward
-// global invalidation, which is always safe: an unrecognized mode is global,
-// and a model that cannot be loaded or interpreted keeps writes global while
+// global invalidation, which is always safe: an unrecognized mode is
+// read-scoped (global writes, scoped reads, so scoped markers from other
+// replicas are still honored), and a model that cannot be loaded or interpreted keeps writes global while
 // lookups still honor scoped markers.
 func configureInvalidation(ctx context.Context, fgaClient IFgaClient) (invalidationMode, *modelGraph) {
 	raw := os.Getenv(invalidationModeEnv)
 	mode, ok := parseInvalidationMode(raw)
 	if !ok {
-		logger.With("value", raw).Warn("unrecognized " + invalidationModeEnv + "; using global")
+		logger.With("value", raw).Warn("unrecognized " + invalidationModeEnv + "; using " + modeNameReadScoped)
 	}
 	modelID := os.Getenv("OPENFGA_AUTH_MODEL_ID")
 	logger.With("mode", mode.String(), "model_id", modelID).Info("cache invalidation mode configured")

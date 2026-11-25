@@ -39,8 +39,9 @@ func TestParseInvalidationMode(t *testing.T) {
 		{in: modeNameScoped, want: invalidationScoped, wantOK: true, str: modeNameScoped},
 		{in: "  Scoped\n", want: invalidationScoped, wantOK: true, str: modeNameScoped},
 		{in: "READ-SCOPED", want: invalidationReadScoped, wantOK: true, str: modeNameReadScoped},
-		{in: "true", want: invalidationGlobal, wantOK: false, str: modeNameGlobal},
-		{in: "scoped-writes", want: invalidationGlobal, wantOK: false, str: modeNameGlobal},
+		{in: "true", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
+		{in: "scopped", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
+		{in: "scoped-writes", want: invalidationReadScoped, wantOK: false, str: modeNameReadScoped},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%q", tt.in), func(t *testing.T) {
@@ -1260,10 +1261,11 @@ func TestConfigureInvalidation(t *testing.T) {
 		assert.Nil(t, graph)
 	})
 
-	t.Run("unrecognized value is global", func(t *testing.T) {
+	t.Run("unrecognized value is read-scoped", func(t *testing.T) {
 		t.Setenv(invalidationModeEnv, "bogus")
 		mode, graph := configureInvalidation(ctx, new(MockFgaClient))
-		assert.Equal(t, invalidationGlobal, mode)
+		assert.Equal(t, invalidationReadScoped, mode)
+		assert.True(t, invalidationConfig{mode: mode}.readsScoped(), "scoped markers from other replicas must be honored")
 		assert.Nil(t, graph)
 	})
 
@@ -1412,4 +1414,39 @@ type doc
 		assert.True(t, platform.isTupleset("meeting", "committee"))
 		assert.False(t, platform.isTupleset("meeting", "participant"))
 	})
+}
+
+// TestApplyInvalidationRecoversMissingBucket covers a replica that started
+// without the cache bucket: once the bucket exists, every plan kind must write
+// its markers to it, because other replicas may be caching results there.
+func TestApplyInvalidationRecoversMissingBucket(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		plan     invalidationPlan
+		wantPuts []string
+	}{
+		{name: "global plan", plan: invalidationPlan{global: true, reason: globalReasonModeGlobal}, wantPuts: []string{"inv"}},
+		{name: "scoped plan", plan: invalidationPlan{types: []string{"meeting"}}, wantPuts: []string{"inv.t.meeting"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kv := &keyRecordingKV{}
+			var bound INatsKeyValue
+			cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
+				if bound == nil {
+					return nil, jetstream.ErrBucketNotFound
+				}
+				return bound, nil
+			}}}
+
+			require.NoError(t, cache.applyInvalidation(ctx, tt.plan), "a still-missing bucket is not an error")
+			assert.Empty(t, kv.puts)
+
+			bound = kv
+			require.NoError(t, cache.applyInvalidation(ctx, tt.plan))
+			assert.Equal(t, tt.wantPuts, kv.puts)
+			assert.Nil(t, cache.bucket, "reads stay disabled after recovery")
+		})
+	}
 }

@@ -366,6 +366,13 @@ Roll out in two steps: deploy `read-scoped` to every replica, then switch to
 `scoped`. A replica that does not read scoped markers will serve a revoked grant
 from cache until the entry's TTL if another replica writes only scoped markers.
 
+Every other consumer of the shared cache must honor scoped markers before any
+replica runs `scoped`. The indexer's `fgacache` currently reads only the global
+`inv` key, so it would accept cached grants after a scoped-only revocation.
+Upgrade it to a version that reads scoped markers first, or disable its shared
+cache reads and writes, and keep that in place during rollback until every
+scoped writer has drained and the `inv` flush below has succeeded.
+
 Roll back in the reverse order, one step at a time. Do not go straight from
 `scoped` to `global`: a replica still on `scoped` keeps writing scoped markers
 that a replica already on `global` ignores, so a revocation (or a grant that

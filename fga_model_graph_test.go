@@ -445,6 +445,19 @@ func TestNewModelGraphRejectsUnusableModels(t *testing.T) {
 	}{
 		{name: "nil model", model: nil, wantErr: "nil"},
 		{
+			name: "type name that cannot appear in a marker key",
+			model: &openfga.AuthorizationModel{
+				SchemaVersion: modelSchemaVersion,
+				TypeDefinitions: []openfga.TypeDefinition{
+					{Type: "folder", Relations: &map[string]openfga.Userset{"viewer": {This: &emptyMap}}},
+					{Type: "doc.v1", Relations: &map[string]openfga.Userset{
+						"viewer": {ComputedUserset: &openfga.ObjectRelation{Relation: str("viewer")}},
+					}},
+				},
+			},
+			wantErr: "cannot be used in a cache marker key",
+		},
+		{
 			name:    "schema version 1.0",
 			model:   &openfga.AuthorizationModel{SchemaVersion: "1.0"},
 			wantErr: "schema version",
