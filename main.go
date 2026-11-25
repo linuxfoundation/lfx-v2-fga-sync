@@ -322,10 +322,7 @@ func run(bind, port string) error {
 	}
 	invMode, invGraph := configureInvalidation(context.Background(), fgaClient)
 	fgaService = fgaService.withInvalidation(invMode, invGraph).withModelGuard(os.Getenv("OPENFGA_AUTH_MODEL_ID"))
-	if err = fgaService.announceModel(ctx); err != nil {
-		logger.With(errKey, err).Error("could not announce authorization model; invalidating globally")
-		fgaService = fgaService.withInvalidation(invMode, nil)
-	}
+	fgaService = fgaService.announceModelOrDegrade(ctx)
 
 	handlerService := HandlerService{fgaService: fgaService}
 

@@ -478,6 +478,9 @@ type flakyKV struct {
 	// hangPut, when it returns true for a key, makes Put block until its
 	// context ends, like a NATS write that exhausts its deadline.
 	hangPut func(key string) bool
+	// hangGet, when it returns true for a key, makes Get block until its
+	// context ends.
+	hangGet func(key string) bool
 	gets    atomic.Int64
 	getKeys sync.Map
 }
@@ -485,6 +488,10 @@ type flakyKV struct {
 func (f *flakyKV) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
 	f.gets.Add(1)
 	f.getKeys.Store(key, true)
+	if f.hangGet != nil && f.hangGet(key) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.failGet != nil {
 		if err := f.failGet(key); err != nil {
 			return nil, err
@@ -1521,6 +1528,16 @@ func TestApplyInvalidationModelGuard(t *testing.T) {
 		assert.False(t, kv.written(typeMarkerKey("meeting")))
 	})
 
+	t.Run("a marker read that exhausts the deadline still invalidates globally", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.hangGet = func(key string) bool { return key == modelMarkerKey }
+		deadlineCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(deadlineCtx, scopedPlan))
+		assert.True(t, kv.written(globalInvalidationKey), "the fallback runs on its own deadline")
+		assert.False(t, kv.written(typeMarkerKey("meeting")))
+	})
+
 	t.Run("a global plan never reads the marker", func(t *testing.T) {
 		kv := newFlakyKV()
 		require.NoError(t, CacheLayer{bucket: kv}.applyInvalidation(ctx, globalPlanFor(globalReasonModeGlobal)))
@@ -1531,11 +1548,63 @@ func TestApplyInvalidationModelGuard(t *testing.T) {
 
 func TestAnnounceModel(t *testing.T) {
 	ctx := context.Background()
+	marker := func(t *testing.T, kv *flakyKV, id string) {
+		t.Helper()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte(id))
+		require.NoError(t, err)
+	}
+	markerValue := func(t *testing.T, kv *flakyKV) string {
+		t.Helper()
+		entry, err := kv.Get(ctx, modelMarkerKey)
+		require.NoError(t, err)
+		return string(entry.Value())
+	}
 
 	t.Run("writes the marker, then flushes", func(t *testing.T) {
 		kv := &keyRecordingKV{}
-		require.NoError(t, CacheLayer{bucket: kv}.announceModel(ctx, "m-new"))
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.NoError(t, err)
+		assert.True(t, flushed)
 		assert.Equal(t, []string{modelMarkerKey, globalInvalidationKey}, kv.puts, "marker first, so no replica checks a stale one after the flush")
+	})
+
+	t.Run("an older marker is replaced and the cache flushed", func(t *testing.T) {
+		kv := newFlakyKV()
+		marker(t, kv, "m-1")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.NoError(t, err)
+		assert.True(t, flushed)
+		assert.Equal(t, "m-2", markerValue(t, kv))
+		assert.True(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("the same model only refreshes the marker", func(t *testing.T) {
+		kv := newFlakyKV()
+		marker(t, kv, "m-2")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.NoError(t, err)
+		assert.False(t, flushed, "a pod restart must not flush the whole cache")
+		assert.False(t, kv.written(globalInvalidationKey))
+		assert.Equal(t, "m-2", markerValue(t, kv))
+	})
+
+	t.Run("a newer marker is left alone", func(t *testing.T) {
+		kv := newFlakyKV()
+		marker(t, kv, "m-2")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-1")
+		require.ErrorIs(t, err, errOutdatedModel)
+		assert.False(t, flushed)
+		assert.Equal(t, "m-2", markerValue(t, kv), "an outdated replica must not take the marker back")
+		assert.False(t, kv.written(globalInvalidationKey))
+	})
+
+	t.Run("an unreadable marker is an error and writes nothing", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.failGet = func(string) error { return errors.New("kv down") }
+		_, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorContains(t, err, "reading model marker")
+		assert.False(t, kv.written(modelMarkerKey))
+		assert.False(t, kv.written(globalInvalidationKey))
 	})
 
 	t.Run("flushes and reports a marker write failure", func(t *testing.T) {
@@ -1546,8 +1615,9 @@ func TestAnnounceModel(t *testing.T) {
 			}
 			return nil
 		}
-		err := CacheLayer{bucket: kv}.announceModel(ctx, "m-new")
-		require.ErrorContains(t, err, "model marker")
+		flushed, err := CacheLayer{bucket: kv}.announceModel(ctx, "m-2")
+		require.ErrorContains(t, err, "writing model marker")
+		assert.True(t, flushed)
 		assert.True(t, kv.written(globalInvalidationKey), "the flush still runs")
 	})
 
@@ -1555,7 +1625,9 @@ func TestAnnounceModel(t *testing.T) {
 		cache := CacheLayer{recovery: &bucketRecovery{bind: func(context.Context) (INatsKeyValue, error) {
 			return nil, jetstream.ErrBucketNotFound
 		}}}
-		require.NoError(t, cache.announceModel(ctx, "m-new"))
+		flushed, err := cache.announceModel(ctx, "m-2")
+		require.NoError(t, err)
+		assert.False(t, flushed)
 	})
 }
 
@@ -1599,7 +1671,7 @@ func TestFgaServiceModelGuard(t *testing.T) {
 		assert.Empty(t, conditioned.modelID)
 	})
 
-	t.Run("announces only when scoped writes are enabled", func(t *testing.T) {
+	t.Run("announces in scoped mode whether or not the graph loaded", func(t *testing.T) {
 		for _, tt := range []struct {
 			name     string
 			mode     invalidationMode
@@ -1608,52 +1680,164 @@ func TestFgaServiceModelGuard(t *testing.T) {
 		}{
 			{name: "global mode", mode: invalidationGlobal, graph: graph},
 			{name: "read-scoped mode", mode: invalidationReadScoped, graph: graph},
-			{name: "scoped without a graph", mode: invalidationScoped, graph: nil},
+			{name: "scoped without a graph", mode: invalidationScoped, graph: nil, wantPuts: []string{modelMarkerKey, globalInvalidationKey}},
 			{name: "scoped", mode: invalidationScoped, graph: graph, wantPuts: []string{modelMarkerKey, globalInvalidationKey}},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				kv := &keyRecordingKV{}
-				cctx, cancel := context.WithCancel(ctx)
+				runCtx, cancel := context.WithCancel(ctx)
 				defer cancel() // stops the follow-up flush
-				require.NoError(t, newSvc(kv, tt.mode, tt.graph).announceModel(cctx))
+				require.NoError(t, newSvc(kv, tt.mode, tt.graph).announceModel(runCtx))
 				assert.Equal(t, tt.wantPuts, kv.puts)
 			})
 		}
 	})
 }
 
+func TestAnnounceModelRetries(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the follow-up flush
+	prev := modelAnnounceRetryDelay
+	modelAnnounceRetryDelay = time.Millisecond
+	t.Cleanup(func() { modelAnnounceRetryDelay = prev })
+	graph := platformGraph(t)
+
+	t.Run("succeeds once the marker write recovers", func(t *testing.T) {
+		kv := newFlakyKV()
+		var failures atomic.Int64
+		kv.failPut = func(key string) error {
+			if key == modelMarkerKey && failures.Add(1) <= 2 {
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		require.NoError(t, svc.announceModel(ctx))
+		assert.Equal(t, int64(3), failures.Load())
+		assert.True(t, kv.written(modelMarkerKey))
+	})
+
+	t.Run("gives up after the configured attempts", func(t *testing.T) {
+		kv := newFlakyKV()
+		var attempts atomic.Int64
+		kv.failPut = func(key string) error {
+			if key == modelMarkerKey {
+				attempts.Add(1)
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		require.Error(t, svc.announceModel(ctx))
+		assert.Equal(t, int64(modelAnnounceAttempts), attempts.Load())
+	})
+
+	t.Run("does not retry an outdated model", func(t *testing.T) {
+		kv := newFlakyKV()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte("m-9"))
+		require.NoError(t, err)
+		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		require.ErrorIs(t, svc.announceModel(ctx), errOutdatedModel)
+		assert.Equal(t, int64(1), kv.gets.Load())
+	})
+}
+
+// TestAnnounceModelOrDegrade covers what a replica does with the announcement's
+// outcome. In every case access checks keep being answered.
+func TestAnnounceModelOrDegrade(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the follow-up flush
+	prev := modelAnnounceRetryDelay
+	modelAnnounceRetryDelay = time.Millisecond
+	t.Cleanup(func() { modelAnnounceRetryDelay = prev })
+	graph := platformGraph(t)
+	tuple := []ClientTupleKey{{User: "user:a", Relation: "participant", Object: "meeting:m1"}}
+
+	t.Run("a successful announcement changes nothing", func(t *testing.T) {
+		svc := newFgaService(&recordingFga{}, newFlakyKV(), true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		got := svc.announceModelOrDegrade(ctx)
+		assert.True(t, got.useCache)
+		assert.NotNil(t, got.cache.bucket)
+		assert.False(t, got.invalidationPlan(tuple, nil).global, "still scoping")
+	})
+
+	t.Run("an outdated replica writes globally and keeps using the cache", func(t *testing.T) {
+		kv := newFlakyKV()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte("m-9"))
+		require.NoError(t, err)
+		svc := newFgaService(&recordingFga{}, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		got := svc.announceModelOrDegrade(ctx)
+		assert.True(t, got.useCache)
+		assert.NotNil(t, got.cache.bucket)
+		assert.True(t, got.invalidationPlan(tuple, nil).global)
+	})
+
+	t.Run("an unrecorded announcement stops using the shared cache but still invalidates it", func(t *testing.T) {
+		kv := newFlakyKV()
+		kv.failPut = func(key string) error {
+			if key == modelMarkerKey {
+				return errors.New("kv down")
+			}
+			return nil
+		}
+		fga := &recordingFga{}
+		svc := newFgaService(fga, kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
+		got := svc.announceModelOrDegrade(ctx)
+
+		assert.False(t, got.useCache)
+		assert.Nil(t, got.cache.bucket, "no reads, write-backs or seeding")
+		assert.True(t, got.invalidationPlan(tuple, nil).global)
+
+		// Access checks are still answered, by OpenFGA, and do not touch the cache.
+		reqs, err := got.ExtractCheckRequests([]byte("meeting:m1#viewer@user:a"))
+		require.NoError(t, err)
+		kv.gets.Store(0)
+		out, err := got.CheckRelationships(ctx, reqs)
+		require.NoError(t, err)
+		assert.Contains(t, string(out), "meeting:m1#viewer@user:a")
+		assert.Equal(t, []string{"meeting:m1#viewer@user:a"}, fga.takeChecked())
+		assert.Zero(t, kv.gets.Load())
+		assert.False(t, kv.written("rel."+b32("meeting:m1#viewer@user:a")), "no write-back")
+
+		// Writes still invalidate the bucket other replicas read.
+		kv.failPut = nil
+		require.NoError(t, got.WriteTuples(ctx, tuple))
+		assert.True(t, kv.written(globalInvalidationKey))
+	})
+}
+
 // TestModelRolloutDoesNotLeaveStaleGrants plays a model bump: the replica on
 // the old model starts writing globally as soon as the new one announces, so
 // its writes cannot leave entries a scoped marker from its outdated graph
-// would miss.
+// would miss, and restarting it afterwards cannot take the marker back.
 func TestModelRolloutDoesNotLeaveStaleGrants(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // stops the follow-up flush
 	graph := platformGraph(t)
 
 	e := newE2E(t, invalidationScoped, graph)
-	oldSvc := e.svc.withModelGuard("m-old")
-	newSvc := newFgaService(e.fga, e.kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-new")
+	oldSvc := e.svc.withModelGuard("m-1")
+	newSvc := newFgaService(e.fga, e.kv, true).withInvalidation(invalidationScoped, graph).withModelGuard("m-2")
 	require.NoError(t, oldSvc.announceModel(ctx))
 
-	e.seed(seededUniverse...)
-	e.svc = oldSvc
-	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
-	e.fga.takeChecked()
-	scopedOnly := e.check(seededUniverse...)
-	assert.NotEqual(t, sortedStrings(seededUniverse), scopedOnly, "before the new model appears the write is scoped")
+	staleAfterRevoke := func(svc FgaService) []string {
+		e.seed(seededUniverse...)
+		e.svc = svc
+		require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
+		e.fga.takeChecked()
+		return e.check(seededUniverse...)
+	}
 
-	e.seed(seededUniverse...)
+	assert.NotEqual(t, sortedStrings(seededUniverse), staleAfterRevoke(oldSvc),
+		"before the new model appears the write is scoped")
+
 	require.NoError(t, newSvc.announceModel(ctx))
-	e.seed(seededUniverse...)
-	e.svc = oldSvc
-	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
-	e.fga.takeChecked()
-	assert.Equal(t, sortedStrings(seededUniverse), e.check(seededUniverse...), "after the announcement the old replica writes globally")
+	assert.Equal(t, sortedStrings(seededUniverse), staleAfterRevoke(oldSvc),
+		"after the announcement the old replica writes globally")
+	assert.NotEqual(t, sortedStrings(seededUniverse), staleAfterRevoke(newSvc), "the new replica keeps scoping")
 
-	e.seed(seededUniverse...)
-	e.svc = newSvc
-	require.NoError(t, e.svc.DeleteTuple(ctx, "user:a", "participant", "meeting:m1"))
-	e.fga.takeChecked()
-	assert.NotEqual(t, sortedStrings(seededUniverse), e.check(seededUniverse...), "the new replica keeps scoping")
+	// The old replica restarts after the new one: it must not take the marker back.
+	require.ErrorIs(t, oldSvc.announceModel(ctx), errOutdatedModel)
+	assert.Equal(t, sortedStrings(seededUniverse), staleAfterRevoke(oldSvc),
+		"an old replica restarting mid-rollout still writes globally")
 }

@@ -396,20 +396,31 @@ During an `OPENFGA_AUTH_MODEL_ID` change, an old-model replica may write markers
 that miss a dependency only the new model has (for example a new
 `viewer from committee` rewrite), and the relation exists in both models so the
 global fallback does not trigger. In `scoped` mode the service guards against
-this itself:
+this itself, and access checks keep being answered throughout:
 
-1. When a replica starts in `scoped` mode with its model graph loaded, it writes
-   its model ID to `inv.model` and then bumps `inv`. The flush covers anything
-   an old-model replica scoped before this one started. About 10 seconds later it
-   bumps `inv` once more, to cover a write that read `inv.model` just before the
-   announcement.
+1. A replica in `scoped` mode announces its model ID in `inv.model` at startup,
+   whether or not its model graph loaded.
+   - No marker, or one for an older model: it writes the marker, then bumps
+     `inv`. The flush covers anything an old-model replica scoped before this
+     one started. About 10 seconds later it bumps `inv` once more, to cover a
+     write that read `inv.model` just before the announcement.
+   - The same model: another replica already announced, so it only refreshes the
+     marker. An ordinary pod restart does not flush the cache.
+   - A newer model: it leaves the marker alone and writes globally. Model IDs are
+     ULIDs, which sort by creation time, so an old-model pod that restarts
+     mid-rollout cannot take the marker back. After a rollback to an older model,
+     replicas stay on global writes until the marker expires (at most the bucket
+     TTL).
 2. Before writing scoped markers, every replica reads `inv.model`. If it holds a
    different model ID, the write bumps `inv` instead (reason `model_mismatch`);
-   if the read fails, the write also bumps `inv` (reason `model_check_failed`).
-   An old-model replica therefore writes globally as soon as the first new-model
-   replica starts, and keeps doing so until it is replaced.
-3. If a replica cannot record its announcement, it logs an error and writes
-   globally for the rest of its life.
+   if the read fails or times out, the write also bumps `inv` (reason
+   `model_check_failed`). The fallback write has its own deadline. An old-model
+   replica therefore writes globally as soon as the first new-model replica
+   starts, and keeps doing so until it is replaced.
+3. If a replica cannot record its announcement after 3 attempts, it logs an error
+   and stops reading from and writing to the shared cache, because older
+   replicas may keep scoping with an outdated graph. It still starts, answers
+   access checks from OpenFGA, and still writes `inv` on tuple writes.
 
 `inv.model` expires with the bucket TTL, far longer than a rollout, so a missing
 key counts as a match. The guard only protects replicas that run this check:
@@ -417,9 +428,16 @@ roll out `read-scoped` everywhere first, as above, so no replica without it is
 writing scoped markers. The `global` and `read-scoped` modes need nothing here,
 because every write already bumps `inv`.
 
-A model bump therefore costs one global cache flush, which is deliberate: the
-cache key does not include the model ID, so entries computed under the old model
-may be wrong under the new one.
+A model bump costs one global cache flush, which is deliberate: the cache key
+does not include the model ID, so entries computed under the old model may be
+wrong under the new one.
+
+**One manual step remains.** While old-model replicas still serve access checks,
+they write answers computed under the old model into the shared cache, under
+keys the new replicas also read. The flushes above run at startup, so they cannot
+cover entries written after them. Once the rollout has finished and no old-model
+replica is left, write any value to the `inv` key. Until then a grant the new
+model denies can be served from cache, for at most the cache TTL.
 
 ### Debugging cache behavior
 

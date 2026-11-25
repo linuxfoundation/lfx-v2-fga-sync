@@ -173,6 +173,17 @@ func (r *bucketRecovery) get(ctx context.Context) (INatsKeyValue, error) {
 	return r.bucket, nil
 }
 
+// withoutCacheUse returns a copy that no longer reads from, writes back to or
+// seeds the cache, but still writes invalidation markers to the same bucket. It
+// reuses the missing-bucket mode: no bucket for lookups, a recovery handle that
+// is already bound for invalidation.
+func (c CacheLayer) withoutCacheUse() CacheLayer {
+	if c.bucket == nil {
+		return c
+	}
+	return CacheLayer{recovery: &bucketRecovery{bucket: c.bucket}}
+}
+
 // invalidationBucket returns the bucket invalidate writes to, or nil when no
 // bucket exists.
 func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, error) {

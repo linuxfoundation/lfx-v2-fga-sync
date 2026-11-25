@@ -168,18 +168,63 @@ func (s FgaService) withModelGuard(modelID string) FgaService {
 }
 
 // announceModel announces the service's authorization model to the shared
-// cache, flushes it, and schedules one more flush shortly after. It does
-// nothing unless scoped writes are enabled. An error means the announcement
-// could not be recorded, in which case the caller must stop scoped writes.
+// cache and, when that flushed it, schedules one more flush shortly after. It
+// does nothing unless the service runs in scoped mode with a model ID, whether
+// or not the graph loaded: a replica without a graph writes globally itself,
+// but older replicas still need to learn a new model exists. A failed attempt
+// is retried; errOutdatedModel is not.
 func (s FgaService) announceModel(ctx context.Context) error {
-	if !s.invalidation.writesScoped() || s.invalidation.modelID == "" {
+	if s.invalidation.mode != invalidationScoped || s.invalidation.modelID == "" {
 		return nil
 	}
-	if err := s.cache.announceModel(ctx, s.invalidation.modelID); err != nil {
-		return err
+	var err error
+	for attempt := 0; attempt < modelAnnounceAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(modelAnnounceRetryDelay):
+			}
+		}
+		var flushed bool
+		flushed, err = s.cache.announceModel(ctx, s.invalidation.modelID)
+		if err == nil {
+			if flushed {
+				s.cache.followUpFlush(ctx, modelFollowUpDelay)
+			}
+			return nil
+		}
+		if errors.Is(err, errOutdatedModel) {
+			return err
+		}
+		logger.With(errKey, err, "attempt", attempt+1).WarnContext(ctx, "could not announce authorization model")
 	}
-	s.cache.followUpFlush(ctx, modelFollowUpDelay)
-	return nil
+	return err
+}
+
+// announceModelOrDegrade announces the model and returns the service to use
+// from then on. If a newer model is already announced, this replica is the
+// outdated one: it writes globally and keeps using the cache. If the
+// announcement could not be recorded after retries, older replicas may keep
+// scoping with an outdated graph, so this replica stops reading from and
+// writing to the shared cache entirely and writes globally. Access checks keep
+// working in both cases, answered by OpenFGA directly when not by the cache.
+func (s FgaService) announceModelOrDegrade(ctx context.Context) FgaService {
+	err := s.announceModel(ctx)
+	switch {
+	case err == nil:
+		return s
+	case errors.Is(err, errOutdatedModel):
+		logger.WarnContext(ctx, "a newer authorization model has been announced; invalidating globally")
+		return s.withInvalidation(s.invalidation.mode, nil)
+	default:
+		logger.With(errKey, err).Error(
+			"could not announce authorization model; shared cache disabled for this replica, invalidating globally")
+		s = s.withInvalidation(s.invalidation.mode, nil)
+		s.useCache = false
+		s.cache = s.cache.withoutCacheUse()
+		return s
+	}
 }
 
 // recordLookupOutcomes sets the hit, stale-hit and miss counts on a
