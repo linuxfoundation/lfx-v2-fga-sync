@@ -3,7 +3,7 @@
 
 module github.com/linuxfoundation/lfx-v2-fga-sync
 
-go 1.26.11
+go 1.27.4
 
 require (
 	github.com/nats-io/nats.go v1.56.0

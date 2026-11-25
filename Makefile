@@ -12,7 +12,7 @@ DOCKER_TAG := $(APP_VERSION)
 
 # Run MegaLinter locally via Docker with the CI Go flavor.
 # Keep this digest in sync with .github/workflows/mega-linter.yml.
-MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:42e091a4bcbe9141fe420c2520ed7addf75ae60a0c9d42e3df1278eef1c90a88  # v10.1.0
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:e676b8e9dac00d148bf1abb6ab809f1df76f07e804d8061f78631975d0c90925  # v10.2.0
 
 # Helm variables
 HELM_CHART_PATH=./charts/lfx-v2-fga-sync

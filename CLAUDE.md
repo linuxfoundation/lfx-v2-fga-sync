@@ -76,11 +76,20 @@ build/test/lint workflow. Quick reference:
 - `make check` (runs `fmt`, `vet`, `lint`)
 - `make docker-build`, `make helm-install-local`
 
-### Go toolchain version
+### Go version
 
-Follow the `lfx-megalinter` skill's Go version policy. It sets `go.mod` to
-the latest patch of the previous stable Go minor and caps it at the minor
-bundled by the pinned MegaLinter release.
+This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
+supersedes the Go version policy in the `lfx-megalinter` skill, which targets
+the latest stable minor minus one: don't move `go.mod` back to Go 1.26. Take
+every 1.27.x patch release, and update `go.mod`, this file and `README.md`
+together. The build and release workflows read the Go version from `go.mod`
+through `go-version-file`.
+
+MegaLinter (v10.2.0) runs Go 1.26.10 in its image, so
+`.github/workflows/mega-linter.yml` sets `GOTOOLCHAIN: auto` to let its Go
+linters download the `go.mod` toolchain. Its bundled golangci-lint 2.15.0 is
+built with Go 1.27.0 and lints this module with `.golangci.yml`, which also
+runs gosec.
 
 ## Configuration
 
