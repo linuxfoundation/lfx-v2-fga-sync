@@ -81,8 +81,10 @@ var (
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
 
 	// writeBackCleanupTimeout bounds each step of removing an overtaken
-	// write-back: the deletes, then the fallback marker write.
-	writeBackCleanupTimeout = 5 * time.Second
+	// write-back: the deletes, then the fallback marker write. Both steps
+	// together, after the 10s handler deadline, must stay under the
+	// caller's 15s request timeout.
+	writeBackCleanupTimeout = 2 * time.Second
 )
 
 func init() {
