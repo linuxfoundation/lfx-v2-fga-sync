@@ -2280,3 +2280,130 @@ func TestFollowUpFlushRetries(t *testing.T) {
 		assert.False(t, kv.written(globalInvalidationKey))
 	})
 }
+
+// TestModelFenceAnnouncesAgainWhenMarkerExpiresAfterRollback covers a replica left
+// on the older model after a rollback: it was fenced because the marker named
+// the newer model, and once that marker expires nothing else will announce its
+// model. It must announce again rather than stay fenced until it restarts.
+func TestModelFenceAnnouncesAgainWhenMarkerExpiresAfterRollback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // stops the watcher and follow-up flushes
+	prevFence := modelFenceInterval
+	modelFenceInterval = time.Millisecond
+	t.Cleanup(func() { modelFenceInterval = prevFence })
+
+	kv := newFlakyKV()
+	_, err := kv.Put(ctx, modelMarkerKey, []byte("m-2"))
+	require.NoError(t, err)
+	svc := newFgaService(&recordingFga{}, kv, true).
+		withInvalidation(invalidationScoped, platformGraph(t)).withModelGuard("m-1").
+		announceModelOrDegrade(ctx)
+	require.True(t, svc.cache.fence.isBlocked(), "the marker names a newer model")
+	require.False(t, kv.written(globalInvalidationKey))
+
+	kv.expire(modelMarkerKey) // the m-2 replicas are gone and nothing renewed their marker
+
+	require.Eventually(t, func() bool { return !svc.cache.fence.isBlocked() }, time.Second, time.Millisecond,
+		"the fence lifts once the replica has announced its own model again")
+	entry, err := kv.Get(ctx, modelMarkerKey)
+	require.NoError(t, err)
+	assert.Equal(t, "m-1", string(entry.Value()))
+	assert.True(t, kv.written(globalInvalidationKey), "the announcement flushes the cache")
+}
+
+func TestModelFenceAnnounceAgainOutcomes(t *testing.T) {
+	ctx := context.Background()
+	expiredAfterOther := func(t *testing.T, announceAgain func(context.Context, context.Context) error) *modelFence {
+		t.Helper()
+		kv := newFlakyKV()
+		_, err := kv.Put(ctx, modelMarkerKey, []byte("m-2"))
+		require.NoError(t, err)
+		f := &modelFence{announceAgain: announceAgain}
+		f.refresh(ctx, kv, "m-1")
+		require.True(t, f.isBlocked())
+		kv.expire(modelMarkerKey)
+		return f
+	}
+	refreshOnExpired := func(f *modelFence) {
+		kv := newFlakyKV() // no marker
+		f.refresh(ctx, kv, "m-1")
+	}
+
+	t.Run("a newer model announcing meanwhile keeps the fence closed", func(t *testing.T) {
+		f := expiredAfterOther(t, func(context.Context, context.Context) error { return errOutdatedModel })
+		refreshOnExpired(f)
+		assert.True(t, f.isBlocked())
+		assert.True(t, f.sawOther.Load())
+	})
+
+	t.Run("a failed announcement keeps it closed and the next refresh tries again", func(t *testing.T) {
+		var calls atomic.Int64
+		f := expiredAfterOther(t, func(context.Context, context.Context) error {
+			if calls.Add(1) == 1 {
+				return errors.New("kv down")
+			}
+			return nil
+		})
+		refreshOnExpired(f)
+		assert.True(t, f.isBlocked())
+		refreshOnExpired(f)
+		assert.False(t, f.isBlocked())
+		assert.Equal(t, int64(2), calls.Load())
+	})
+
+	t.Run("without a hook the fence stays closed", func(t *testing.T) {
+		f := expiredAfterOther(t, nil)
+		refreshOnExpired(f)
+		assert.True(t, f.isBlocked())
+	})
+}
+
+// TestModelFenceRefreshIsNotDelayedByMarkerRenewal covers slow KV replies: a
+// renewal that hangs must not hold up the poll that closes the fence, or an
+// outdated replica keeps writing for longer than the follow-up flush allows for.
+func TestModelFenceRefreshIsNotDelayedByMarkerRenewal(t *testing.T) {
+	ctx := context.Background()
+	prev := modelMarkerKeepAliveInterval
+	modelMarkerKeepAliveInterval = time.Millisecond
+	t.Cleanup(func() { modelMarkerKeepAliveInterval = prev })
+
+	kv := newFlakyKV()
+	_, err := kv.Put(ctx, modelMarkerKey, []byte("m-1"))
+	require.NoError(t, err)
+	var renewing atomic.Bool
+	kv.hangPut = func(key string) bool { return key == modelMarkerKey } // the renewal's Update blocks
+	kv.afterGet = func(key string) {
+		if key == modelMarkerKey {
+			renewing.Store(true)
+		}
+	}
+
+	f := &modelFence{}
+	watchCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.watch(watchCtx, kv, "m-1", time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	require.Eventually(t, renewing.Load, time.Second, time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // the renewal is now blocked in its Update
+
+	_, err = kv.MockKeyValue.Put(ctx, modelMarkerKey, []byte("m-2"))
+	require.NoError(t, err)
+	assert.Eventually(t, f.isBlocked, 500*time.Millisecond, time.Millisecond,
+		"the fence closes while a renewal is still hanging")
+}
+
+// TestModelFollowUpDelayCoversTheSlowestWritePath ties the follow-up delay to
+// the timings it must outlast, so changing one of them cannot silently leave a
+// gap.
+func TestModelFollowUpDelayCoversTheSlowestWritePath(t *testing.T) {
+	slowest := modelFenceInterval + 2*modelMarkerReadTimeout + cacheWriteTimeout
+	assert.Greater(t, modelFollowUpDelay, slowest,
+		"the follow-up flush must run after an outdated replica's last possible write")
+	assert.Greater(t, modelFollowUpDelay, invalidationFallbackTimeout)
+}

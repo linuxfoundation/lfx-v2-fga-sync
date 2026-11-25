@@ -64,10 +64,15 @@ const (
 	// leave the global fallback with nothing.
 	modelMarkerReadTimeout = 2 * time.Second
 	// modelFollowUpDelay is how long after announcing a model the replica bumps
-	// the global key once more. It must exceed invalidationFallbackTimeout so a
-	// write that read the previous model ID just before the announcement has
-	// finished writing its scoped markers first.
-	modelFollowUpDelay = 10 * time.Second
+	// the global key once more. It must outlast the slowest path by which a
+	// replica on the previous model can still write after the announcement: it
+	// notices the new marker within modelFenceInterval plus two marker reads
+	// (the poll in flight when the marker lands, then the next one), and a cache
+	// write it had already started can run for cacheWriteTimeout. With the
+	// defaults that is 2s + 2*2s + 5s = 11s. A scoped marker write started just
+	// before the announcement is covered by invalidationFallbackTimeout, which is
+	// shorter. The margin absorbs scheduling delays.
+	modelFollowUpDelay = 15 * time.Second
 
 	// modelMarkerWriteAttempts bounds how often one announcement re-reads the
 	// marker after losing a race to another replica's write.
@@ -625,6 +630,14 @@ type modelFence struct {
 	// later expires: a missing marker only means "nobody has announced" for a
 	// replica that has never seen another model.
 	sawOther atomic.Bool
+	// announceAgain, when set, announces this replica's model again. It is used
+	// when the marker has gone missing after a different model was seen: nothing
+	// renews another model's marker once its replicas are gone, so without it a
+	// replica left on the older model, for instance after a rollback, would stay
+	// fenced until it restarted.
+	// It gets a short-lived context for the announcement itself and the
+	// replica's long-lived one for the follow-up flush it schedules.
+	announceAgain func(announceCtx, runCtx context.Context) error
 }
 
 // isBlocked reports whether write-backs and seeding must be skipped.
@@ -646,6 +659,9 @@ func (f *modelFence) refresh(ctx context.Context, bucket INatsKeyValue, modelID 
 	switch {
 	case errors.Is(err, jetstream.ErrKeyNotFound):
 		block = f.sawOther.Load()
+		if block && f.announceAgain != nil {
+			block = !f.tryAnnounceAgain(ctx)
+		}
 	case err != nil:
 		block = true
 	case string(entry.Value()) != modelID:
@@ -669,22 +685,56 @@ func (f *modelFence) refresh(ctx context.Context, bucket INatsKeyValue, modelID 
 	}
 }
 
-// watch refreshes the fence every interval until ctx ends, and keeps the
-// replica's own marker from expiring.
+// tryAnnounceAgain announces this replica's model again and reports whether the
+// fence may lift. It does not lift it if a newer model announced in the
+// meantime (the marker then names it, and the next refresh sees that) or if the
+// announcement failed; the next refresh tries again.
+func (f *modelFence) tryAnnounceAgain(ctx context.Context) bool {
+	announceCtx, cancel := context.WithTimeout(ctx, invalidationFallbackTimeout)
+	defer cancel()
+	err := f.announceAgain(announceCtx, ctx)
+	switch {
+	case err == nil:
+		f.sawOther.Store(false)
+		logger.InfoContext(ctx, "model marker expired after a different model was seen; announced this replica's model again")
+		return true
+	case errors.Is(err, errOutdatedModel):
+		return false
+	default:
+		logger.With(errKey, err).WarnContext(ctx, "could not announce the model again after the marker expired")
+		return false
+	}
+}
+
+// watch refreshes the fence every interval until ctx ends. It also keeps the
+// replica's own marker from expiring, on its own goroutine so a slow renewal
+// cannot delay the refresh that closes the fence.
 func (f *modelFence) watch(ctx context.Context, bucket INatsKeyValue, modelID string, interval time.Duration) {
+	var keepAlive sync.WaitGroup
+	keepAlive.Add(1)
+	go func(every time.Duration) {
+		defer keepAlive.Done()
+		ticker := time.NewTicker(every)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				keepModelMarkerAlive(ctx, bucket, modelID)
+			}
+		}
+	}(modelMarkerKeepAliveInterval)
+	defer keepAlive.Wait()
+
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	lastKeepAlive := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			f.refresh(ctx, bucket, modelID)
-			if time.Since(lastKeepAlive) >= modelMarkerKeepAliveInterval {
-				lastKeepAlive = time.Now()
-				keepModelMarkerAlive(ctx, bucket, modelID)
-			}
 		}
 	}
 }

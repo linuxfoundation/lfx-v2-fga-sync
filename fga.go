@@ -215,7 +215,14 @@ func (s FgaService) withModelFence(ctx context.Context) FgaService {
 	if s.invalidation.mode != invalidationScoped || s.invalidation.modelID == "" || s.cache.bucket == nil {
 		return s
 	}
-	fence := &modelFence{}
+	cache, modelID := s.cache, s.invalidation.modelID
+	fence := &modelFence{announceAgain: func(announceCtx, runCtx context.Context) error {
+		flushed, err := cache.announceModel(announceCtx, modelID)
+		if err == nil && flushed {
+			cache.followUpFlush(runCtx, modelFollowUpDelay)
+		}
+		return err
+	}}
 	fence.refresh(ctx, s.cache.bucket, s.invalidation.modelID)
 	go fence.watch(ctx, s.cache.bucket, s.invalidation.modelID, modelFenceInterval)
 	s.cache.fence = fence

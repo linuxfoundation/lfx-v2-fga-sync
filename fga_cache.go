@@ -67,6 +67,10 @@ var (
 	// stay identical. Change them in both repos and upgrade both services together.
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+	// cacheWriteTimeout bounds one write-back or seed write to the shared cache.
+	// modelFollowUpDelay is derived from it.
+	cacheWriteTimeout = 5 * time.Second
+
 	// cacheOpSem is the service-wide budget for JetStream KV operations. Every
 	// KV Get/Put in this file acquires a slot before the round-trip and
 	// releases it after, except the inv write in invalidate, which must never
@@ -368,7 +372,7 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 		wg.Add(1)
 		go func(key string) {
 			defer wg.Done()
-			timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			timeoutCtx, cancel := context.WithTimeout(ctx, cacheWriteTimeout)
 			defer cancel()
 
 			//nolint:errcheck // Cache seeding is best-effort after a successful OpenFGA write.
@@ -446,7 +450,7 @@ func (c CacheLayer) buildResponseAndWriteBack(
 					cacheWriteBacksFenced.Add(1)
 					return nil
 				}
-				putCtx, cancel := context.WithTimeout(putParent, 5*time.Second)
+				putCtx, cancel := context.WithTimeout(putParent, cacheWriteTimeout)
 				defer cancel()
 				if slotErr := withCacheOpSlot(putCtx, func() {
 					if _, err := c.bucket.Put(putCtx, cacheKey, []byte(allowedValue)); err != nil {

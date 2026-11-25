@@ -402,7 +402,7 @@ this itself, and access checks keep being answered throughout:
    whether or not its model graph loaded.
    - No marker, or one for an older model: it bumps `inv`, then writes the
      marker. The flush covers anything an old-model replica scoped before this
-     one started. About 10 seconds later it bumps `inv` once more, to cover a
+     one started. About 15 seconds later it bumps `inv` once more, to cover a
      write made between the flush and the marker. The marker goes last so it only
      ever means the flush completed; if the flush fails nothing is announced and
      the whole announcement is retried.
@@ -452,15 +452,23 @@ from OpenFGA otherwise.
 - **Lifting the fence.** A replica that has seen a different model stays fenced
   until the marker holds its own model ID again, even if the marker expires in
   the meantime. A replica that has never seen another model treats a missing
-  marker as "nobody has announced". Replicas renew their own marker hourly, so it
-  does not expire while a replica on that model is running.
+  marker as "nobody has announced". Replicas renew their own marker hourly, on a
+  separate goroutine so a slow renewal cannot delay the poll, so it does not
+  expire while a replica on that model is running. If the marker expires while a
+  replica is fenced (for example after a rollback, once the replicas on the newer
+  model are gone and nothing renews their marker), that replica announces its own
+  model again: it flushes, creates the marker and lifts the fence. If a newer
+  model announced in the meantime, it stays fenced.
 - **What clears the gap.** Whatever an outdated replica wrote before its next
-  poll is cleared by the follow-up flush, 10 seconds after the announcement. It
+  poll is cleared by the follow-up flush, 15 seconds after the announcement. It
   is retried up to 3 times and logs an error if it gives up.
-- **The residual window.** For up to about 10 seconds after an announcement, a
+- **The residual window.** For up to about 15 seconds after an announcement, a
   new-model replica can serve an answer that an old-model replica cached just
-  before it noticed (its poll can lag by up to 2 seconds, and the follow-up flush
-  runs after that). The announcement flushes before it writes the marker so that
+  before it noticed. The delay is chosen to outlast the slowest path: the old
+  replica notices within one 2-second poll plus two marker reads (the poll in
+  flight when the marker lands, then the next, 2 seconds each when the KV is
+  slow), and a cache write it had already started can take up to 5 seconds, 11
+  seconds in all. The announcement flushes before it writes the marker so that
   the marker only ever means the flush completed. That leaves the old replicas
   unfenced for the gap between those two back-to-back writes, which is far
   shorter than the poll lag, so ordering them the other way would not shrink the
@@ -470,7 +478,7 @@ No manual `inv` write is needed after a model change once every replica runs thi
 version, with two exceptions. A replica running an older version does not fence,
 so the first rollout that introduces this version still needs one `inv` write
 after it has drained. And the follow-up flush runs in the announcing replica, so
-if that replica exits within 10 seconds of announcing, or the follow-up gives up,
+if that replica exits within 15 seconds of announcing, or the follow-up gives up,
 write `inv` once the rollout has drained.
 
 ### Debugging cache behavior
