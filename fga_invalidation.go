@@ -114,6 +114,9 @@ const (
 	// globalReasonScopedWriteFailed means a scoped marker write failed and the
 	// write fell back to the global key.
 	globalReasonScopedWriteFailed = "scoped_write_failed"
+	// globalReasonWriteBackCleanup means a check's cache write-back was
+	// overtaken by an invalidation and could not be deleted.
+	globalReasonWriteBackCleanup = "write_back_cleanup"
 	// globalReasonModelMismatch means another replica announced a different
 	// authorization model, so this replica's graph cannot be trusted.
 	globalReasonModelMismatch = "model_mismatch"

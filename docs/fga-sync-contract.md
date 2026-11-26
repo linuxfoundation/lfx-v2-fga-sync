@@ -313,7 +313,7 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 | --- | --- |
 | Cache key | Base32-encoded relation tuple `rel.{encoded-relation}` |
 | Cache value | Raw text boolean: `true` or `false`; freshness uses the NATS KV entry timestamp |
-| Invalidation | Writes bump `inv` (global) or, in `scoped` mode, narrower markers; see [Invalidation scoping](#invalidation-scoping). A cached entry older than any marker that applies to it is stale |
+| Invalidation | Writes bump `inv` (global) or, in `scoped` mode, narrower markers; see [Invalidation scoping](#invalidation-scoping). A cached entry older than any marker that applies to it is stale. A check's answers are not cached if a marker that applies to them moves while the check runs; if they were already written and cannot all be deleted, `inv` is bumped instead |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
 
@@ -490,7 +490,9 @@ write `inv` once the rollout has drained.
   `could not build model graph` and for writes with conditions or unknown relations.
 - OTel spans for cache operations: `fga_sync.cache.lookup` (requested and
   hit/stale/miss counts for a `CheckRelationships` batch),
-  `fga_sync.cache.write_back` (number of cache puts), `fga_sync.cache.invalidate`
+  `fga_sync.cache.write_back` (number of cache puts, and
+  `fga_sync.cache.write_back.discarded` when an invalidation during the check
+  dropped its answers), `fga_sync.cache.invalidate`
   (the invalidation marker writes), and `fga_sync.cache.seed` (number of seeded keys),
   nested under the `nats.process` consumer span for the message being handled.
   Traces are sampled (`OTEL_TRACES_SAMPLER_ARG`), so use ratios, not absolute counts.
@@ -506,8 +508,10 @@ write `inv` once the rollout has drained.
     (`scoped` or `global`) and `fga_sync.cache.invalidate.markers` (keys written).
     A global span also carries `fga_sync.cache.invalidate.reason`: `mode_global`
     (scoped writes are off), `no_graph`, `conditioned_tuple`, `malformed_object`,
-    `unknown_relation`, `no_tuples`, or `scoped_write_failed` (a scoped marker
-    write failed and the write fell back to `inv`).
+    `unknown_relation`, `no_tuples`, `scoped_write_failed` (a scoped marker
+    write failed and the write fell back to `inv`), or `write_back_cleanup` (a
+    check's cache write-back was overtaken by an invalidation and could not be
+    deleted).
 - Log lines (info level, so they appear with `DEBUG=false`): at startup
   `cache invalidation mode configured` (with `mode` and `model_id`) and, in
   `scoped` mode, `model graph loaded; scoped cache invalidation enabled`; per

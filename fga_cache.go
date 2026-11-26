@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -65,6 +66,10 @@ var (
 	// duplicated in lfx-v2-indexer-service/internal/infrastructure/fgacache/keys.go
 	// and natskv.go. While both services read or write the same cache they must
 	// stay identical. Change them in both repos and upgrade both services together.
+	// fga-sync seeds without a guard only because its tuple writes never overlap
+	// (one consumer, MaxAckPending 1; see accessMutationConsumerConfig). Any other
+	// writer seeding this bucket concurrently must skip its seed when another
+	// invalidation lands during its write, as lfx-v2-indexer-service does.
 	cacheKeyEncoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 	// cacheWriteTimeout bounds one write-back or seed write to the shared cache.
@@ -78,6 +83,12 @@ var (
 	// never across an OpenFGA call, so a slow BatchCheck cannot hold cache
 	// capacity hostage.
 	cacheOpSem = make(chan struct{}, cacheOpConcurrency)
+
+	// writeBackCleanupTimeout bounds each step of removing an overtaken
+	// write-back: the deletes, then the fallback marker write. Both steps
+	// together, after the 10s handler deadline, must stay under the
+	// caller's 15s request timeout.
+	writeBackCleanupTimeout = 2 * time.Second
 )
 
 func init() {
@@ -205,6 +216,8 @@ func (c CacheLayer) invalidationBucket(ctx context.Context) (INatsKeyValue, erro
 // duplicated in lfx-v2-indexer-service/internal/infrastructure/fgacache/keys.go
 // and natskv.go. While both services read or write the same cache they must
 // stay identical. Change them in both repos and upgrade both services together.
+// Seeding is safe here only because fga-sync's tuple writes never overlap; see
+// the note on cacheKeyEncoder.
 //
 // invalidate writes the inv timestamp key. Any cached entry whose KV creation
 // time predates this write is treated as stale on the next lookup. It is a
@@ -396,17 +409,25 @@ func (c CacheLayer) seedPositiveEntries(ctx context.Context, cacheKeys []string)
 // parallel lookup pass) and returns the extended slice.
 //
 // Cache write-backs are fanned out with bounded concurrency once the message
-// is assembled. g.Wait() blocks before this function returns, so they
+// is assembled. writeBack waits for them before this function returns, so they
 // complete within the request's lifetime; the fan-out only bounds how many
 // run at once, not whether the reply waits for them. With a nil bucket the
 // result lines are still assembled and no write-backs are queued.
+//
+// before holds the invalidation cutoffs the cache lookup used, and scoped
+// whether they include scoped markers; writeBack uses them to drop answers
+// that an invalidation has overtaken.
 func (c CacheLayer) buildResponseAndWriteBack(
 	ctx context.Context,
 	message []byte,
 	result map[string]openfga.BatchCheckSingleResult,
 	mapCorrelationIDToTuple map[string]ClientBatchCheckItem,
+	before invalidationCutoffs,
+	scoped bool,
 ) []byte {
-	cachePuts := make([]func(context.Context) error, 0, len(result))
+	cachePuts := make([]func(context.Context), 0, len(result))
+	cacheKeys := make([]string, 0, len(result))
+	cachedItems := make([]ClientBatchCheckItem, 0, len(result))
 
 	for correlationID, resp := range result {
 		// This is the specific request tuple that the response corresponds to.
@@ -445,10 +466,12 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		} else if shouldCache && c.bucket != nil {
 			cacheKey := "rel." + cacheKeyEncoder.EncodeToString([]byte(relationKey))
 			allowedValue := allowed
-			cachePuts = append(cachePuts, func(putParent context.Context) error {
+			cacheKeys = append(cacheKeys, cacheKey)
+			cachedItems = append(cachedItems, req)
+			cachePuts = append(cachePuts, func(putParent context.Context) {
 				if c.fence.isBlocked() {
 					cacheWriteBacksFenced.Add(1)
-					return nil
+					return
 				}
 				putCtx, cancel := context.WithTimeout(putParent, cacheWriteTimeout)
 				defer cancel()
@@ -459,7 +482,6 @@ func (c CacheLayer) buildResponseAndWriteBack(
 				}); slotErr != nil {
 					logger.With(errKey, slotErr).ErrorContext(putCtx, "failed to cache relation")
 				}
-				return nil
 			})
 		}
 	}
@@ -468,27 +490,101 @@ func (c CacheLayer) buildResponseAndWriteBack(
 		putCtx, putSpan := tracer.Start(ctx, "fga_sync.cache.write_back",
 			trace.WithAttributes(attribute.Int("fga_sync.cache.write_back.puts", len(cachePuts))),
 		)
-
-		g, gctx := errgroup.WithContext(putCtx)
-		g.SetLimit(cacheLookupConcurrency)
-		for _, put := range cachePuts {
-			g.Go(func() error {
-				select {
-				case <-gctx.Done():
-					return nil
-				default:
-					return put(gctx)
-				}
-			})
+		discarded, err := c.writeBack(putCtx, before, scoped, cachedItems, cachePuts, cacheKeys)
+		putSpan.SetAttributes(attribute.Bool("fga_sync.cache.write_back.discarded", discarded))
+		if err != nil {
+			putSpan.RecordError(err)
 		}
-		// Every closure above always returns nil (cache-write failures are
-		// already logged per-entry, not propagated), so g.Wait() can only
-		// ever return nil here; it is called solely to block until all
-		// writes finish.
-		//nolint:errcheck // g.Wait() can only return nil; see comment above.
-		_ = g.Wait()
 		putSpan.End()
 	}
 
 	return message
+}
+
+// writeBack runs the queued cache writes unless the cutoff of any written item
+// has moved past before, and removes them if one moves while they run. An
+// entry written after an invalidation looks fresh, so an answer from before a
+// revocation would otherwise outlive it. It reports whether the answers were
+// discarded, and the error of the marker write when removing them failed.
+func (c CacheLayer) writeBack(
+	ctx context.Context, before invalidationCutoffs, scoped bool,
+	items []ClientBatchCheckItem, puts []func(context.Context), keys []string,
+) (bool, error) {
+	if c.invalidatedSince(ctx, before, scoped, items) {
+		return true, nil
+	}
+	runBounded(ctx, len(puts), func(putCtx context.Context, i int) { puts[i](putCtx) })
+	if !c.invalidatedSince(ctx, before, scoped, items) {
+		return false, nil
+	}
+	return true, c.removeWriteBack(ctx, keys)
+}
+
+// invalidatedSince re-reads the markers before was built from and reports
+// whether any item's cutoff has moved. A marker that cannot be read, now or
+// when before was built, counts as moved: with no baseline, a revocation
+// since the check started cannot be ruled out.
+func (c CacheLayer) invalidatedSince(
+	ctx context.Context, before invalidationCutoffs, scoped bool, items []ClientBatchCheckItem,
+) bool {
+	global, err := c.getLastInvalidation(ctx)
+	if err != nil {
+		return true
+	}
+	current := invalidationCutoffs{global: global}
+	if scoped {
+		current = c.loadInvalidationCutoffs(ctx, global, items)
+	}
+	for _, item := range items {
+		was, now := before.cutoffFor(item), current.cutoffFor(item)
+		if was.kind == markerKindUnreadable || now.kind == markerKindUnreadable || now.at.After(was.at) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeWriteBack deletes written answers, and writes the marker only if a
+// delete fails. Deleting comes first: a marker write here would make every
+// other in-flight write-back discard its answers and could make it write the
+// marker in turn. A delete skipped at the deadline counts as failed, and the
+// marker write gets its own deadline so slow deletes cannot use it up.
+func (c CacheLayer) removeWriteBack(ctx context.Context, keys []string) error {
+	deleteCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
+	defer cancel()
+	var deleted atomic.Int64
+	runBounded(deleteCtx, len(keys), func(_ context.Context, i int) {
+		var err error
+		slotErr := withCacheOpSlot(deleteCtx, func() { err = c.bucket.Delete(deleteCtx, keys[i]) })
+		if slotErr == nil && err == nil {
+			deleted.Add(1)
+		}
+	})
+	if deleted.Load() == int64(len(keys)) {
+		return nil
+	}
+	logger.WarnContext(ctx, "could not remove cache write-back overtaken by an invalidation; invalidating the cache")
+	invCtx, invCancel := context.WithTimeout(context.WithoutCancel(ctx), writeBackCleanupTimeout)
+	defer invCancel()
+	return c.invalidate(invCtx, globalReasonWriteBackCleanup)
+}
+
+// runBounded calls fn for each index in [0, n), at most cacheLookupConcurrency
+// at a time, and returns when all calls are done. Calls not yet started when
+// ctx is done are skipped.
+func runBounded(ctx context.Context, n int, fn func(context.Context, int)) {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(cacheLookupConcurrency)
+	for i := range n {
+		g.Go(func() error {
+			select {
+			case <-gctx.Done():
+			default:
+				fn(gctx, i)
+			}
+			return nil
+		})
+	}
+	//nolint:errcheck // every call returns nil; Wait only blocks until they finish.
+	_ = g.Wait()
 }

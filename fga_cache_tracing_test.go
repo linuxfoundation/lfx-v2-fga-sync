@@ -273,6 +273,7 @@ func TestWriteBackPutsRunUnderWriteBackSpan(t *testing.T) {
 			putSpanCtx = trace.SpanContextFromContext(args.Get(0).(context.Context))
 		}).
 		Return(uint64(1), nil)
+	kv.On("Get", mock.Anything, "inv").Return(nil, jetstream.ErrKeyNotFound)
 
 	result := map[string]openfga.BatchCheckSingleResult{
 		"1": {Allowed: openfga.PtrBool(true)},
@@ -280,7 +281,9 @@ func TestWriteBackPutsRunUnderWriteBackSpan(t *testing.T) {
 	mapping := map[string]ClientBatchCheckItem{
 		"1": {User: "user:a", Relation: "viewer", Object: "obj1"},
 	}
-	CacheLayer{bucket: kv}.buildResponseAndWriteBack(context.Background(), nil, result, mapping)
+	CacheLayer{bucket: kv}.buildResponseAndWriteBack(
+		context.Background(), nil, result, mapping, invalidationCutoffs{}, false,
+	)
 
 	spans := spansNamed(sr, "fga_sync.cache.write_back")
 	require.Len(t, spans, 1)

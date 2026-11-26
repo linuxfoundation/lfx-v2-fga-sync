@@ -67,6 +67,10 @@ func (k *keyRecordingKV) PutString(_ context.Context, key, _ string) (uint64, er
 	return k.Put(context.Background(), key, nil)
 }
 
+func (k *keyRecordingKV) Delete(context.Context, string, ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+
 func loadCacheKeyGolden(t *testing.T) cacheKeyGolden {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/cache_key_golden.json")
@@ -94,7 +98,7 @@ func TestCacheKeyMatchesGolden(t *testing.T) {
 
 			result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
 			cache.buildResponseAndWriteBack(context.Background(), nil, result,
-				map[string]client.ClientBatchCheckItem{"1": tuple})
+				map[string]client.ClientBatchCheckItem{"1": tuple}, invalidationCutoffs{}, false)
 			assert.Equal(t, []string{tc.Want}, kv.puts, "buildResponseAndWriteBack write key")
 		})
 	}
@@ -127,7 +131,7 @@ func TestCacheKeyBoundForLongestAcceptedLine(t *testing.T) {
 			cache.lookupEntry(context.Background(), tuple, invalidationCutoff{})
 			result := map[string]openfga.BatchCheckSingleResult{"1": {Allowed: openfga.PtrBool(true)}}
 			cache.buildResponseAndWriteBack(context.Background(), nil, result,
-				map[string]client.ClientBatchCheckItem{"1": tuple})
+				map[string]client.ClientBatchCheckItem{"1": tuple}, invalidationCutoffs{}, false)
 
 			for _, key := range append(kv.gets, kv.puts...) {
 				assert.LessOrEqual(t, len(key), maxKeyBytes)

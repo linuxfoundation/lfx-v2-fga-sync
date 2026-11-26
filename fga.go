@@ -116,6 +116,7 @@ type INatsKeyValue interface {
 	Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error)
 	Put(context.Context, string, []byte) (uint64, error)
 	PutString(context.Context, string, string) (uint64, error)
+	Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error
 	// Create and Update are the revision-checked writes. They return
 	// jetstream.ErrKeyExists when the key exists or has moved on from revision.
 	Create(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt) (uint64, error)
@@ -609,10 +610,15 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 		})
 	}
 
+	// With the cache disabled the write-back has no invalidation read to guard
+	// against, so answers are not written back.
+	writeBack := CacheLayer{}
+	var cutoffs invalidationCutoffs
 	if !s.useCache {
 		// Cache disabled; all tuples go straight to OpenFGA.
 		tuplesToCheck = append(tuplesToCheck, tupleItems...)
 	} else {
+		writeBack = s.cache
 		// Get the most recent cache invalidation. Only read when the cache is
 		// enabled: the read holds a cacheOpSem slot, and its result is unused
 		// otherwise.
@@ -637,7 +643,7 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 			),
 		)
 
-		cutoffs := invalidationCutoffs{global: lastInvalidation}
+		cutoffs = invalidationCutoffs{global: lastInvalidation}
 		if s.invalidation.readsScoped() {
 			cutoffs = s.cache.loadInvalidationCutoffs(lookupCtx, lastInvalidation, tupleItems)
 		}
@@ -713,7 +719,9 @@ func (s FgaService) CheckRelationships(ctx context.Context, tuples []ClientCheck
 	}
 
 	// Assemble result lines and fan out cache write-backs.
-	message = s.cache.buildResponseAndWriteBack(ctx, message, *batchResp.Result, mapCorrelationIDToTuple)
+	message = writeBack.buildResponseAndWriteBack(
+		ctx, message, *batchResp.Result, mapCorrelationIDToTuple, cutoffs, s.invalidation.readsScoped(),
+	)
 
 	if len(message) < 1 {
 		// This shouldn't happen (*batchResp was checked for ==0 above with an

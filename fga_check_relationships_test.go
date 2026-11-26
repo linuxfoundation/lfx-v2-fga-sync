@@ -55,6 +55,10 @@ func (k *perKeyErrorKV) PutString(context.Context, string, string) (uint64, erro
 	return 1, nil
 }
 
+func (k *perKeyErrorKV) Delete(context.Context, string, ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+
 // fixedEntry is a jetstream.KeyValueEntry with a fixed value/creation time,
 // used to script cache hits and stale hits deterministically.
 type fixedEntry struct {
@@ -308,6 +312,10 @@ func (k *concurrencyTrackingKV) PutString(context.Context, string, string) (uint
 	return 1, nil
 }
 
+func (k *concurrencyTrackingKV) Delete(context.Context, string, ...jetstream.KVDeleteOpt) error {
+	return nil
+}
+
 // TestCheckRelationshipsBoundsCacheLookupConcurrency proves the cache-lookup
 // fan-out in CheckRelationships actually overlaps (not a hidden serial loop
 // in disguise) while staying within cacheLookupConcurrency, the invariant the
@@ -399,7 +407,9 @@ func TestAppendToMessageBoundsCachePutConcurrency(t *testing.T) {
 	}
 
 	start := time.Now()
-	message := service.cache.buildResponseAndWriteBack(context.Background(), nil, result, mapCorrelationIDToTuple)
+	message := service.cache.buildResponseAndWriteBack(
+		context.Background(), nil, result, mapCorrelationIDToTuple, invalidationCutoffs{}, false,
+	)
 	elapsed := time.Since(start)
 
 	lines := strings.Split(strings.TrimRight(string(message), "\n"), "\n")

@@ -56,6 +56,10 @@ func (m *MockNatsKeyValue) PutString(ctx context.Context, key string, value stri
 	return args.Get(0).(uint64), args.Error(1)
 }
 
+func (m *MockNatsKeyValue) Delete(ctx context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+	return m.Called(ctx, key).Error(0)
+}
+
 // TestCacheKeyEncoding tests the cache key encoding functionality
 func TestCacheKeyEncoding(t *testing.T) {
 	tests := []struct {

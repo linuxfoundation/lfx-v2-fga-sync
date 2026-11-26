@@ -232,6 +232,19 @@ func (m *MockKeyValue) PutString(ctx context.Context, key, value string) (uint64
 	return m.Put(ctx, key, []byte(value))
 }
 
+// Delete implements the jetstream.KeyValue interface
+func (m *MockKeyValue) Delete(_ context.Context, key string, _ ...jetstream.KVDeleteOpt) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.returnError != nil {
+		return m.returnError
+	}
+	delete(m.data, key)
+	delete(m.createdTimes, key)
+	return nil
+}
+
 // SetNotFound implements the jetstream.KeyValue interface
 func (m *MockKeyValue) SetNotFound(key string) {
 	m.mu.Lock()
