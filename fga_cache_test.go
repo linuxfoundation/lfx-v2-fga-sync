@@ -359,7 +359,7 @@ func TestCacheLayerRecoveryConcurrentCopies(t *testing.T) {
 // the order of writes is exact. onRelPut, when set, runs before each write of a
 // relation key. Reads of inv fail once more than invGetsOK have succeeded.
 // With deleteBlocks, Delete waits until its context is done. The first read
-// of failOnce fails.
+// of failOnce fails. Writes of inv fail with invPutErr when it is set.
 type clockKV struct {
 	mu           sync.Mutex
 	tick         int
@@ -369,6 +369,7 @@ type clockKV struct {
 	deleteBlocks bool
 	invGets      int
 	invGetsOK    int
+	invPutErr    error
 	failOnce     string
 }
 
@@ -406,6 +407,9 @@ func (k *clockKV) Put(ctx context.Context, key string, value []byte) (uint64, er
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if key == "inv" && k.invPutErr != nil {
+		return 0, k.invPutErr
+	}
 	k.tick++
 	k.entries[key] = fixedEntry{value: value, created: time.Unix(0, 0).Add(time.Duration(k.tick) * time.Millisecond)}
 	return uint64(k.tick), nil
@@ -477,18 +481,20 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		mode            invalidationMode
-		marker          string
-		existingMarker  bool
-		revokeInCheck   bool
-		revokeInWrite   bool
-		deleteErr       error
-		deleteBlocks    bool
-		invGetsOK       int
-		failOnce        string
-		wantCached      bool
-		wantNoRelWrites bool
+		name             string
+		mode             invalidationMode
+		marker           string
+		existingMarker   bool
+		revokeInCheck    bool
+		revokeInWrite    bool
+		deleteErr        error
+		deleteBlocks     bool
+		invGetsOK        int
+		invPutErr        error
+		failOnce         string
+		wantCached       bool
+		wantNoRelWrites  bool
+		wantWriteBackErr bool
 	}{
 		{name: "no invalidation, no marker yet", wantCached: true},
 		{name: "no invalidation, existing marker", existingMarker: true, wantCached: true},
@@ -512,6 +518,13 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 			marker: userMarkerKey("project", tuple.User), revokeInWrite: true,
 		},
 		{
+			// The known limit: with both cleanup steps failing the overtaken
+			// answer stays readable until its TTL or a later invalidation.
+			name: "scoped mode, user marker moves during the write-back, delete and inv write fail", mode: invalidationScoped,
+			marker: userMarkerKey("project", tuple.User), revokeInWrite: true,
+			deleteErr: assert.AnError, invPutErr: assert.AnError, wantCached: true, wantWriteBackErr: true,
+		},
+		{
 			name: "scoped mode, another user's marker moves", mode: invalidationScoped,
 			marker: userMarkerKey("project", "user:other-user"), revokeInCheck: true, wantCached: true,
 		},
@@ -524,10 +537,12 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
+			spans := useRecordingTracer(t)
 			kv := newClockKV()
 			kv.deleteErr = tt.deleteErr
 			kv.deleteBlocks = tt.deleteBlocks
 			kv.invGetsOK = tt.invGetsOK
+			kv.invPutErr = tt.invPutErr
 			kv.failOnce = tt.failOnce
 			if tt.deleteBlocks {
 				timeout := writeBackCleanupTimeout
@@ -554,6 +569,8 @@ func TestCheckWriteBackRacingInvalidation(t *testing.T) {
 			result, err := service.CheckRelationships(ctx, []client.ClientCheckRequest{tuple})
 			require.NoError(t, err, "the guard must never fail the check")
 			assert.Equal(t, "project:example#viewer@user:example-user\ttrue", string(result))
+			assert.Equal(t, tt.wantWriteBackErr, hasException(spansNamed(spans, "fga_sync.cache.write_back")),
+				"write-back span records the error")
 
 			if tt.wantNoRelWrites {
 				assert.Zero(t, kv.relEntries(), "no write-back is left when the marker cannot be re-read")

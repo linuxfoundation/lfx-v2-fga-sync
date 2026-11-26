@@ -316,6 +316,7 @@ fga-sync caches access check results in a NATS JetStream KV bucket (`fga-sync-ca
 | Invalidation | Writes bump `inv` (global) or, in `scoped` mode, narrower markers; see [Invalidation scoping](#invalidation-scoping). A cached entry older than any marker that applies to it is stale. A check's answers are not cached if a marker that applies to them moves while the check runs; if they were already written and cannot all be deleted, `inv` is bumped instead |
 | Stale handling | Stale hits are counted separately at `/debug/vars` and then rechecked against OpenFGA |
 | Fallback | Cache miss falls through to a direct OpenFGA query |
+| `USE_CACHE=false` | Checks go straight to OpenFGA and their answers are not written back. Tuple writes still bump the invalidation markers and seed granted entries, so replicas that read the cache stay correct |
 
 ### Invalidation scoping
 
@@ -372,11 +373,13 @@ Roll out in two steps: deploy `read-scoped` to every replica, then switch to
 from cache until the entry's TTL if another replica writes only scoped markers.
 
 Every other consumer of the shared cache must honor scoped markers before any
-replica runs `scoped`. The indexer's `fgacache` currently reads only the global
-`inv` key, so it would accept cached grants after a scoped-only revocation.
-Upgrade it to a version that reads scoped markers first, or disable its shared
-cache reads and writes, and keep that in place during rollback until every
-scoped writer has drained and the `inv` flush below has succeeded.
+replica runs `scoped`. The indexer does not read cached checks; it bumps `inv`
+and seeds entries, and since
+[lfx-v2-indexer-service#107](https://github.com/linuxfoundation/lfx-v2-indexer-service/pull/107)
+its seeds honor the scoped markers and `inv.model`. An indexer older than that
+must have its shared cache disabled before any replica runs `scoped`, and kept
+disabled during rollback until every scoped writer has drained and the `inv`
+flush below has succeeded.
 
 Roll back in the reverse order, one step at a time. Do not go straight from
 `scoped` to `global`: a replica still on `scoped` keeps writing scoped markers

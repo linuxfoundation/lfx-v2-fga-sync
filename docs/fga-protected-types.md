@@ -21,7 +21,7 @@ For human onboarding (adding a new service to this list), see
 | Service | Object Types | FGA Contract |
 |---|---|---|
 | [lfx-v2-project-service](https://github.com/linuxfoundation/lfx-v2-project-service) | `project` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-project-service/blob/main/docs/fga-contract.md) |
-| [lfx-v2-committee-service](https://github.com/linuxfoundation/lfx-v2-committee-service) | `committee` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-committee-service/blob/main/docs/fga-contract.md) |
+| [lfx-v2-committee-service](https://github.com/linuxfoundation/lfx-v2-committee-service) | `committee`, `committee_application`, `committee_invite` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-committee-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-meeting-service](https://github.com/linuxfoundation/lfx-v2-meeting-service) | `v1_meeting`, `v1_past_meeting` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-meeting-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-voting-service](https://github.com/linuxfoundation/lfx-v2-voting-service) | `vote`, `vote_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-voting-service/blob/main/docs/fga-contract.md) |
 | [lfx-v2-survey-service](https://github.com/linuxfoundation/lfx-v2-survey-service) | `survey`, `survey_response` | [fga-contract.md](https://github.com/linuxfoundation/lfx-v2-survey-service/blob/main/docs/fga-contract.md) |
@@ -51,6 +51,8 @@ FGA contract: [docs/fga-contract.md](https://github.com/linuxfoundation/lfx-v2-c
 | Object type | Operations |
 |-------------|------------|
 | `committee` | `update_access`, `delete_access`, `member_put`, `member_remove` |
+| `committee_application` | `update_access`, `delete_access` |
+| `committee_invite` | `update_access`, `delete_access` |
 
 ### Meetings: `lfx-v2-meeting-service`
 
@@ -67,7 +69,7 @@ FGA contract: [docs/fga-contract.md](https://github.com/linuxfoundation/lfx-v2-v
 
 | Object type | Operations |
 |-------------|------------|
-| `vote` | `update_access`, `delete_access` |
+| `vote` | `update_access`, `delete_access`, `member_put`, `member_remove` |
 | `vote_response` | `update_access`, `delete_access` |
 
 ### Surveys: `lfx-v2-survey-service`
@@ -95,11 +97,12 @@ FGA contract: [docs/fga-contract.md](https://github.com/linuxfoundation/lfx-v2-m
 | Object type | Operations |
 |-------------|------------|
 | `b2b_org` | `update_access`, `delete_access` |
-| `project_membership` | `member_put`, `member_remove` |
+| `project_membership` | `update_access`, `delete_access`, `member_put`, `member_remove` |
 
-> `project_membership` only carries the `key_contact` relation, managed via
-> `member_put`/`member_remove`; the member service does not issue `update_access`
-> or `delete_access` for `project_membership` objects directly.
+> `project_membership` carries its `b2b_org` and `project` references through
+> `update_access` and its `key_contact` relation through
+> `member_put`/`member_remove`; `delete_access` removes a purged membership's
+> tuples.
 
 ---
 
