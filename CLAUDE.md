@@ -78,20 +78,11 @@ build/test/lint workflow. Quick reference:
 
 ### Go version
 
-This repo targets Go 1.27.x (currently 1.27.4, the latest patch). This
-supersedes the Go version policy in the `lfx-megalinter` skill, which targets
-the latest stable minor minus one: don't move `go.mod` back to Go 1.26. Take
-every 1.27.x patch release, and update `go.mod`, this file and `README.md`
-together. The build and release workflows read the Go version from `go.mod`
-through `go-version-file`.
-
-MegaLinter (v10.2.0) runs Go 1.26.10 in its image, so
-`.github/workflows/mega-linter.yml` sets `GOTOOLCHAIN: auto` to let its Go
-linters download the `go.mod` toolchain. Its bundled golangci-lint 2.15.0 is
-built with Go 1.27.0 and lints this module with `.golangci.yml`, which also
-runs gosec. `.mega-linter.yml` lists the enabled linters in
-`ENABLE_LINTERS`, so MegaLinter's vulnerability scanners (osv-scanner, grype,
-trivy) don't run here.
+**Go toolchain version**: Follow the `lfx-megalinter` skill's Go version policy.
+It sets `go.mod` to the latest patch of the previous stable Go minor and caps it
+at the minor bundled by the pinned MegaLinter release. This importable module
+declares the minimum allowed by its dependencies in `go` and pins the patch
+in `toolchain`.
 
 ## Configuration
 
@@ -166,8 +157,9 @@ Key invariants enforced there:
 # Set environment variables
 export NATS_URL="nats://localhost:4222"
 export OPENFGA_API_URL="http://localhost:8080"
-export OPENFGA_STORE_ID="01K1GTJZW163H839J3YZHD8ZRY"
-export OPENFGA_AUTH_MODEL_ID="01K1H4TFHDSBCZVZ5EP6HHDWE6"
+# Set these IDs from the OpenFGA store and authorization model created during provisioning.
+export OPENFGA_STORE_ID="<store-id>"
+export OPENFGA_AUTH_MODEL_ID="<authorization-model-id>"
 
 # Run the service
 make run
@@ -176,17 +168,23 @@ make run
 ### Kubernetes
 
 ```bash
-# Deploy with Helm
+# Deploy without fga-operator.
 helm install fga-sync ./charts/lfx-v2-fga-sync \
   --set nats.url=nats://lfx-platform-nats.lfx.svc.cluster.local:4222 \
   --set fga.apiUrl=http://lfx-platform-openfga.lfx.svc.cluster.local:8080 \
-  --set fga.storeId=01K1GTJZW163H839J3YZHD8ZRY \
-  --set fga.modelId=01K1H4TFHDSBCZVZ5EP6HHDWE6
+  --set deployment.labels.openfga-store=null \
+  --set fga.storeId=$OPENFGA_STORE_ID \
+  --set fga.modelId=$OPENFGA_AUTH_MODEL_ID
 ```
+
+Clusters running `fga-operator` populate `OPENFGA_STORE_ID`/`OPENFGA_AUTH_MODEL_ID`
+automatically from the default `openfga-store` Deployment label. For standalone
+setups, remove that label as shown above; the chart omits the ID environment
+variables whenever the label is present, even if the operator is not running.
 
 ## Troubleshooting
 
-- **Build failures**: ensure Go matches `go.mod` (currently 1.27.4+) and run `go mod tidy`.
+- **Build failures**: ensure Go matches `go.mod` and run `go mod tidy`.
 - **NATS / OpenFGA connection**: verify `NATS_URL` and `OPENFGA_API_URL`.
 - **Cache or stale access checks**: see the cache behavior and "Debugging Access Issues"
   sections in `docs/fga-sync-contract.md` (covers `/debug/vars` counters, the

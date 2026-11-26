@@ -10,6 +10,9 @@ DOCKER_REGISTRY := linuxfoundation
 DOCKER_IMAGE := $(DOCKER_REGISTRY)/$(APP_NAME)
 DOCKER_TAG := $(APP_VERSION)
 
+# Run MegaLinter locally via Docker with the CI Go flavor.
+# Keep this digest in sync with .github/workflows/mega-linter.yml.
+MEGALINTER_IMAGE := ghcr.io/oxsecurity/megalinter-go@sha256:e676b8e9dac00d148bf1abb6ab809f1df76f07e804d8061f78631975d0c90925  # v10.2.0
 
 # Helm variables
 HELM_CHART_PATH=./charts/lfx-v2-fga-sync
@@ -87,6 +90,11 @@ lint:
 	else \
 		echo "golangci-lint not installed. Run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
 	fi
+
+.PHONY: megalinter
+megalinter:
+	docker pull $(MEGALINTER_IMAGE)
+	docker run --rm --platform linux/amd64 -e GOTOOLCHAIN=auto -v '$(CURDIR):/tmp/lint:rw' $(MEGALINTER_IMAGE)
 
 # Clean build artifacts
 .PHONY: clean
@@ -187,6 +195,7 @@ help:
 	@echo "  help           - Show this help message"
 	@echo "  install        - Install the binary"
 	@echo "  lint           - Run linter"
+	@echo "  megalinter     - Run MegaLinter via Docker"
 	@echo "  run            - Run the application"
 	@echo "  test           - Run tests"
 	@echo "  test-coverage  - Run tests with coverage"

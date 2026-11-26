@@ -1,6 +1,8 @@
 {
   "version": "0.2",
+  "flagWords": [],
   "ignorePaths": [
+    ".cspell.json",
     "bin/",
     "coverage.out",
     "coverage.html",
@@ -13,7 +15,12 @@
     "LICENSE-docs"
   ],
   "words": [
+    "zizmor",
+    "ZIZMOR",
+    "artipacked",
+    "startswith",
     "golangci",
+    "govulncheck",
     "openfga",
     "OPENSEARCH",
     "jetstream",
